@@ -1,0 +1,8 @@
+packages:
+  - "."
+  - "crates/*"
+  - "fixtures/*"
+onlyBuiltDependencies:
+  - "@tauri-apps/cli"
+  - "esbuild"
+  - "svelte-preprocess"

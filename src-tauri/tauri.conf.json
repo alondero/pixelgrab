@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PixelGrab",
+  "version": "0.1.0",
+  "identifier": "com.pixelgrab.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PixelGrab",
+        "width": 480,
+        "height": 360,
+        "minWidth": 320,
+        "minHeight": 240,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "visible": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "overlay",
+        "title": "PixelGrab Overlay",
+        "width": 800,
+        "height": 600,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "resizable": false,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Capture, annotate, and share desktop screenshots",
+    "longDescription": "PixelGrab is a local-first Windows desktop capture utility that lets you select, annotate, and share precise visual context from your desktop."
+  },
+  "plugins": {
+    "global-shortcut": {},
+    "single-instance": {},
+    "dialog": {},
+    "fs": {},
+    "clipboard-manager": {}
+  }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "pixelgrab-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Deterministic test adapters for PixelGrab - never capture real desktop content"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+indexmap = { workspace = true }
+png = { workspace = true }
+
+pixelgrab-contracts = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }
