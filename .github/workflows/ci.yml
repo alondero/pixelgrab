@@ -158,18 +158,18 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build
         # Tracer-01 ships only the synthetic platform. The real Windows
-        # platform adapter is introduced in tracer-02. The synthetic feature
-        # is enabled here so the binary compiles end-to-end; once the Windows
-        # platform ships this argument can be removed.
-        run: pnpm exec tauri build --no-bundle --features synthetic
+        # platform adapter is introduced in tracer-02, at which point the
+        # synthetic feature is removed from the default features in
+        # src-tauri/Cargo.toml.
+        run: pnpm exec tauri build --no-bundle
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pixelgrab-build
           path: |
-            src-tauri/target/release/pixelgrab.exe
-            src-tauri/target/release/pixelgrab_lib.lib
+            target/release/pixelgrab.exe
+            target/release/pixelgrab_lib.lib
           if-no-files-found: ignore
           retention-days: 7
 

@@ -53,4 +53,8 @@ tempfile = "3.13"
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
+# Tracer-01 ships only the synthetic platform. The real Windows platform
+# adapter is added in tracer-02 and the synthetic feature is then removed
+# from the default features.
 synthetic = ["dep:pixelgrab-test-support"]
+default = ["synthetic"]
