@@ -17,6 +17,13 @@ env:
   RUSTFLAGS: -D warnings
   RUSTUP_MAX_RETRIES: 1
   PNPM_VERSION: 9.15.0
+  # Force LF checkouts so all tools (cargo fmt, prettier, svelte-check)
+  # see the same bytes regardless of whether the runner is on Windows or
+  # Linux. .gitattributes already enforces eol=lf but the actions/checkout
+  # step on Windows still defaults to CRLF unless we explicitly opt out.
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "core.autocrlf"
+  GIT_CONFIG_VALUE_0: "false"
 
 jobs:
   install:

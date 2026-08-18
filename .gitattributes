@@ -1,0 +1,27 @@
+# Ensure source files are checked out with LF endings on every platform,
+# so cargo fmt, prettier, and the CI runners see the same bytes regardless
+# of whether the working tree is on Windows, macOS, or Linux.
+
+*               text=auto eol=lf
+
+# Shell scripts and tooling that must remain LF.
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.mjs           text eol=lf
+*.js            text eol=lf
+*.ts            text eol=lf
+*.svelte        text eol=lf
+*.json          text eol=lf
+*.jsonc         text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.toml          text eol=lf
+*.rs            text eol=lf
+*.md            text eol=lf
+*.html          text eol=lf
+*.css           text eol=lf
+
+# PNGs and ICOs are binary, do not touch.
+*.png           binary
+*.ico           binary
+*.icns          binary
