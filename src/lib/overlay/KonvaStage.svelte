@@ -305,13 +305,17 @@
   }
 
   function handleKey(event: KeyboardEvent) {
-    // The overlay listens for Escape (staged cancel) and Ctrl+C / Cmd+C
-    // (commit). The handlers are bound on `window` because the overlay
-    // window is borderless and does not receive keyboard focus by default.
+    // The overlay listens for Escape (staged cancel), Ctrl+C / Cmd+C
+    // (commit, tracer-02), and Enter (commit, tracer-07). The handlers
+    // are bound on `window` because the overlay window is borderless
+    // and does not receive keyboard focus by default.
     if (event.key === "Escape") {
       event.preventDefault();
       onCancel?.();
-    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+    } else if (
+      ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") ||
+      event.key === "Enter"
+    ) {
       if (lastSelection) {
         event.preventDefault();
         onCommit?.();

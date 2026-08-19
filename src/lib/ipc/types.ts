@@ -93,6 +93,64 @@ export interface CommitOutcome {
   shelfId?: string;
   pngPath?: string;
   pngBytes: number;
+  sizeBytes?: number;
+  createdAtMs?: number;
+}
+
+export interface UpdateCacheMetadataRequest {
+  shelfId: string;
+  metadata: {
+    title: string;
+    note: string;
+    tags: string[];
+  };
+}
+
+export interface DismissCacheEntryRequest {
+  shelfId: string;
+}
+
+export interface DismissCacheEntryResponse {
+  removed: boolean;
+  reason: "removed" | "still_locked" | "unknown_shelf_id";
+}
+
+export type LockOwner = "shelf" | "editor" | "drag" | "pin";
+
+export interface ShelfSnapshot {
+  entry?: CacheEntryDto;
+  position?: ShelfPosition;
+  locks?: LockOwner[];
+}
+
+export interface CacheEntryMetadata {
+  title: string;
+  note: string;
+  tags: string[];
+}
+
+export interface CacheEntryDto {
+  captureId: string;
+  shelfId: string;
+  pngPath: string;
+  bitmapPath?: string;
+  bounds: PhysicalBounds;
+  size: PhysicalSize;
+  sizeBytes: number;
+  metadata: CacheEntryMetadata;
+  createdAtMs: number;
+  lastAccessAtMs: number;
+  monitorId: string;
+}
+
+export interface ShelfPosition {
+  monitorId: string;
+  workArea: PhysicalBounds;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  marginPx: number;
 }
 
 export interface CommitResponse {
@@ -132,3 +190,7 @@ export interface PlatformErrorKind {
 export type IpcResponseOk<T> = { status: "ok"; data: T };
 export type IpcResponseErr = { status: "err"; error: PlatformErrorKind };
 export type IpcResponse<T> = IpcResponseOk<T> | IpcResponseErr;
+
+// Re-export the shelf card view so callers that already import from
+// `$lib/ipc/types` can use the event payload without a second import.
+export type { ShelfCardView } from "$lib/shelf/types";

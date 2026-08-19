@@ -221,6 +221,7 @@ ADRs are:
 - 0002 — Platform contracts
 - 0003 — Physical-coordinate ownership
 - 0004 — Packaged-app testing strategy
+- 0005 — Cache and one-card shelf (tracer-07)
 
 Additions and revisions must follow the template in
 [`docs/adr/README.md`](docs/adr/README.md). When a change supersedes a prior
@@ -240,3 +241,61 @@ The current tracer (tracer-01) is the foundation. It must:
 Subsequent tracers deliver the real capture pipeline, the multi-monitor
 overlay, the annotation tools, the shelf, the OLE drag, and the pin
 references. See the issues list for the full roadmap.
+
+## 12. Cache + shelf (tracer-07)
+
+Tracer 07 introduces the durable cache entry and the one-card shelf.
+The relevant code lives in:
+
+- `crates/pixelgrab-contracts/src/cache.rs` — `CacheEntry`,
+  `CacheEntryMetadata`, `ShelfPosition`, `LockOwner`. Mirrored in
+  `src/lib/ipc/types.ts`.
+- `src-tauri/src/cache/` — `atomic::write_atomic`, `locks::ActiveLockSet`,
+  `store::Cache`. The two-phase commit lives in `Cache::commit`.
+- `src-tauri/src/shelf/mod.rs` — the one borderless webview window
+  (`label = "shelf"`). Position calculation lives in
+  `pixelgrab_contracts::ShelfPosition::inside_primary_work_area`.
+
+### Two-phase commit
+
+Every capture commit writes assets first (PNG, optional bitmap,
+metadata), then the manifest. The manifest is the publish sentinel:
+the shelf only enumerates entries with a `manifest.json`. A crashed
+commit (assets present, no manifest) is reaped by
+`Cache::load_or_recover` on the next startup scan.
+
+### Active locks
+
+Every committed entry holds a `Shelf` lock for the duration of its
+card. Other consumers (editor, drag, pin) acquire additional locks as
+needed. Cleanup (`Cache::dismiss`) is rejected while any owner holds
+the lock; see `LockOwner` for the exhaustive list.
+
+### IPC surface
+
+New IPC commands (registered in `src-tauri/src/lib.rs`):
+
+- `request_commit` — runs the two-phase commit pipeline
+  (`flatten_crop` → optional clipboard → optional cache commit →
+  optional `save_as` PNG). The IPC layer publishes the clipboard
+  _before_ committing to the cache so a clipboard error never leaves
+  a phantom card. `session.finish()` runs once at the end of every
+  commit attempt so the session is always reset to `Idle` — even on
+  failure.
+- `update_cache_metadata` — atomic rewrite of `metadata.json` and
+  refresh of `manifest.json`'s `lastAccessAtMs`.
+- `dismiss_cache_entry` — releases the `Shelf` lock and reaps the
+  entry when no other locks remain. Emits
+  `pixelgrab://shelf-cleared` with a typed `{ shelfId }` payload so
+  the frontend listener can match its parameter.
+- `get_shelf_snapshot` — returns the current `ShelfSnapshot` for
+  frontend rehydration after a process restart.
+
+Events:
+
+- `pixelgrab://shelf-updated` carries a `ShelfCardView` serialised
+  from the latest `CacheEntry`. The shelf window subscribes to this
+  event in `src/shelf.ts`.
+- `pixelgrab://shelf-cleared` carries a typed
+  `ShelfClearedEvent { shelfId: string }` payload. Emitted when a
+  dismissal removes the entry from disk.

@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache::{CacheEntryMetadata, LockOwner, ShelfId, ShelfPosition};
 use crate::capture::CaptureResolution;
 use crate::coordinate::PhysicalBounds;
 use crate::error::PlatformError;
@@ -167,7 +168,9 @@ pub struct CommitRequest {
 pub struct CommitOutcome {
     /// Capture id (UUID v4) assigned by the Rust core.
     pub capture_id: String,
-    /// Shelf entry id, if `to_shelf` was true.
+    /// Shelf entry id, if `to_shelf` was true and the commit succeeded.
+    /// When the commit fails the field is `None`; the shelf never sees
+    /// a card for a failed commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shelf_id: Option<String>,
     /// Path the PNG was written to, if any.
@@ -175,6 +178,64 @@ pub struct CommitOutcome {
     pub png_path: Option<String>,
     /// PNG byte length, for diagnostics.
     pub png_bytes: u64,
+    /// Total cache-entry size on disk (PNG + bitmap + metadata +
+    /// manifest). Populated only when the entry was published.
+    #[serde(default)]
+    pub size_bytes: u64,
+    /// Wall-clock millis when the cache entry became durable.
+    #[serde(default)]
+    pub created_at_ms: i64,
+}
+
+/// Wire shape for `update_cache_metadata` IPC. The frontend sends the
+/// shelf id and the new editable metadata; the Rust core rewrites the
+/// `metadata.json` file atomically and updates the in-memory snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCacheMetadataRequest {
+    /// Shelf card id whose metadata should be replaced.
+    pub shelf_id: ShelfId,
+    /// New metadata body.
+    pub metadata: CacheEntryMetadata,
+}
+
+/// Wire shape for `dismiss_cache_entry` IPC. Removes a shelf card and
+/// attempts to delete the underlying cache entry. The Rust core rejects
+/// the dismissal when the entry has any active locks other than the
+/// `Shelf` owner the dismissal itself releases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissCacheEntryRequest {
+    /// Shelf card id to dismiss.
+    pub shelf_id: ShelfId,
+}
+
+/// Wire shape for `dismiss_cache_entry` IPC response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissCacheEntryResponse {
+    /// True when the entry was fully removed from the cache.
+    pub removed: bool,
+    /// Diagnostic string. One of `"removed"`, `"still_locked"`,
+    /// `"unknown_shelf_id"`.
+    pub reason: String,
+}
+
+/// Snapshot of the current shelf state returned by `get_shelf_snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfSnapshot {
+    /// Most-recently-committed cache entry, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<crate::cache::CacheEntry>,
+    /// Computed placement for the shelf window. Always populated when
+    /// an entry is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<ShelfPosition>,
+    /// Active lock owners on the current entry. Empty when no card is
+    /// visible.
+    #[serde(default)]
+    pub locks: Vec<LockOwner>,
 }
 
 /// A snapshot of the current session state for the UI.

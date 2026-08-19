@@ -59,14 +59,24 @@ add them here.
 
 ## Shelf
 
-- **Shelf** — the floating queue of recent captures that floats over the
-  taskbar.
+- **Shelf** — the floating queue of recent captures that floats over
+  the taskbar. Tracer 07 ships one card; later tracers stack more.
 - **Shelf card** — a single capture on the shelf. Exposes copy, save,
   pin, and dismiss actions.
+- **Shelf placement** — the shelf window is always 24 px inside the
+  primary monitor's work area, anchored to the bottom-right. The
+  calculation lives in
+  `pixelgrab_contracts::ShelfPosition::inside_primary_work_area`.
 - **Shelf timer** — the 60-second default countdown for each card. Hover
   pauses it; leave resumes with a three-second grace period.
+- **`pixelgrab://shelf-cleared`** — event the backend emits when a
+  dismissal removes an entry from disk. Carries a typed
+  `{ shelfId: string }` payload; the frontend uses it to clear its
+  local card.
 - **Pin** — a TopMost reference window that displays a captured image.
-  Independent of the shelf.
+  Independent of the shelf. Acquires a `LockOwner::Pin` lock on the
+  backing cache entry so the entry cannot be reaped while the pin is
+  alive.
 
 ## Delivery
 
@@ -89,10 +99,20 @@ add them here.
 
 - **Cache entry** — a single capture stored in the local cache. Has a
   PNG, an optional bitmap staging asset, optional metadata, a byte
-  size, a creation time, and a last-access time.
+  size, a creation time, and a last-access time. Each entry is a
+  directory under `<cache_root>/<capture_id>/` containing
+  `capture.png`, optional `bitmap.png`, `metadata.json`, and a final
+  `manifest.json` (the publish sentinel).
 - **Active lock** — a guard that prevents a cache entry from being
-  pruned while it is visible in the shelf or a pin window.
+  pruned while it is visible in the shelf or a pin window. Owners are
+  typed as `LockOwner::{Shelf, Editor, Drag, Pin}`. The cache always
+  holds a `Shelf` lock for the lifetime of the card.
+- **Two-phase commit** — the cache writes assets first (PNG, bitmap,
+  metadata), then writes the manifest. The manifest is the publish
+  sentinel; the shelf only ever sees entries with a manifest.
 - **LRU** — least-recently-used; the cache eviction order.
+- **Recovery scan** — the startup pass that reaps any partial entry
+  (assets present, manifest absent). Runs on every process start.
 
 ## Lifecycle
 
