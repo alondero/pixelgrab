@@ -11,3 +11,4 @@ src-tauri/gen
 Cargo.lock
 pnpm-lock.yaml
 fixtures/golden
+.claude/worktrees

@@ -125,6 +125,11 @@ jobs:
         run: pnpm test
       - name: License policy
         run: pnpm licenses:check
+      - name: Dependency audit
+        # Fails the build if any dependency has a known moderate or higher
+        # advisory. The audit data is fetched from the GitHub Advisory
+        # Database via `pnpm audit --audit-level=moderate`.
+        run: pnpm audit --audit-level=moderate
 
   build:
     name: Build (production)

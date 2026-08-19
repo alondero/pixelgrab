@@ -201,6 +201,17 @@ These rules are non-negotiable and are enforced by the test suite.
 - Failures that include captured content must scrub the content before
   uploading CI artifacts.
 
+## 9a. Accessibility expectations
+
+PixelGrab is usable from the keyboard alone, respects Windows text scaling,
+and never uses colour alone for state. The full checklist is in
+[`docs/ACCESSIBILITY.md`](docs/ACCESSIBILITY.md). Highlights:
+
+- Every interactive control exposes a visible label or `aria-label`.
+- Focus is always visible.
+- Selection and tool state use shape or weight in addition to colour.
+- Text renders cleanly at 100%, 125%, 150%, and 200% Windows scaling.
+
 ## 10. ADR expectations
 
 Architecture decisions are recorded as ADRs in `docs/adr/`. The current

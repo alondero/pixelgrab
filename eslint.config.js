@@ -19,6 +19,7 @@ export default [
       "**/*.cjs",
       "scripts/generate-icons.mjs",
       "scripts/generate-ico.mjs",
+      ".claude/**",
     ],
   },
   js.configs.recommended,
