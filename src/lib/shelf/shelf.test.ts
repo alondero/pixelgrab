@@ -172,4 +172,24 @@ describe("ShelfQueue", () => {
     });
     expect(queryByTestId("shelf-overflow")).toBeNull();
   });
+
+  it("renders an aria-live feedback region", () => {
+    const { getByTestId } = render(ShelfQueue, {
+      snapshot: makeSnapshot([makeCard("a")]),
+    });
+    const status = getByTestId("shelf-feedback");
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent?.trim()).toBe("");
+  });
+
+  it("surfaces the feedback prop in the aria-live region", () => {
+    const { getByTestId } = render(ShelfQueue, {
+      snapshot: makeSnapshot([makeCard("a")]),
+      feedback: { at: 0, text: "Copied to clipboard", kind: "success" },
+    });
+    const status = getByTestId("shelf-feedback");
+    expect(status.textContent).toBe("Copied to clipboard");
+    expect(status.getAttribute("data-kind")).toBe("success");
+  });
 });

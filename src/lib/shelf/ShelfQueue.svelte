@@ -2,13 +2,17 @@
   import type { ShelfQueueSnapshot } from "$lib/ipc/types";
   import ShelfCard from "./ShelfCard.svelte";
   import { createClockStore } from "./queue.svelte";
+  import type { FeedbackEntry } from "./feedback.svelte";
 
   // The shelf queue. Renders up to four cards side-by-side with an
   // expandable "+N" overflow group for older captures. The component
   // subscribes to `nowMs` via `requestAnimationFrame` so each card's
-  // countdown updates smoothly without a backend round-trip.
+  // countdown updates smoothly without a backend round-trip. The
+  // optional `feedback` prop surfaces quick-action success / error
+  // messages in an `aria-live="polite"` region.
   let {
     snapshot,
+    feedback = null,
     onCopy = () => {},
     onSaveAs = () => {},
     onDismiss = () => {},
@@ -17,6 +21,7 @@
     onTickExpired = () => {},
   }: {
     snapshot: ShelfQueueSnapshot | null;
+    feedback?: FeedbackEntry | null;
     onCopy?: (shelfId: string) => void;
     onSaveAs?: (shelfId: string) => void;
     onDismiss?: (shelfId: string) => void;
@@ -29,10 +34,10 @@
   let overflowOpen = $state(false);
 
   // Detect cards that just expired locally so we can notify the
-  // backend (the authoritative dismiss happens server-side). The
-  // `lastSeenExpired` set remembers which shelves we already
-  // reported so a card that lingers in the DOM for one frame after
-  // expiry doesn't fire twice.
+  // backend (the authoritative dismiss happens server-side via the
+  // background ticker AND the rAF-driven IPC). The `reportedExpired`
+  // set remembers which shelves we already reported so a card that
+  // lingers in the DOM for one frame after expiry doesn't fire twice.
   let reportedExpired = $state(new Set<string>());
 
   $effect(() => {
@@ -61,6 +66,17 @@
         if (live.has(id)) next.add(id);
       }
       reportedExpired = next;
+    }
+  });
+
+  // Stop the rAF clock loop when the queue empties so the shelf
+  // window does not leak requestAnimationFrame handles between
+  // sessions.
+  $effect(() => {
+    if (!snapshot || (snapshot.cards.length === 0 && snapshot.overflow.length === 0)) {
+      clock.stop();
+    } else {
+      clock.start();
     }
   });
 
@@ -106,6 +122,17 @@
   </div>
 {/if}
 
+<div
+  class="status"
+  data-testid="shelf-feedback"
+  data-kind={feedback?.kind ?? ""}
+  role="status"
+  aria-live="polite"
+  aria-atomic="true"
+>
+  {feedback?.text ?? ""}
+</div>
+
 <style>
   .queue {
     display: flex;
@@ -144,5 +171,30 @@
     flex-direction: column;
     gap: 8px;
     background: transparent;
+  }
+  .status {
+    position: absolute;
+    right: 8px;
+    top: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: system-ui, sans-serif;
+    color: #fff;
+    background: rgba(28, 28, 32, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    min-height: 18px;
+    min-width: 12px;
+    opacity: 0.95;
+  }
+  .status[data-kind="success"] {
+    border-color: rgba(120, 220, 140, 0.6);
+  }
+  .status[data-kind="error"] {
+    border-color: rgba(255, 122, 122, 0.7);
+    color: #ff9c9c;
+  }
+  .status[data-kind="info"] {
+    border-color: rgba(78, 161, 255, 0.6);
   }
 </style>

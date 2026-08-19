@@ -2,7 +2,8 @@
 //! the WebView payload into the platform capture flow and returns the typed
 //! result.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use pixelgrab_contracts::{
     cache::CacheEntryMetadata,
@@ -25,11 +26,22 @@ use crate::PixelGrabApp;
 
 type AppState<'a> = State<'a, PixelGrabApp>;
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// Monotonic epoch used by the shelf queue timer. Captured lazily on
+/// first use so the queue's `added_at_elapsed_ms` and
+/// `deadline_at_elapsed_ms` fields are relative to a stable point in
+/// the process lifetime rather than the wall-clock — a user
+/// NTP-syncing their clock mid-session must not be able to reset a
+/// card's countdown.
+fn monotonic_epoch() -> &'static Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now)
+}
+
+/// Current monotonic millis since process start (relative to
+/// [`monotonic_epoch`]). The shelf queue engine treats this as the
+/// authoritative "now" so timers cannot be defeated by clock changes.
+pub fn now_ms() -> i64 {
+    monotonic_epoch().elapsed().as_millis() as i64
 }
 
 /// Resolve the shelf position for the queue's current visible card
@@ -66,13 +78,11 @@ fn emit_shelf_queue_updated<R: tauri::Runtime>(
 
 /// Build a snapshot with the position field populated. Used by every
 /// event-emit path so the frontend never has to compute window
-/// geometry itself.
+/// geometry itself. The mutation-only `with_position` variant is
+/// kept as a thin alias for the few call sites that already hold a
+/// snapshot they want to decorate.
 fn snapshot_with_position(app: &PixelGrabApp) -> ShelfQueueSnapshot {
-    let mut snapshot = app.shelf_queue().snapshot(now_ms());
-    if let Ok(position) = queue_position(app) {
-        snapshot.position = Some(position);
-    }
-    snapshot
+    with_position(app.shelf_queue().snapshot(now_ms()), app)
 }
 
 /// Begin a capture from the tray or shortcut. The orchestrator refuses the
@@ -222,14 +232,17 @@ pub fn dismiss_cache_entry(
     payload: DismissCacheEntryRequest,
     handle: AppHandle,
 ) -> IpcResponse<DismissCacheEntryResponse> {
+    // Dismiss ordering matters: the spec requires the shelf lock to
+    // remain held until the card has left every shelf representation
+    // (main view + overflow). Remove the card from the queue first,
+    // then dismiss from the cache so the lock release coincides with
+    // (rather than precedes) the user-visible disappearance.
+    app.shelf_queue().dismiss(&payload.shelf_id, now_ms());
     let result = match app.cache().dismiss(&payload.shelf_id) {
         Ok(outcome) => {
-            // Remove the card from the queue regardless of lock state
-            // (the user explicitly asked for it to be gone). When
-            // the cache reaped the entry we also emit a cleared event
-            // so listeners that don't care about queue ordering still
-            // learn about the removal.
-            app.shelf_queue().dismiss(&payload.shelf_id, now_ms());
+            // When the cache reaped the entry we also emit a cleared
+            // event so listeners that don't care about queue ordering
+            // still learn about the removal.
             let snapshot = snapshot_with_position(&app);
             if snapshot.is_empty() {
                 let _ = crate::shelf::hide_card(&handle);
@@ -303,10 +316,15 @@ pub async fn save_shelf_card_as(
     };
     let bytes = match std::fs::read(&png_path) {
         Ok(b) => b,
-        Err(err) => {
+        Err(_err) => {
+            // Privacy: do not interpolate the io::Error into the
+            // user-facing message — on Windows its Display impl can
+            // include the absolute path that failed. Use a stable
+            // categorical kind instead; the cache holds the only
+            // copy of the path.
             return Ok(IpcResponse::from_result(Err(PlatformError::new(
                 PlatformErrorKind::Io,
-                format!("read png for save: {err}"),
+                "save_as_read_failed",
             ))));
         }
     };
@@ -333,17 +351,21 @@ pub async fn save_shelf_card_as(
     };
     let target_path = match target.into_path() {
         Ok(p) => p,
-        Err(err) => {
+        Err(_err) => {
             return Ok(IpcResponse::from_result(Err(PlatformError::new(
                 PlatformErrorKind::Io,
-                format!("save dialog returned invalid path: {err}"),
+                "save_as_invalid_target",
             ))));
         }
     };
-    if let Err(err) = std::fs::write(&target_path, &bytes) {
+    if let Err(_err) = std::fs::write(&target_path, &bytes) {
+        // Privacy: same as above — categorical kind, no path in the
+        // error string. The chosen path itself is returned in the
+        // Ok variant only, so the user can still see where the file
+        // landed when the write succeeds.
         return Ok(IpcResponse::from_result(Err(PlatformError::new(
             PlatformErrorKind::Io,
-            format!("write save-as png: {err}"),
+            "save_as_write_failed",
         ))));
     }
     let written = bytes.len() as u64;
@@ -353,7 +375,7 @@ pub async fn save_shelf_card_as(
     })))
 }
 
-/// Mark a shelf card as hovered at the current wall-clock millis.
+/// Mark a shelf card as hovered at the current monotonic millis.
 /// Only the targeted card's timer pauses.
 #[tauri::command]
 pub fn hover_shelf_card(
@@ -375,7 +397,7 @@ pub fn hover_shelf_card(
     IpcResponse::from_result(result)
 }
 
-/// Mark a shelf card as un-hovered at the current wall-clock millis.
+/// Mark a shelf card as un-hovered at the current monotonic millis.
 /// Resumes the timer with a three-second grace period when the
 /// remaining time is small.
 #[tauri::command]
@@ -400,13 +422,19 @@ pub fn unhover_shelf_card(
 
 /// Tick the queue. Removes expired cards and dismisses each one from
 /// the cache so the shelf lock is released and the entry reaped.
-/// Triggered by the frontend after a countdown animation reaches zero.
+/// Triggered by the frontend after a countdown animation reaches zero,
+/// and periodically by the background ticker installed in
+/// `PixelGrabApp::install_shelf_ticker` so a hidden or throttled
+/// webview cannot strand the shelf lock.
 #[tauri::command]
 pub fn tick_shelf_queue(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
     let outcome = app.shelf_queue().tick(now_ms());
     for shelf_id in &outcome.expired {
-        if let Err(err) = app.cache().dismiss(shelf_id) {
-            log::warn!("tick_shelf_queue: cache.dismiss({shelf_id}) failed: {err}");
+        // Privacy: only the shelf id is logged. The cache dismiss
+        // error can include the cache path; a stable categorical
+        // description is sufficient for telemetry.
+        if let Err(_err) = app.cache().dismiss(shelf_id) {
+            log::warn!("tick_shelf_queue: cache.dismiss failed for shelf_id");
         }
     }
     let snapshot = with_position(outcome.snapshot, &app);

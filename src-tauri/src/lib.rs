@@ -22,12 +22,20 @@ pub use platform::synthetic;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::session::SessionState;
 use crate::shelf::queue::ShelfQueueEngine;
+
+/// How often the background shelf ticker expires cards. The frontend
+/// also drives its own tick from `requestAnimationFrame` for visual
+/// countdowns; this thread is the safety net that guarantees the
+/// shelf lock is released even when the webview is hidden,
+/// throttled, or has crashed.
+pub const SHELF_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Re-exported types for downstream tests and binaries.
 pub use crate::error::PixelGrabError;
@@ -84,6 +92,80 @@ impl PixelGrabApp {
     }
 }
 
+/// Spawn the background shelf ticker. The thread wakes every
+/// `SHELF_TICK_INTERVAL`, expires any cards whose deadline has
+/// elapsed, dismisses each from the cache so the shelf lock is
+/// released, and re-emits the queue snapshot via the supplied
+/// `AppHandle`.
+///
+/// Takes the individual `Arc` handles (cache, queue, platform)
+/// rather than the whole `PixelGrabApp` because `PixelGrabApp` is
+/// stored as a Tauri-managed state value (not `Arc`-wrapped) and
+/// the thread needs `Send + 'static` handles.
+///
+/// The function returns the thread's `JoinHandle` for tests; the
+/// binary drops it so the ticker lives for the lifetime of the
+/// process.
+pub fn spawn_shelf_ticker<R: tauri::Runtime>(
+    cache: Arc<Cache>,
+    queue: Arc<ShelfQueueEngine>,
+    platform: Arc<dyn platform::PixelGrabPlatform>,
+    handle: AppHandle<R>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("pixelgrab-shelf-ticker".to_string())
+        .spawn(move || shelf_ticker_loop(cache, queue, platform, handle))
+        .expect("spawn shelf ticker thread")
+}
+
+/// Shared ticker loop. Extracted so the binary and any test that
+/// wants to advance the engine can both call it without spawning a
+/// thread.
+fn shelf_ticker_loop<R: tauri::Runtime>(
+    cache: Arc<Cache>,
+    queue: Arc<ShelfQueueEngine>,
+    platform: Arc<dyn platform::PixelGrabPlatform>,
+    handle: AppHandle<R>,
+) {
+    let epoch = Instant::now();
+    loop {
+        std::thread::sleep(SHELF_TICK_INTERVAL);
+        let elapsed_ms = epoch.elapsed().as_millis() as i64;
+        let outcome = queue.tick(elapsed_ms);
+        if outcome.expired.is_empty() {
+            continue;
+        }
+        for shelf_id in &outcome.expired {
+            // Privacy: only the shelf id is logged. The cache
+            // dismiss error can include the cache path; a stable
+            // categorical description is sufficient for telemetry.
+            if let Err(_err) = cache.dismiss(shelf_id) {
+                log::warn!("shelf_ticker_loop: cache.dismiss failed for shelf_id");
+            }
+        }
+        // Re-emit the new snapshot so the frontend picks up the
+        // removal even when the rAF loop was not running.
+        let snapshot = {
+            let mut snap = queue.snapshot(elapsed_ms);
+            if let Ok(layout) = platform.monitor_layout() {
+                if let Some(monitor) = layout
+                    .monitors
+                    .iter()
+                    .find(|m| m.is_primary)
+                    .or_else(|| layout.monitors.first())
+                {
+                    snap.position = Some(pixelgrab_contracts::ShelfPosition::shelf_queue_position(
+                        monitor,
+                        snap.cards.len(),
+                    ));
+                }
+            }
+            snap
+        };
+        let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
+    }
+}
+
 /// Re-export so tests and the IPC layer can name `Cache` directly.
 pub use cache::Cache;
 
@@ -120,14 +202,18 @@ pub fn run() {
             }
             // Rehydrate the queue from the durable cache so cards
             // surviving a process restart remain visible until their
-            // timers expire.
-            app_state.shelf_queue().rehydrate(
-                app_state.cache().entries(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            );
+            // timers expire. Uses monotonic millis so a clock change
+            // mid-restart cannot expire surviving cards early.
+            let rehydrate_ms = crate::ipc::commands::now_ms();
+            app_state
+                .shelf_queue()
+                .rehydrate(app_state.cache().entries(), rehydrate_ms);
+
+            // Borrow the handles we need for the background ticker
+            // before `app.manage` consumes `app_state`.
+            let ticker_cache = app_state.cache().clone();
+            let ticker_queue = app_state.shelf_queue().clone();
+            let ticker_platform = app_state.platform().clone();
             app.manage(app_state);
 
             // Build the resident tray, the hidden overlay window, and
@@ -135,6 +221,17 @@ pub fn run() {
             tray::install(app.handle())?;
             overlay::preallocate(app.handle())?;
             shelf::preallocate(app.handle())?;
+
+            // Spawn the background shelf ticker so cards expire even
+            // when the webview is hidden or throttled. The ticker
+            // drives `queue.tick` + `cache.dismiss` per expired id so
+            // the shelf lock is always released on time.
+            spawn_shelf_ticker(
+                ticker_cache,
+                ticker_queue,
+                ticker_platform,
+                app.handle().clone(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

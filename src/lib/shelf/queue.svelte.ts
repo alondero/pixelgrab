@@ -4,11 +4,10 @@
 // and `requestAnimationFrame` so the UI never waits for a Rust round-trip
 // to redraw the seconds-remaining text.
 //
-// The frontend does NOT push expiry events to the backend; the backend
-// has its own tick (the `tick_shelf_queue` IPC plus a periodic check on
-// commit/dismiss). The visual countdown just fades cards out smoothly
-// at the moment their deadline elapses — the authoritative dismissal
-// happens server-side.
+// The frontend is not the sole expiry driver: the Rust core spawns a
+// background ticker in `pixelgrab_lib::spawn_shelf_ticker` that runs
+// `queue.tick` on its own clock so cards expire even when the webview
+// is hidden or throttled. The rAF loop here is purely cosmetic.
 
 import type { ShelfTimerConfig, ShelfTimerState } from "$lib/ipc/types";
 
@@ -60,26 +59,48 @@ export function formatRemaining(ms: number): string {
 }
 
 /**
- * Build a Svelte-reactive object holding the current elapsed-ms clock.
- * The queue component subscribes to `nowElapsedMs` and re-renders each
- * card's countdown text on every animation frame.
+ * A clock store that exposes the current elapsed millis as a
+ * Svelte-reactive getter, driven by `requestAnimationFrame` so the
+ * countdown text re-renders smoothly without backend round-trips.
+ *
+ * The `start()` and `stop()` methods are idempotent; `stop()`
+ * cancels the rAF handle so the loop does not leak when the queue
+ * empties.
  */
-export function createClockStore(): { nowMs: number } {
+export function createClockStore(): {
+  readonly nowMs: number;
+  start(): void;
+  stop(): void;
+} {
   let nowMs = $state(nowElapsedMs());
-  if (typeof requestAnimationFrame === "function") {
-    let raf = 0;
-    const tick = () => {
-      nowMs = nowElapsedMs();
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    // No teardown yet — the shelf window lives for the lifetime of the
-    // process. A future tracer can introduce a `destroy()` hook.
-    void raf;
+  let rafId = 0;
+  let running = false;
+
+  function tick() {
+    nowMs = nowElapsedMs();
+    if (running && typeof requestAnimationFrame === "function") {
+      rafId = requestAnimationFrame(tick);
+    }
   }
+
   return {
     get nowMs() {
       return nowMs;
+    },
+    start() {
+      if (running) return;
+      running = true;
+      if (typeof requestAnimationFrame === "function") {
+        rafId = requestAnimationFrame(tick);
+      }
+    },
+    stop() {
+      if (!running) return;
+      running = false;
+      if (rafId !== 0 && typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(rafId);
+      }
+      rafId = 0;
     },
   };
 }

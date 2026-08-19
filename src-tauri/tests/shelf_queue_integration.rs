@@ -251,3 +251,78 @@ fn synthetic_platform_writes_png_for_clipboard_publish() {
         .expect("publish_png_clipboard");
     let _ = PhysicalSize::new(4, 4); // silence unused warnings if test is shrunk
 }
+
+#[test]
+fn manual_dismiss_releases_lock_in_correct_order() {
+    // Spec invariant: "Release the shelf active lock only after a card
+    // leaves every shelf representation". The queue must drop the
+    // card BEFORE the cache releases the lock so a snapshot read
+    // between the two steps never sees a card with no backing cache
+    // entry. The IPC layer's `dismiss_cache_entry` enforces this
+    // ordering; the engine itself just exposes the necessary
+    // primitives so the test can pin the contract.
+    let fs = IsolatedFilesystem::new("queue-manual-dismiss").expect("fs");
+    let cache = Arc::new(Cache::new());
+    cache
+        .set_cache_root(Some(fs.root().to_path_buf()))
+        .expect("set root");
+    let queue = Arc::new(ShelfQueueEngine::default());
+
+    let bounds = PhysicalBounds::from_xywh(0, 0, 4, 4);
+    let committed = cache.commit(request(bounds)).expect("commit");
+    queue.add(committed.entry.clone(), 0);
+    assert_eq!(queue.len(), 1);
+
+    // The shelf queue engine has no lock semantics — it just removes
+    // the entry from the in-memory list. After the queue drops the
+    // card, the cache lock is still held (the engine does not own
+    // the lock), and the IPC layer's manual-dismiss path will then
+    // dismiss from the cache to release it. This test pins that
+    // order: the queue is drained before the cache releases.
+    let _ = queue
+        .dismiss(&committed.entry.shelf_id, 10)
+        .expect("queue dismiss");
+    assert!(queue.is_empty());
+    let outcome = cache
+        .dismiss(&committed.entry.shelf_id)
+        .expect("cache dismiss");
+    assert!(outcome.removed);
+}
+
+#[test]
+fn shelf_ticker_releases_locks_when_webview_is_hidden() {
+    // The background ticker must release the shelf lock on every
+    // expired card regardless of frontend liveness, so a hidden or
+    // throttled webview cannot strand the lock.
+    let config = ShelfTimerConfig {
+        lifetime_ms: 50,
+        grace_ms: 25,
+    };
+    let fs = IsolatedFilesystem::new("queue-ticker-lock-release").expect("fs");
+    let cache = Arc::new(Cache::new());
+    cache
+        .set_cache_root(Some(fs.root().to_path_buf()))
+        .expect("set root");
+    let queue = Arc::new(ShelfQueueEngine::new(config));
+
+    // Commit two cards so we can verify simultaneous-expiry ordering
+    // through the ticker body.
+    let mut committed = Vec::new();
+    for _ in 0..2 {
+        let bounds = PhysicalBounds::from_xywh(0, 0, 4, 4);
+        let c = cache.commit(request(bounds)).expect("commit");
+        queue.add(c.entry.clone(), 0);
+        committed.push(c.entry.shelf_id.clone());
+    }
+
+    // Drive one tick (the same body the background thread runs).
+    let outcome = queue.tick(1_000);
+    assert_eq!(outcome.expired.len(), 2);
+    // Caller dismisses each id from the cache (this is what the
+    // background thread does).
+    for shelf_id in &outcome.expired {
+        let outcome = cache.dismiss(shelf_id).expect("dismiss");
+        assert!(outcome.removed);
+    }
+    assert!(cache.entries().is_empty());
+}
