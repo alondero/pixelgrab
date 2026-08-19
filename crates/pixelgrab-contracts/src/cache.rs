@@ -183,7 +183,6 @@ impl ShelfPosition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordinate::PhysicalPoint;
     use crate::monitor::MonitorDescriptor;
 
     #[allow(clippy::too_many_arguments)]
@@ -262,6 +261,5 @@ mod tests {
         assert_eq!(wa_right - right, 24);
         // X must land inside the work area.
         assert!(pos.x >= pos.work_area.origin.x);
-        let _ = PhysicalPoint::new(0, 0);
     }
 }

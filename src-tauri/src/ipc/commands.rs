@@ -13,7 +13,7 @@ use pixelgrab_contracts::{
         RequestOverlayIntent, RequestOverlayResult, SessionSnapshot, ShelfSnapshot,
         UpdateCacheMetadataRequest,
     },
-    CaptureDiagnostics, PlatformError, PlatformErrorKind, PlatformResult, ShelfId,
+    CaptureDiagnostics, PlatformError, PlatformErrorKind,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -37,7 +37,7 @@ pub fn request_capture(
     payload: RequestCaptureIntent,
 ) -> IpcResponse<CaptureResponse> {
     let _ = payload; // shape-only payload; the actual format comes from the
-                     // the orchestrator's platform contract.
+                     // orchestrator's platform contract.
     let request = CaptureRequest {
         format: CaptureFormat::VirtualDesktop,
         monitor_id: None,
@@ -159,7 +159,7 @@ pub fn update_cache_metadata(
         .update_metadata(&payload.shelf_id, payload.metadata.clone());
     if result.is_ok() {
         if let Ok(entry) = &result {
-            let _ = handle.shelf_event(&entry.shelf_id, entry);
+            emit_shelf_updated(&handle, entry);
         }
     }
     IpcResponse::from_result(result)
@@ -175,9 +175,11 @@ pub fn dismiss_cache_entry(
 ) -> IpcResponse<DismissCacheEntryResponse> {
     let result = match app.cache().dismiss(&payload.shelf_id) {
         Ok(outcome) => {
-            // Hide the shelf window when the only card is gone.
+            // Hide the shelf window when the only card is gone and
+            // tell the frontend to clear its local copy.
             if outcome.removed {
                 let _ = crate::shelf::hide_card(&handle);
+                let _ = handle.emit("pixelgrab://shelf-cleared", &payload.shelf_id);
             }
             Ok(DismissCacheEntryResponse {
                 removed: outcome.removed,
@@ -226,25 +228,14 @@ pub fn get_session_snapshot(app: AppState<'_>) -> IpcResponse<SessionSnapshot> {
 }
 
 /// Internal helper: emit a shelf-updated event to the frontend.
-trait ShelfEventExt {
-    fn shelf_event(
-        &self,
-        shelf_id: &ShelfId,
-        entry: &pixelgrab_contracts::CacheEntry,
-    ) -> tauri::Result<()>;
-}
-
-impl<R: tauri::Runtime> ShelfEventExt for AppHandle<R> {
-    fn shelf_event(
-        &self,
-        shelf_id: &ShelfId,
-        entry: &pixelgrab_contracts::CacheEntry,
-    ) -> tauri::Result<()> {
-        let view = crate::shelf::ShelfCardView::from_entry(entry);
-        let _ = self.emit("pixelgrab://shelf-updated", &view);
-        let _ = shelf_id; // id is already in the view
-        Ok(())
-    }
+/// The shelf id is part of the view so the trait doesn't need it as
+/// a separate parameter.
+fn emit_shelf_updated<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
+    entry: &pixelgrab_contracts::CacheEntry,
+) {
+    let view = crate::shelf::ShelfCardView::from_entry(entry);
+    let _ = handle.emit("pixelgrab://shelf-updated", &view);
 }
 
 fn commit(
@@ -270,20 +261,10 @@ fn commit(
         })?;
 
     // Single source of truth: flatten the crop once. The PNG bytes and the
-    // clipboard bitmap are both derived from this buffer.
+    // clipboard bitmap are both derived from this buffer. RGBA length is
+    // validated by `Cache::encode_png` when the cache path is taken; the
+    // clipboard path trusts the platform contract.
     let (rgba, size) = app.platform().flatten_crop(&capture_id, bbox)?;
-    if rgba.len() != (size.width as usize) * (size.height as usize) * 4 {
-        return Err(PlatformError::new(
-            PlatformErrorKind::InvalidPayload,
-            format!(
-                "flatten_crop returned {} bytes for {}x{}; expected {}",
-                rgba.len(),
-                size.width,
-                size.height,
-                (size.width as usize) * (size.height as usize) * 4
-            ),
-        ));
-    }
 
     let mut outcome = CommitOutcome {
         capture_id: capture_id.clone(),
@@ -294,9 +275,18 @@ fn commit(
         created_at_ms: 0,
     };
 
+    // Clipboard first. The clipboard publish is the cheapest
+    // non-reversible side effect; if it fails we abort before
+    // touching the cache or the shelf, so a clipboard error never
+    // leaves a phantom card or a wedged session.
+    if request.to_clipboard {
+        app.platform().publish_clipboard(&capture_id, &rgba, size)?;
+    }
+
     if request.to_shelf {
-        let primary_monitor_id = primary_monitor_id_for(app)?;
-        let result = app.cache().commit(crate::cache::CommitRequest {
+        let primary_monitor_id =
+            crate::cache::Cache::primary_monitor_id(&app.platform().monitor_layout()?)?;
+        let result = app.cache().commit(crate::cache::CacheCommitRequest {
             bounds: bbox,
             size,
             rgba: rgba.clone(),
@@ -321,7 +311,7 @@ fn commit(
                 if let Err(err) = crate::shelf::show_card(handle, &position, &entry.shelf_id) {
                     log::warn!("shelf window show failed: {err}");
                 }
-                let _ = handle.shelf_event(&entry.shelf_id, &entry);
+                emit_shelf_updated(handle, &entry);
             }
             Err(err) => {
                 // Two-phase commit failed: the entry is either fully
@@ -331,48 +321,29 @@ fn commit(
                 return Err(err);
             }
         }
-    } else if request.save_as {
-        // Save-as path bypasses the shelf and writes a loose PNG. We
-        // keep the existing platform write_png behaviour for now.
-        let path = app.platform().write_png(&capture_id, bbox, &rgba)?;
-        outcome.png_path = Some(path.to_string_lossy().to_string());
-        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        outcome.png_bytes = bytes;
-    } else {
-        outcome.png_bytes = rgba.len() as u64;
     }
 
-    if request.to_clipboard {
-        // The clipboard path is best-effort - if the platform has no
-        // clipboard (synthetic CI) the call returns Ok without doing
-        // anything, so the commit still succeeds.
-        app.platform().publish_clipboard(&capture_id, &rgba, size)?;
+    if request.save_as {
+        // Save-as writes a loose PNG to the platform's cache root in
+        // addition to whatever the shelf path produced. `to_shelf`
+        // and `save_as` are independent; a commit with both flags
+        // shelves the capture AND produces a loose copy.
+        let path = app.platform().write_png(&capture_id, bbox, &rgba)?;
+        if outcome.png_path.is_none() {
+            outcome.png_path = Some(path.to_string_lossy().to_string());
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            outcome.png_bytes = bytes;
+        }
+    }
+
+    if !request.to_shelf && !request.save_as {
+        outcome.png_bytes = rgba.len() as u64;
     }
 
     if let Err(err) = app.session().finish() {
         log::warn!("session.finish failed: {err}");
     }
     Ok(outcome)
-}
-
-/// Derive a monitor id for the cache entry. Tracer-07 only tracks the
-/// primary monitor for the shelf card; later tracers extend this to the
-/// active monitor of the user's selection.
-fn primary_monitor_id_for(app: &PixelGrabApp) -> PlatformResult<String> {
-    let layout = app.platform().monitor_layout()?;
-    let id = layout
-        .monitors
-        .iter()
-        .find(|m| m.is_primary)
-        .or_else(|| layout.monitors.first())
-        .map(|m| m.id.clone())
-        .ok_or_else(|| {
-            PlatformError::new(
-                PlatformErrorKind::MonitorQueryFailed,
-                "no monitor available for shelf placement",
-            )
-        })?;
-    Ok(id)
 }
 
 /// Derive a diagnostic monitor id from a capture resolution.

@@ -139,3 +139,39 @@ fn capture_resolution_known_format() {
     assert!(json.contains("\"captureId\""));
     assert!(json.contains("\"capturedAtMs\""));
 }
+
+#[test]
+fn shelf_card_view_round_trips() {
+    // The `ShelfCardView` is the payload of the
+    // `pixelgrab://shelf-updated` event. The TypeScript mirror in
+    // `src/lib/shelf/types.ts` asserts the same shape; this is the
+    // Rust-side companion.
+    let view = pixelgrab_lib::shelf::ShelfCardView {
+        shelf_id: "shelf-id".to_string(),
+        capture_id: "capture-id".to_string(),
+        png_path: "/cache/capture/capture.png".to_string(),
+        size_bytes: 4096,
+        created_at_ms: 1_700_000_000_000,
+        bounds: PhysicalBounds::from_xywh(0, 0, 320, 240),
+        metadata: pixelgrab_contracts::CacheEntryMetadata {
+            title: "Example".to_string(),
+            note: "first commit".to_string(),
+            tags: vec!["tracer-07".to_string()],
+        },
+    };
+    let json = serde_json::to_string(&view).expect("serialize");
+    // Field names must be camelCase on the wire.
+    assert!(json.contains("\"shelfId\""));
+    assert!(json.contains("\"captureId\""));
+    assert!(json.contains("\"pngPath\""));
+    assert!(json.contains("\"sizeBytes\":4096"));
+    assert!(json.contains("\"createdAtMs\":1700000000000"));
+    assert!(json.contains("\"bounds\""));
+    assert!(json.contains("\"metadata\""));
+    // Round-trip.
+    let parsed: pixelgrab_lib::shelf::ShelfCardView =
+        serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.shelf_id, view.shelf_id);
+    assert_eq!(parsed.metadata.title, "Example");
+    assert_eq!(parsed.bounds.size.width, 320);
+}

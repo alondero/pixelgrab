@@ -14,4 +14,4 @@ pub mod store;
 
 pub use atomic::{write_atomic, AtomicWriteOutcome};
 pub use locks::{ActiveLockSet, CacheResult, CleanupOutcome, DismissOutcome, LockGuard};
-pub use store::{Cache, CacheError, CommitRequest, CommitResult};
+pub use store::{Cache, CacheCommitRequest, CacheError, CommitResult, CommitStage};

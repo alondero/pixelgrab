@@ -143,4 +143,28 @@ describe("IPC type contract", () => {
     expect(json.captureToOverlayMs).toBe(10);
     expect(json.monitorId).toBe("primary");
   });
+
+  it("ShelfCardView shape mirrors Rust", () => {
+    // Mirrors `src-tauri/tests/ipc_contracts.rs::shelf_card_view_round_trips`.
+    // The Rust struct lives in `src-tauri/src/shelf/mod.rs`; the TS mirror
+    // is in `src/lib/shelf/types.ts` and re-uses `CacheEntryMetadata`
+    // from the IPC types so the two sides cannot drift.
+    const view: import("./types").ShelfCardView = {
+      shelfId: "shelf-id",
+      captureId: "capture-id",
+      pngPath: "/cache/capture/capture.png",
+      sizeBytes: 4096,
+      createdAtMs: 1_700_000_000_000,
+      bounds: { origin: { x: 0, y: 0 }, size: { width: 320, height: 240 } },
+      metadata: {
+        title: "Example",
+        note: "first commit",
+        tags: ["tracer-07"],
+      },
+    };
+    const json = JSON.parse(JSON.stringify(view));
+    expect(json.shelfId).toBe("shelf-id");
+    expect(json.sizeBytes).toBe(4096);
+    expect(json.metadata.tags).toEqual(["tracer-07"]);
+  });
 });

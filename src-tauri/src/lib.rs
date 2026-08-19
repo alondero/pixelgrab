@@ -20,6 +20,7 @@ pub mod tray;
 #[cfg(any(test, feature = "synthetic"))]
 pub use platform::synthetic;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -40,6 +41,8 @@ pub struct PixelGrabApp {
 
 impl PixelGrabApp {
     /// Construct a new builder with the given platform implementation.
+    /// The cache root must be set with [`PixelGrabApp::set_cache_root`]
+    /// before the cache is used; the Tauri `run` setup hook does this.
     pub fn new(platform: Arc<dyn platform::PixelGrabPlatform>) -> Self {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
         let cache = Arc::new(Cache::new());
@@ -72,7 +75,7 @@ pub use cache::Cache;
 /// Run the Tauri application. This is the binary entrypoint.
 pub fn run() {
     init_tracing();
-    log::info!("PixelGrab starting (tracer-02 capture path)");
+    log::info!("PixelGrab starting (tracer-07 capture path)");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -89,6 +92,17 @@ pub fn run() {
             // and capture a frozen frame before the overlay is revealed.
             let platform: Arc<dyn platform::PixelGrabPlatform> = default_platform();
             let app_state = PixelGrabApp::new(platform);
+
+            // Wire the cache root and recover any partial entries
+            // from a previous run. `load_or_recover` is best-effort:
+            // a failed recovery is logged but does not abort startup
+            // so the user can still open a capture.
+            let cache_root = default_cache_root();
+            if let Err(err) = app_state.cache().set_cache_root(Some(cache_root.clone())) {
+                log::warn!("cache root {} is unusable: {err}", cache_root.display());
+            } else if let Err(err) = app_state.cache().load_or_recover() {
+                log::warn!("cache recovery failed: {err}");
+            }
             app.manage(app_state);
 
             // Build the resident tray, the hidden overlay window, and
@@ -110,6 +124,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");
+}
+
+/// Resolve the default on-disk cache root for the current platform.
+///
+/// On Windows the root lives under `%LOCALAPPDATA%\com.pixelgrab.app\cache`.
+/// The folder is created (or reused) by `Cache::set_cache_root`. The
+/// directory layout is owned by `cache::store::Cache`; this helper only
+/// reports the path.
+pub fn default_cache_root() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("com.pixelgrab.app")
+                .join("cache");
+        }
+    }
+    // Non-Windows (CI, dev on macOS/Linux): fall back to the system
+    // temp directory so the cache has a stable, writable home.
+    std::env::temp_dir().join("pixelgrab-cache")
 }
 
 fn init_tracing() {

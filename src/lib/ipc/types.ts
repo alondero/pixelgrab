@@ -123,6 +123,12 @@ export interface ShelfSnapshot {
   locks?: LockOwner[];
 }
 
+export interface CacheEntryMetadata {
+  title: string;
+  note: string;
+  tags: string[];
+}
+
 export interface CacheEntryDto {
   captureId: string;
   shelfId: string;
@@ -131,11 +137,7 @@ export interface CacheEntryDto {
   bounds: PhysicalBounds;
   size: PhysicalSize;
   sizeBytes: number;
-  metadata: {
-    title: string;
-    note: string;
-    tags: string[];
-  };
+  metadata: CacheEntryMetadata;
   createdAtMs: number;
   lastAccessAtMs: number;
   monitorId: string;
@@ -188,3 +190,7 @@ export interface PlatformErrorKind {
 export type IpcResponseOk<T> = { status: "ok"; data: T };
 export type IpcResponseErr = { status: "err"; error: PlatformErrorKind };
 export type IpcResponse<T> = IpcResponseOk<T> | IpcResponseErr;
+
+// Re-export the shelf card view so callers that already import from
+// `$lib/ipc/types` can use the event payload without a second import.
+export type { ShelfCardView } from "$lib/shelf/types";

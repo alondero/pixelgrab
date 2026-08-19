@@ -1,18 +1,19 @@
-//! Reference-counted active locks per cache entry.
+//! Owner-keyed active locks per cache entry.
 //!
 //! Each cache entry may be held by one or more *lock owners*. An entry
-//! is eligible for cleanup (deletion from disk) only when every owner
-//! has released its lock. The lock registry is held in memory and is
-//! rebuilt from disk on startup by `Cache::load_or_recover`; see
-//! `store.rs` for the on-disk persistence story.
+//! is eligible for cleanup (deletion from disk) only when no owner
+//! holds a lock. The lock registry is held in memory and is rebuilt
+//! from disk on startup by `Cache::load_or_recover`; see `store.rs`
+//! for the on-disk persistence story.
 //!
 //! The design is intentionally narrow:
 //!
 //! - `LockOwner` is a closed enum (see `pixelgrab_contracts::LockOwner`).
 //!   New owner kinds must be added as new variants.
 //! - A lock is identified by `(ShelfId, LockOwner)`. The same owner
-//!   double-locking the same entry is a no-op (the count is already 1)
-//!   so the API is safe to call twice without bookkeeping.
+//!   double-locking the same entry is a no-op (the underlying set
+//!   already contains the owner) so the API is safe to call twice
+//!   without bookkeeping.
 //! - A `LockGuard` releases on `Drop`. Callers that want to release
 //!   early can call `release()`.
 
@@ -29,8 +30,9 @@ pub enum CleanupOutcome {
     /// The entry exists and was removed from disk and from memory.
     Removed,
     /// The entry exists but is still locked by one or more owners.
-    /// The returned slice lists the owners (sorted) for diagnostics.
-    StillLocked(&'static [&'static str]),
+    /// Callers that need the owner labels can use
+    /// `ActiveLockSet::owners_of`.
+    StillLocked,
 }
 
 /// Outcome of `try_dismiss` (used by the dismiss IPC). Returns the
@@ -131,7 +133,8 @@ impl ActiveLockSet {
     /// no owners hold the entry and the entry is removed from the
     /// registry. Returns `StillLocked` when at least one owner remains.
     /// Returns `Unknown` when the shelf id was never seen by this
-    /// registry.
+    /// registry. Callers that need the owner labels can use
+    /// `ActiveLockSet::owners_of` instead.
     pub fn try_cleanup(&self, shelf_id: &str) -> CleanupOutcome {
         let mut inner = self.inner.lock();
         match inner.entries.get(shelf_id) {
@@ -140,17 +143,7 @@ impl ActiveLockSet {
                 inner.entries.remove(shelf_id);
                 CleanupOutcome::Removed
             }
-            Some(owners) => {
-                let labels: Vec<&'static str> = owners.iter().map(|o| o.label()).collect();
-                // Leak the labels into a 'static slice so we can hand
-                // out a `&'static [&'static str]` from a function that
-                // does not allocate per call. The labels are bounded
-                // (one per `LockOwner` variant) and never freed — they
-                // live for the duration of the process. This avoids a
-                // heap allocation in the hot dismissal path.
-                let leaked: &'static [&'static str] = Box::leak(labels.into_boxed_slice());
-                CleanupOutcome::StillLocked(leaked)
-            }
+            Some(_) => CleanupOutcome::StillLocked,
         }
     }
 
@@ -176,7 +169,7 @@ impl ActiveLockSet {
         self.release(shelf_id, LockOwner::Shelf);
         match self.try_cleanup(shelf_id) {
             CleanupOutcome::Removed | CleanupOutcome::Unknown => DismissOutcome::removed(),
-            CleanupOutcome::StillLocked(_) => DismissOutcome::still_locked(),
+            CleanupOutcome::StillLocked => DismissOutcome::still_locked(),
         }
     }
 
@@ -225,13 +218,12 @@ impl LockGuard {
         self.owner
     }
 
-    /// Release the lock early. The `Drop` impl will then be a no-op.
+    /// Release the lock early. After this returns the `Drop` impl
+    /// runs the same `release` a second time, which is a no-op on
+    /// the registry's `BTreeSet` (`remove` on a missing element is a
+    /// no-op). The duplication is bounded and side-effect free.
     pub fn release(self) {
         self.registry.release(&self.shelf_id, self.owner);
-        // The release call above already removed the lock; the
-        // dropper will see an empty set and do nothing. We cannot
-        // move out of `self`, so the guard is consumed by `release`.
-        let _ = self;
     }
 }
 
@@ -287,21 +279,14 @@ mod tests {
         let locks = ActiveLockSet::new();
         let _shelf = locks.acquire("shelf-1".to_string(), LockOwner::Shelf);
         let _editor = locks.acquire("shelf-1".to_string(), LockOwner::Editor);
-        match locks.try_cleanup("shelf-1") {
-            CleanupOutcome::StillLocked(labels) => {
-                assert!(labels.contains(&"shelf"));
-                assert!(labels.contains(&"editor"));
-            }
-            other => panic!("expected StillLocked, got {other:?}"),
-        }
+        assert_eq!(locks.try_cleanup("shelf-1"), CleanupOutcome::StillLocked);
+        let owners = locks.owners_of("shelf-1");
+        assert!(owners.contains(&LockOwner::Shelf));
+        assert!(owners.contains(&LockOwner::Editor));
         drop(_editor);
         // Only the shelf lock remains; cleanup still blocked.
-        match locks.try_cleanup("shelf-1") {
-            CleanupOutcome::StillLocked(labels) => {
-                assert_eq!(labels, &["shelf"]);
-            }
-            other => panic!("expected StillLocked, got {other:?}"),
-        }
+        assert_eq!(locks.try_cleanup("shelf-1"), CleanupOutcome::StillLocked);
+        assert_eq!(locks.owners_of("shelf-1"), vec![LockOwner::Shelf]);
         drop(_shelf);
         assert_eq!(locks.try_cleanup("shelf-1"), CleanupOutcome::Removed);
     }
@@ -320,12 +305,8 @@ mod tests {
             }
         );
         // The pin lock remains, so cleanup is still blocked.
-        match locks.try_cleanup("shelf-1") {
-            CleanupOutcome::StillLocked(labels) => {
-                assert_eq!(labels, &["pin"]);
-            }
-            other => panic!("expected StillLocked, got {other:?}"),
-        }
+        assert_eq!(locks.try_cleanup("shelf-1"), CleanupOutcome::StillLocked);
+        assert_eq!(locks.owners_of("shelf-1"), vec![LockOwner::Pin]);
     }
 
     #[test]

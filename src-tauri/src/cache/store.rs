@@ -87,7 +87,6 @@ struct CacheManifest {
     bitmap_path: Option<String>,
     bounds: PhysicalBounds,
     size: PhysicalSize,
-    size_bytes: u64,
     metadata: CacheEntryMetadata,
     created_at_ms: i64,
     last_access_at_ms: i64,
@@ -108,9 +107,6 @@ pub enum CacheError {
     /// The requested shelf id is unknown to the cache.
     #[error("unknown shelf id: {0}")]
     UnknownShelfId(ShelfId),
-    /// The dismissal was blocked by one or more active locks.
-    #[error("entry is still locked by: {0:?}")]
-    StillLocked(Vec<&'static str>),
 }
 
 impl From<CacheError> for PlatformError {
@@ -120,22 +116,17 @@ impl From<CacheError> for PlatformError {
             CacheError::BadRoot(_) => PlatformErrorKind::Io,
             CacheError::CommitFailed(_) => PlatformErrorKind::Io,
             CacheError::UnknownShelfId(_) => PlatformErrorKind::InvalidPayload,
-            CacheError::StillLocked(_) => PlatformErrorKind::InvalidSessionState,
         };
-        let message = match &err {
-            CacheError::StillLocked(owners) => {
-                format!("entry is still locked by {owners:?}; release locks first")
-            }
-            other => other.to_string(),
-        };
-        PlatformError::new(kind, message)
+        PlatformError::new(kind, err.to_string())
     }
 }
 
 /// Request to publish one cache entry. Built by the commit pipeline
-/// from the flattened RGBA buffer the platform produced.
+/// from the flattened RGBA buffer the platform produced. Named
+/// `CacheCommitRequest` (not `CommitRequest`) to avoid colliding with
+/// `pixelgrab_contracts::ipc::CommitRequest` at the IPC call site.
 #[derive(Debug, Clone)]
-pub struct CommitRequest {
+pub struct CacheCommitRequest {
     /// Physical bounds of the flattened crop.
     pub bounds: PhysicalBounds,
     /// Pixel size (== bounds.size).
@@ -164,6 +155,39 @@ pub struct CommitResult {
     pub png_bytes: u64,
 }
 
+/// Stage at which an injected failure should fire. Used by
+/// `failure-injection` tests that exercise each commit step in
+/// isolation. The stages are listed in the order they run during
+/// `Cache::commit`. The enum is compiled in non-test builds too so
+/// the integration test crate can exercise the fault API; the
+/// production commit path never sets `pending_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommitStage {
+    /// `create_dir_all` on the entry directory.
+    CreateDir,
+    /// Encoding the flattened RGBA buffer to PNG bytes.
+    EncodePng,
+    /// The atomic PNG write.
+    WritePng,
+    /// The atomic metadata write.
+    WriteMetadata,
+    /// The atomic manifest write (the publish sentinel).
+    WriteManifest,
+    /// The `file_size` stat that follows the asset phase.
+    ReadOnDiskSize,
+}
+
+/// Fault injected at a specific commit stage. The `Cache` test API
+/// arms faults with `Cache::arm_failure`; the fault fires once and
+/// is then cleared.
+#[derive(Debug)]
+pub struct InjectedFailure {
+    /// Stage at which the fault should fire.
+    pub stage: CommitStage,
+    /// Error to surface from the chosen stage.
+    pub error: PlatformError,
+}
+
 /// Inner state of the cache store. Held behind a single mutex; the
 /// store operations are short (read manifest, write manifest, atomic
 /// file rename) so the lock is never held across I/O waits.
@@ -178,6 +202,9 @@ struct CacheInner {
     /// map so dropping a guard does not require touching the entries
     /// map.
     shelf_guards: std::collections::BTreeMap<ShelfId, LockGuard>,
+    /// Optional one-shot fault for the next commit. `None` in
+    /// production; tests set this to exercise a specific stage.
+    pending_failure: Option<InjectedFailure>,
 }
 
 /// The cache store. `Cache` is cheap to clone — every field is behind
@@ -197,8 +224,36 @@ impl Cache {
                 entries: Default::default(),
                 locks: ActiveLockSet::new(),
                 shelf_guards: Default::default(),
+                pending_failure: None,
             })),
         }
+    }
+
+    /// Arm a one-shot failure for the next `commit` call. The
+    /// failure fires when `commit` reaches `stage`; if the next
+    /// commit does not reach that stage, the failure is left armed
+    /// and will fire on the following commit instead. Tests should
+    /// call this with a fresh cache per scenario to avoid bleed.
+    ///
+    /// The API is available in production builds so the integration
+    /// test crate can drive it; the production commit path leaves
+    /// `pending_failure` as `None`, so the runtime cost is a single
+    /// `Option` discriminant check per commit stage.
+    pub fn arm_failure(&self, stage: CommitStage, error: PlatformError) {
+        let mut inner = self.inner.lock();
+        inner.pending_failure = Some(InjectedFailure { stage, error });
+    }
+
+    /// Test helper: take the pending failure (if any) and clear it.
+    fn take_failure(&self, stage: CommitStage) -> Option<PlatformError> {
+        let mut inner = self.inner.lock();
+        if let Some(pending) = inner.pending_failure.as_ref() {
+            if pending.stage == stage {
+                let err = inner.pending_failure.take().unwrap();
+                return Some(err.error);
+            }
+        }
+        None
     }
 
     /// Configure the on-disk root. The directory is created if it does
@@ -288,7 +343,7 @@ impl Cache {
     /// Run the two-phase commit pipeline. Returns the durable
     /// `CacheEntry` and a `Shelf` lock guard the caller must keep alive
     /// for as long as the shelf card is visible.
-    pub fn commit(&self, request: CommitRequest) -> PlatformResult<CommitResult> {
+    pub fn commit(&self, request: CacheCommitRequest) -> PlatformResult<CommitResult> {
         let entry_dir = {
             let inner = self.inner.lock();
             let root = inner.root.clone().ok_or_else(|| {
@@ -310,6 +365,9 @@ impl Cache {
                 )))
             })?;
         }
+        if let Some(err) = self.take_failure(CommitStage::CreateDir) {
+            return Err(err);
+        }
         fs::create_dir_all(&entry_dir).map_err(|err| {
             PlatformError::from(CacheError::CommitFailed(format!(
                 "create_dir_all({}): {err}",
@@ -328,50 +386,88 @@ impl Cache {
             .to_string();
         let shelf_id = Uuid::new_v4().to_string();
         let created_at_ms = now_ms();
-        let size_bytes_expected = (request.size.width as u64) * (request.size.height as u64) * 4;
 
-        // Phase 1 — write assets.
-        let png_path_rel = file_names::CAPTURE_PNG.to_string();
-        let png_bytes = encode_png(&request.rgba, request.size)?;
-        write_atomic(&entry_dir.join(file_names::CAPTURE_PNG), &png_bytes)?;
+        // Phase 1 — write assets. The whole asset phase is wrapped in
+        // a closure so any failure reaps the partial directory before
+        // propagating the error. The shelf only ever sees a commit
+        // after the manifest has landed, so a partial directory left
+        // behind would be a phantom-card regression.
+        let asset_outcome: Result<Vec<u8>, PlatformError> =
+            (|| -> Result<Vec<u8>, PlatformError> {
+                if let Some(err) = self.take_failure(CommitStage::EncodePng) {
+                    return Err(err);
+                }
+                let png_bytes = encode_png(&request.rgba, request.size)?;
+                if let Some(err) = self.take_failure(CommitStage::WritePng) {
+                    return Err(err);
+                }
+                write_atomic(&entry_dir.join(file_names::CAPTURE_PNG), &png_bytes)?;
+                let metadata_json = serde_json::to_vec_pretty(&request.metadata)?;
+                if let Some(err) = self.take_failure(CommitStage::WriteMetadata) {
+                    return Err(err);
+                }
+                write_atomic(&entry_dir.join(file_names::METADATA_JSON), &metadata_json)?;
+                Ok(png_bytes)
+            })();
 
-        let bitmap_bytes: Option<Vec<u8>> = None;
-        if let Some(bytes) = bitmap_bytes.as_ref() {
-            write_atomic(&entry_dir.join(file_names::BITMAP_PNG), bytes)?;
-        }
+        let png_bytes = match asset_outcome {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                // Phase 1 failed — reap the partial directory so no
+                // orphaned files survive the IPC call.
+                let _ = fs::remove_dir_all(&entry_dir);
+                return Err(err);
+            }
+        };
 
-        let metadata_path = entry_dir.join(file_names::METADATA_JSON);
-        let metadata_json = serde_json::to_vec_pretty(&request.metadata)?;
-        write_atomic(&metadata_path, &metadata_json)?;
-
-        // Phase 2 — write the manifest (the publish sentinel).
+        // Phase 2 — write the manifest (the publish sentinel). The
+        // manifest does not store its own byte size; the cache
+        // computes `size_bytes` from the on-disk file sizes when it
+        // loads an entry, so the manifest and the in-memory
+        // `PublicCacheEntry` cannot drift.
         let manifest = CacheManifest {
             capture_id: capture_id.clone(),
             shelf_id: shelf_id.clone(),
-            png_path: png_path_rel,
+            png_path: file_names::CAPTURE_PNG.to_string(),
             bitmap_path: None,
             bounds: request.bounds,
             size: request.size,
-            size_bytes: png_bytes.len() as u64 + metadata_json.len() as u64,
             metadata: request.metadata.clone(),
             created_at_ms,
             last_access_at_ms: created_at_ms,
             monitor_id: request.monitor_id.clone(),
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-        let outcome = write_atomic(&entry_dir.join(file_names::MANIFEST_JSON), &manifest_json)?;
-        // Update the size to reflect the manifest itself on a fresh
-        // write; an idempotent retry sees the same size.
-        let manifest_bytes = match &outcome {
-            AtomicWriteOutcome::Written { bytes, .. } => *bytes,
-            AtomicWriteOutcome::AlreadyDurable { bytes, .. } => *bytes,
+        if let Some(err) = self.take_failure(CommitStage::WriteManifest) {
+            // Phase 2 failed — reap the partial directory.
+            let _ = fs::remove_dir_all(&entry_dir);
+            return Err(err);
+        }
+        let manifest_outcome =
+            write_atomic(&entry_dir.join(file_names::MANIFEST_JSON), &manifest_json);
+        let manifest_bytes = match manifest_outcome {
+            Ok(AtomicWriteOutcome::Written { bytes, .. }) => bytes,
+            Ok(AtomicWriteOutcome::AlreadyDurable { bytes, .. }) => bytes,
+            Err(err) => {
+                // Phase 2 failed — reap the partial directory.
+                let _ = fs::remove_dir_all(&entry_dir);
+                return Err(err);
+            }
         };
-        let total_size_bytes = png_bytes.len() as u64 + metadata_json.len() as u64 + manifest_bytes;
 
-        let _ = size_bytes_expected; // documented for reviewers; not asserted.
+        // Read the on-disk file sizes so `size_bytes` reflects the
+        // bytes the cache will actually serve on restart, not an
+        // estimate from in-memory buffer lengths.
+        if let Some(err) = self.take_failure(CommitStage::ReadOnDiskSize) {
+            let _ = fs::remove_dir_all(&entry_dir);
+            return Err(err);
+        }
+        let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG))?;
+        let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON))?;
+        let total_size_bytes = png_size + metadata_size + manifest_bytes;
 
         let entry = PublicCacheEntry {
-            capture_id,
+            capture_id: capture_id.clone(),
             shelf_id: shelf_id.clone(),
             png_path: entry_dir
                 .join(file_names::CAPTURE_PNG)
@@ -430,26 +526,39 @@ impl Cache {
         let metadata_json = serde_json::to_vec_pretty(&metadata)?;
         write_atomic(&entry_dir.join(file_names::METADATA_JSON), &metadata_json)?;
 
-        let updated = PublicCacheEntry {
+        // Read the on-disk file sizes so the persisted manifest and
+        // the in-memory entry agree on `size_bytes`.
+        let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG))?;
+        let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON))?;
+
+        let updated_metadata_only = PublicCacheEntry {
             metadata: metadata.clone(),
             last_access_at_ms: now_ms(),
             ..entry.clone()
         };
         let manifest = CacheManifest {
-            capture_id: updated.capture_id.clone(),
-            shelf_id: updated.shelf_id.clone(),
+            capture_id: updated_metadata_only.capture_id.clone(),
+            shelf_id: updated_metadata_only.shelf_id.clone(),
             png_path: file_names::CAPTURE_PNG.to_string(),
             bitmap_path: None,
-            bounds: updated.bounds,
-            size: updated.size,
-            size_bytes: updated.size_bytes,
-            metadata: updated.metadata.clone(),
-            created_at_ms: updated.created_at_ms,
-            last_access_at_ms: updated.last_access_at_ms,
-            monitor_id: updated.monitor_id.clone(),
+            bounds: updated_metadata_only.bounds,
+            size: updated_metadata_only.size,
+            metadata: updated_metadata_only.metadata.clone(),
+            created_at_ms: updated_metadata_only.created_at_ms,
+            last_access_at_ms: updated_metadata_only.last_access_at_ms,
+            monitor_id: updated_metadata_only.monitor_id.clone(),
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-        write_atomic(&entry_dir.join(file_names::MANIFEST_JSON), &manifest_json)?;
+        let manifest_bytes =
+            match write_atomic(&entry_dir.join(file_names::MANIFEST_JSON), &manifest_json)? {
+                AtomicWriteOutcome::Written { bytes, .. } => bytes,
+                AtomicWriteOutcome::AlreadyDurable { bytes, .. } => bytes,
+            };
+        let total_size_bytes = png_size + metadata_size + manifest_bytes;
+        let updated = PublicCacheEntry {
+            size_bytes: total_size_bytes,
+            ..updated_metadata_only.clone()
+        };
 
         inner.entries.insert(shelf_id.to_string(), updated.clone());
         Ok(updated)
@@ -493,6 +602,29 @@ impl Cache {
     /// Single-entry lookup by shelf id.
     pub fn entry(&self, shelf_id: &str) -> Option<PublicCacheEntry> {
         self.inner.lock().entries.get(shelf_id).cloned()
+    }
+
+    /// Resolve the primary monitor id for the given layout. Picks the
+    /// first monitor that reports `is_primary`; falls back to the
+    /// first monitor in the layout if no primary is reported.
+    /// Returns `MonitorQueryFailed` if the layout is empty. Used by
+    /// the commit pipeline (which needs a primary id) and by
+    /// `shelf_position` (which prefers the entry's monitor if it is
+    /// also the primary).
+    pub fn primary_monitor_id(layout: &MonitorLayout) -> PlatformResult<String> {
+        let id = layout
+            .monitors
+            .iter()
+            .find(|m| m.is_primary)
+            .or_else(|| layout.monitors.first())
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                PlatformError::new(
+                    PlatformErrorKind::MonitorQueryFailed,
+                    "no monitor available for shelf placement",
+                )
+            })?;
+        Ok(id)
     }
 
     /// Compute the shelf position for the given entry against the
@@ -539,8 +671,22 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Read the byte size of a file at `path`. Returns the size or
+/// converts the `io::Error` into a `PlatformError` so the caller can
+/// surface the failure through the IPC layer.
+fn file_size(path: &Path) -> PlatformResult<u64> {
+    fs::metadata(path).map(|m| m.len()).map_err(|err| {
+        PlatformError::from(CacheError::CommitFailed(format!(
+            "stat({}): {err}",
+            path.display()
+        )))
+    })
+}
+
 /// Load a manifest from `entry_dir` and reconstruct the public
 /// `CacheEntry`. Returns `CacheError::BadRoot` on any read error.
+/// `size_bytes` is recomputed from the on-disk file sizes so the
+/// persisted manifest and the in-memory entry cannot drift.
 fn load_manifest(entry_dir: &Path) -> PlatformResult<PublicCacheEntry> {
     let manifest_path = entry_dir.join(file_names::MANIFEST_JSON);
     let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
@@ -555,6 +701,9 @@ fn load_manifest(entry_dir: &Path) -> PlatformResult<PublicCacheEntry> {
             manifest_path.display()
         )))
     })?;
+    let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG)).unwrap_or(0);
+    let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON)).unwrap_or(0);
+    let total_size_bytes = png_size + metadata_size + manifest_bytes.len() as u64;
     Ok(PublicCacheEntry {
         capture_id: manifest.capture_id,
         shelf_id: manifest.shelf_id,
@@ -567,7 +716,7 @@ fn load_manifest(entry_dir: &Path) -> PlatformResult<PublicCacheEntry> {
             .map(|p| entry_dir.join(p).to_string_lossy().to_string()),
         bounds: manifest.bounds,
         size: manifest.size,
-        size_bytes: manifest.size_bytes,
+        size_bytes: total_size_bytes,
         metadata: manifest.metadata,
         created_at_ms: manifest.created_at_ms,
         last_access_at_ms: manifest.last_access_at_ms,
@@ -644,7 +793,7 @@ mod tests {
         cache
             .set_cache_root(Some(fs.root().to_path_buf()))
             .expect("set root");
-        let req = CommitRequest {
+        let req = CacheCommitRequest {
             bounds: PhysicalBounds::from_xywh(0, 0, 8, 8),
             size: PhysicalSize::new(8, 8),
             rgba: filled_rgba(8, 8),
@@ -710,7 +859,7 @@ mod tests {
             .set_cache_root(Some(fs.root().to_path_buf()))
             .expect("set root");
 
-        let req = CommitRequest {
+        let req = CacheCommitRequest {
             bounds: PhysicalBounds::from_xywh(0, 0, 4, 4),
             size: PhysicalSize::new(4, 4),
             rgba: filled_rgba(4, 4),
@@ -740,7 +889,7 @@ mod tests {
         cache
             .set_cache_root(Some(fs.root().to_path_buf()))
             .expect("set root");
-        let req = CommitRequest {
+        let req = CacheCommitRequest {
             bounds: PhysicalBounds::from_xywh(0, 0, 4, 4),
             size: PhysicalSize::new(4, 4),
             rgba: filled_rgba(4, 4),

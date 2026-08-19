@@ -3,7 +3,7 @@
 // `src/lib/ipc/types.test.ts` and `src-tauri/tests/ipc_contracts.rs`
 // verify the round-trip stays in sync.
 
-import type { PhysicalBounds } from "$lib/ipc/types";
+import type { CacheEntryMetadata, PhysicalBounds } from "$lib/ipc/types";
 
 export interface ShelfCardView {
   shelfId: string;
@@ -12,9 +12,5 @@ export interface ShelfCardView {
   sizeBytes: number;
   createdAtMs: number;
   bounds: PhysicalBounds;
-  metadata: {
-    title: string;
-    note: string;
-    tags: string[];
-  };
+  metadata: CacheEntryMetadata;
 }
