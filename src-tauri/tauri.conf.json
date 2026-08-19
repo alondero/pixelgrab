@@ -37,6 +37,21 @@
         "visible": false,
         "resizable": false,
         "fullscreen": false
+      },
+      {
+        "label": "shelf",
+        "title": "PixelGrab Shelf",
+        "url": "shelf.html",
+        "width": 240,
+        "height": 180,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "resizable": false,
+        "focus": false,
+        "fullscreen": false
       }
     ],
     "security": {

@@ -93,6 +93,62 @@ export interface CommitOutcome {
   shelfId?: string;
   pngPath?: string;
   pngBytes: number;
+  sizeBytes?: number;
+  createdAtMs?: number;
+}
+
+export interface UpdateCacheMetadataRequest {
+  shelfId: string;
+  metadata: {
+    title: string;
+    note: string;
+    tags: string[];
+  };
+}
+
+export interface DismissCacheEntryRequest {
+  shelfId: string;
+}
+
+export interface DismissCacheEntryResponse {
+  removed: boolean;
+  reason: "removed" | "still_locked" | "unknown_shelf_id";
+}
+
+export type LockOwner = "shelf" | "editor" | "drag" | "pin";
+
+export interface ShelfSnapshot {
+  entry?: CacheEntryDto;
+  position?: ShelfPosition;
+  locks?: LockOwner[];
+}
+
+export interface CacheEntryDto {
+  captureId: string;
+  shelfId: string;
+  pngPath: string;
+  bitmapPath?: string;
+  bounds: PhysicalBounds;
+  size: PhysicalSize;
+  sizeBytes: number;
+  metadata: {
+    title: string;
+    note: string;
+    tags: string[];
+  };
+  createdAtMs: number;
+  lastAccessAtMs: number;
+  monitorId: string;
+}
+
+export interface ShelfPosition {
+  monitorId: string;
+  workArea: PhysicalBounds;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  marginPx: number;
 }
 
 export interface CommitResponse {

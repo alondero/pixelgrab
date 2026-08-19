@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the PixelGrab main window and overlay",
-  "windows": ["main", "overlay"],
+  "description": "Default capabilities for the PixelGrab main window, overlay, and shelf",
+  "windows": ["main", "overlay", "shelf"],
   "permissions": [
     "core:default",
     "core:window:default",

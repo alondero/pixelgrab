@@ -37,9 +37,12 @@
   async function onCommit() {
     if (!selection) return;
     commitError = null;
+    // Tracer 07: Enter (and Ctrl+C) commit atomically to cache +
+    // clipboard + shelf card. The backend runs the two-phase commit
+    // pipeline so either everything lands or nothing does.
     const result = await mockRequestCommit({
       crop: selection,
-      toShelf: false,
+      toShelf: true,
       toClipboard: true,
       saveAs: false,
     });

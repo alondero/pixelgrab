@@ -1,0 +1,95 @@
+//! Shelf window lifecycle. Tracer-07 ships one borderless webview
+//! window that floats at the bottom-right of the primary monitor's
+//! work area. The window is pre-allocated and repositioned on every
+//! successful commit; the same window is shown/hidden by the IPC layer
+//! when the shelf card becomes visible or is dismissed.
+//!
+//! The shelf module is intentionally tiny: it owns the Tauri
+//! `WebviewWindow` handle and exposes the few helpers the IPC layer
+//! needs (`preallocate`, `show_card`, `hide_card`). The actual
+//! positioning math lives in `pixelgrab_contracts::ShelfPosition` so
+//! the integration tests can exercise it without Tauri.
+
+use pixelgrab_contracts::{ShelfId, ShelfPosition};
+use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+
+/// Pre-allocate the shelf window. Idempotent — early-returns when the
+/// window already exists.
+pub fn preallocate<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    if app.get_webview_window("shelf").is_some() {
+        return Ok(());
+    }
+    let _ = WebviewWindowBuilder::new(app, "shelf", WebviewUrl::App("shelf.html".into()))
+        .title("PixelGrab Shelf")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .resizable(false)
+        .focused(false)
+        .build()?;
+    Ok(())
+}
+
+/// Position and show the shelf window at the computed placement. No-op
+/// when the window does not exist (e.g. during tests).
+pub fn show_card<R: Runtime>(
+    app: &AppHandle<R>,
+    position: &ShelfPosition,
+    _shelf_id: &ShelfId,
+) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("shelf") else {
+        return Ok(());
+    };
+    window.set_position(tauri::PhysicalPosition::new(position.x, position.y))?;
+    window.set_size(tauri::PhysicalSize::new(position.width, position.height))?;
+    window.show()?;
+    Ok(())
+}
+
+/// Hide the shelf window. No-op when the window does not exist.
+pub fn hide_card<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("shelf") else {
+        return Ok(());
+    };
+    window.hide()?;
+    Ok(())
+}
+
+/// One-card view model for the shelf webview. Sent via the
+/// `pixelgrab://shelf-updated` event so the Svelte component can
+/// render the most recent card.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfCardView {
+    /// Shelf card id (UUID v4).
+    pub shelf_id: ShelfId,
+    /// Capture id (UUID v4) the card represents.
+    pub capture_id: String,
+    /// Absolute path to the flattened PNG the card displays.
+    pub png_path: String,
+    /// Total entry size in bytes.
+    pub size_bytes: u64,
+    /// Wall-clock millis when the entry became durable.
+    pub created_at_ms: i64,
+    /// Physical bounds of the captured crop.
+    pub bounds: pixelgrab_contracts::PhysicalBounds,
+    /// Editable metadata persisted with the entry.
+    pub metadata: pixelgrab_contracts::CacheEntryMetadata,
+}
+
+impl ShelfCardView {
+    /// Build a view from a public `CacheEntry`.
+    pub fn from_entry(entry: &pixelgrab_contracts::CacheEntry) -> Self {
+        Self {
+            shelf_id: entry.shelf_id.clone(),
+            capture_id: entry.capture_id.clone(),
+            png_path: entry.png_path.clone(),
+            size_bytes: entry.size_bytes,
+            created_at_ms: entry.created_at_ms,
+            bounds: entry.bounds,
+            metadata: entry.metadata.clone(),
+        }
+    }
+}

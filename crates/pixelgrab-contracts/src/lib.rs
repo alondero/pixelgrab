@@ -11,6 +11,7 @@
 #![deny(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod cache;
 pub mod capture;
 pub mod coordinate;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod ipc;
 pub mod monitor;
 pub mod session;
 
+pub use cache::{CacheEntry, CacheEntryMetadata, CaptureId, LockOwner, ShelfId, ShelfPosition};
 pub use capture::{CaptureFormat, CaptureRequest, CaptureResolution};
 pub use coordinate::{
     transform, ClientBounds, ClientPoint, ClientSize, PhysicalBounds, PhysicalPoint, PhysicalSize,
@@ -26,8 +28,9 @@ pub use coordinate::{
 pub use error::{PlatformError, PlatformErrorKind, PlatformResult};
 pub use ipc::{
     CancelOutcome, CaptureDiagnostics, CaptureIntent, CaptureResponse, CommitOutcome,
-    CommitRequest, CommitResponse, IpcError, IpcResponse, OverlaySelection, RequestCaptureIntent,
-    RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SessionSnapshot,
+    CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError,
+    IpcResponse, OverlaySelection, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
+    RequestOverlayResult, SessionSnapshot, ShelfSnapshot, UpdateCacheMetadataRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use session::{SessionState, SessionTransition};

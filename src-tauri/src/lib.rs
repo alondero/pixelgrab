@@ -7,11 +7,13 @@
 #![deny(missing_docs)]
 #![allow(clippy::needless_return)]
 
+pub mod cache;
 pub mod error;
 pub mod ipc;
 pub mod overlay;
 pub mod platform;
 pub mod session;
+pub mod shelf;
 pub mod singleton;
 pub mod tray;
 
@@ -33,13 +35,19 @@ pub use crate::session::{EscapeAction, SessionOrchestrator};
 pub struct PixelGrabApp {
     platform: Arc<dyn platform::PixelGrabPlatform>,
     session: Arc<SessionOrchestrator>,
+    cache: Arc<Cache>,
 }
 
 impl PixelGrabApp {
     /// Construct a new builder with the given platform implementation.
     pub fn new(platform: Arc<dyn platform::PixelGrabPlatform>) -> Self {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
-        Self { platform, session }
+        let cache = Arc::new(Cache::new());
+        Self {
+            platform,
+            session,
+            cache,
+        }
     }
 
     /// Handle to the session orchestrator.
@@ -51,7 +59,15 @@ impl PixelGrabApp {
     pub fn platform(&self) -> Arc<dyn platform::PixelGrabPlatform> {
         self.platform.clone()
     }
+
+    /// Handle to the cache store.
+    pub fn cache(&self) -> Arc<Cache> {
+        self.cache.clone()
+    }
 }
+
+/// Re-export so tests and the IPC layer can name `Cache` directly.
+pub use cache::Cache;
 
 /// Run the Tauri application. This is the binary entrypoint.
 pub fn run() {
@@ -75,9 +91,11 @@ pub fn run() {
             let app_state = PixelGrabApp::new(platform);
             app.manage(app_state);
 
-            // Build the resident tray and the hidden overlay window.
+            // Build the resident tray, the hidden overlay window, and
+            // the hidden one-card shelf window.
             tray::install(app.handle())?;
             overlay::preallocate(app.handle())?;
+            shelf::preallocate(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -86,6 +104,9 @@ pub fn run() {
             ipc::request_commit,
             ipc::request_cancel,
             ipc::get_session_snapshot,
+            ipc::update_cache_metadata,
+            ipc::dismiss_cache_entry,
+            ipc::get_shelf_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");

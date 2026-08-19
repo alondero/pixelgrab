@@ -112,12 +112,16 @@ fn commit_response_round_trips() {
             shelf_id: None,
             png_path: Some("/tmp/abc.png".to_string()),
             png_bytes: 1024,
+            size_bytes: 4096,
+            created_at_ms: 1_700_000_000_000,
         },
     };
     let json = serde_json::to_string(&response).expect("serialize");
     assert!(json.contains("\"captureId\":\"abc\""));
     assert!(json.contains("\"pngPath\":\"/tmp/abc.png\""));
     assert!(json.contains("\"pngBytes\":1024"));
+    assert!(json.contains("\"sizeBytes\":4096"));
+    assert!(json.contains("\"createdAtMs\":1700000000000"));
 }
 
 #[test]
