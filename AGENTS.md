@@ -299,3 +299,65 @@ Events:
 - `pixelgrab://shelf-cleared` carries a typed
   `ShelfClearedEvent { shelfId: string }` payload. Emitted when a
   dismissal removes the entry from disk.
+
+## 13. Shelf queue, timers, and quick actions (tracer-08)
+
+Tracer 08 generalises the one-card shelf into a queue of up to four
+visible cards with an expandable `+N` overflow group. Per-card timers
+pause on hover and resume with a three-second grace period; quick
+actions (Copy, Save As, Dismiss) operate on the targeted card. The
+relevant code lives in:
+
+- `crates/pixelgrab-contracts/src/shelf_queue.rs` — `ShelfTimerConfig`,
+  `ShelfTimerState`, `ShelfQueueCard`, `ShelfQueueSnapshot`,
+  `CopyShelfCardRequest`, `SaveShelfCardAsRequest`. Mirrored in
+  `src/lib/ipc/types.ts`.
+- `src-tauri/src/shelf/queue.rs` — `ShelfQueueEngine`. Owns the
+  ordered list and per-card timer state; mirrors the cache but never
+  duplicates its lock or persistence invariants.
+- `src/lib/shelf/ShelfQueue.svelte` and `ShelfCard.svelte` — the
+  Svelte components that render the multi-card row + overflow panel.
+- `src/lib/shelf/queue.svelte.ts` — per-card countdown state driven
+  by `requestAnimationFrame` so the visual countdown updates without
+  a backend round-trip.
+
+### Queue engine ↔ cache
+
+The queue engine mirrors the cache; the cache still owns durability
+and the shelf lock. Every IPC layer mutation calls both: commit →
+`cache.commit` then `queue.add`; dismiss → `cache.dismiss` then
+`queue.dismiss`; tick → `queue.tick` returns expired ids and the IPC
+layer calls `cache.dismiss` on each. The cache lock is therefore
+released on every terminal path (commit, manual dismiss, expiry in
+either main view or overflow) without duplicating the lock invariant.
+
+### Per-card timers
+
+Timers use monotonic elapsed millis (driven by `performance.now()` on
+the frontend, `SystemTime` on the backend). On hover the frontend
+calls `hover_shelf_card`; the backend captures the remaining time.
+On leave the backend re-establishes the deadline as
+`now + max(paused_remaining, grace_ms)` so a card with very little
+remaining time still gets a fair chance to be read.
+
+### IPC surface
+
+New IPC commands (registered in `src-tauri/src/lib.rs`):
+
+- `copy_shelf_card` — reads the cached PNG and publishes it to the
+  system clipboard via `PixelGrabPlatform::publish_png_clipboard`.
+- `save_shelf_card_as` — opens the native Save As dialog and writes
+  the cached PNG bytes to the chosen path.
+- `hover_shelf_card` / `unhover_shelf_card` — pause or resume the
+  targeted card's timer.
+- `tick_shelf_queue` — run one expiry pass on the queue; the backend
+  dismisses each expired id from the cache.
+- `get_shelf_queue_snapshot` — return the current `ShelfQueueSnapshot`
+  for frontend rehydration.
+
+Events:
+
+- `pixelgrab://shelf-queue-updated` carries a `ShelfQueueSnapshot`
+  with all visible cards + overflow, their per-card timers, and the
+  computed window position. The frontend re-renders the queue from
+  the payload alone.

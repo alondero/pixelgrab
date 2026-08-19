@@ -167,4 +167,64 @@ describe("IPC type contract", () => {
     expect(json.sizeBytes).toBe(4096);
     expect(json.metadata.tags).toEqual(["tracer-07"]);
   });
+
+  it("ShelfQueueSnapshot carries cards, overflow, and timer", () => {
+    // Mirrors the Rust contract in
+    // `crates/pixelgrab-contracts/src/shelf_queue.rs`. The snapshot is
+    // the canonical wire shape for the `pixelgrab://shelf-queue-updated`
+    // event introduced by tracer 08.
+    const snapshot: import("./types").ShelfQueueSnapshot = {
+      cards: [
+        {
+          shelfId: "shelf-1",
+          captureId: "capture-1",
+          pngPath: "/cache/capture-1/capture.png",
+          sizeBytes: 4096,
+          createdAtMs: 1,
+          bounds: { origin: { x: 0, y: 0 }, size: { width: 100, height: 80 } },
+          metadata: { title: "Newest", note: "", tags: [] },
+          timer: {
+            addedAtElapsedMs: 0,
+            deadlineAtElapsedMs: 60_000,
+          },
+        },
+      ],
+      overflow: [
+        {
+          shelfId: "shelf-2",
+          captureId: "capture-2",
+          pngPath: "/cache/capture-2/capture.png",
+          sizeBytes: 4096,
+          createdAtMs: 0,
+          bounds: { origin: { x: 0, y: 0 }, size: { width: 100, height: 80 } },
+          metadata: { title: "Older", note: "", tags: [] },
+          timer: {
+            addedAtElapsedMs: 0,
+            deadlineAtElapsedMs: 60_000,
+            pausedAtElapsedMs: 5_000,
+            pausedRemainingMs: 12_000,
+          },
+        },
+      ],
+      snapshotAtMs: 7_777,
+    };
+    const json = JSON.parse(JSON.stringify(snapshot));
+    expect(json.cards).toHaveLength(1);
+    expect(json.overflow).toHaveLength(1);
+    expect(json.cards[0].timer.deadlineAtElapsedMs).toBe(60_000);
+    expect(json.overflow[0].timer.pausedRemainingMs).toBe(12_000);
+    expect(json.snapshotAtMs).toBe(7_777);
+  });
+
+  it("CopyShelfCardRequest carries the shelf id", () => {
+    const req: import("./types").CopyShelfCardRequest = { shelfId: "shelf-1" };
+    const json = JSON.parse(JSON.stringify(req));
+    expect(json.shelfId).toBe("shelf-1");
+  });
+
+  it("HoverShelfCardRequest carries the shelf id", () => {
+    const req: import("./types").HoverShelfCardRequest = { shelfId: "shelf-2" };
+    const json = JSON.parse(JSON.stringify(req));
+    expect(json.shelfId).toBe("shelf-2");
+  });
 });

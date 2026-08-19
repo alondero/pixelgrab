@@ -178,6 +178,42 @@ impl ShelfPosition {
             margin_px: Self::DEFAULT_MARGIN_PX,
         }
     }
+
+    /// Width of a single queue card in physical pixels. Used by
+    /// [`shelf_queue_position`](Self::shelf_queue_position) to lay out
+    /// the multi-card row.
+    pub const QUEUE_CARD_WIDTH: u32 = 200;
+    /// Height of a single queue card in physical pixels.
+    pub const QUEUE_CARD_HEIGHT: u32 = 150;
+    /// Gap between adjacent queue cards in physical pixels.
+    pub const QUEUE_CARD_GAP: u32 = 12;
+
+    /// Compute the placement of the shelf window for a queue of
+    /// `visible_cards` (clamped to `[1, MAX_VISIBLE_CARDS]`). The
+    /// window is anchored to the bottom-right of the primary
+    /// monitor's work area; its width scales with the visible card
+    /// count.
+    pub fn shelf_queue_position(monitor: &MonitorDescriptor, visible_cards: usize) -> Self {
+        let work_area = monitor.work_area;
+        let count = visible_cards.clamp(1, crate::MAX_VISIBLE_CARDS);
+        let width = Self::QUEUE_CARD_WIDTH * (count as u32)
+            + Self::QUEUE_CARD_GAP * ((count as u32).saturating_sub(1));
+        let height = Self::QUEUE_CARD_HEIGHT;
+        let margin = i64::from(Self::DEFAULT_MARGIN_PX);
+        let right = i64::from(work_area.origin.x) + i64::from(work_area.size.width) - margin;
+        let bottom = i64::from(work_area.origin.y) + i64::from(work_area.size.height) - margin;
+        let x = (right - i64::from(width)).max(i64::from(work_area.origin.x) + margin) as i32;
+        let y = (bottom - i64::from(height)).max(i64::from(work_area.origin.y) + margin) as i32;
+        Self {
+            monitor_id: monitor.id.clone(),
+            work_area,
+            x,
+            y,
+            width,
+            height,
+            margin_px: Self::DEFAULT_MARGIN_PX,
+        }
+    }
 }
 
 #[cfg(test)]

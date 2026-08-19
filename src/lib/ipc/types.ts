@@ -157,6 +157,61 @@ export interface CommitResponse {
   outcome: CommitOutcome;
 }
 
+export interface ShelfTimerConfig {
+  lifetimeMs: number;
+  graceMs: number;
+}
+
+export interface ShelfTimerState {
+  addedAtElapsedMs: number;
+  deadlineAtElapsedMs: number;
+  pausedAtElapsedMs?: number;
+  pausedRemainingMs?: number;
+}
+
+export interface ShelfQueueCard {
+  shelfId: string;
+  captureId: string;
+  pngPath: string;
+  sizeBytes: number;
+  createdAtMs: number;
+  bounds: PhysicalBounds;
+  metadata: CacheEntryMetadata;
+  timer: ShelfTimerState;
+}
+
+export interface ShelfQueueSnapshot {
+  cards: ShelfQueueCard[];
+  overflow: ShelfQueueCard[];
+  snapshotAtMs: number;
+  position?: ShelfPosition;
+}
+
+export interface CopyShelfCardRequest {
+  shelfId: string;
+}
+
+export interface CopyShelfCardResponse {
+  pngBytes: number;
+}
+
+export interface SaveShelfCardAsRequest {
+  shelfId: string;
+}
+
+export interface SaveShelfCardAsResponse {
+  path?: string;
+  pngBytes: number;
+}
+
+export interface HoverShelfCardRequest {
+  shelfId: string;
+}
+
+export interface UnhoverShelfCardRequest {
+  shelfId: string;
+}
+
 export interface RequestCaptureIntent {
   intent: "region" | "full_screen";
 }

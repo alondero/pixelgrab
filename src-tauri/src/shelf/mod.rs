@@ -4,11 +4,19 @@
 //! successful commit; the same window is shown/hidden by the IPC layer
 //! when the shelf card becomes visible or is dismissed.
 //!
+//! Tracer 08 generalises the one-card shelf into a queue of up to four
+//! cards with an expandable `+N` overflow group. The list ordering,
+//! per-card timers, hover-pause, and quick actions are owned by
+//! [`queue::ShelfQueueEngine`]; the Tauri side of this module only
+//! owns the window handle and the position math.
+//!
 //! The shelf module is intentionally tiny: it owns the Tauri
 //! `WebviewWindow` handle and exposes the few helpers the IPC layer
 //! needs (`preallocate`, `show_card`, `hide_card`). The actual
 //! positioning math lives in `pixelgrab_contracts::ShelfPosition` so
 //! the integration tests can exercise it without Tauri.
+
+pub mod queue;
 
 use pixelgrab_contracts::{ShelfId, ShelfPosition};
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
@@ -54,6 +62,20 @@ pub fn hide_card<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         return Ok(());
     };
     window.hide()?;
+    Ok(())
+}
+
+/// Reposition the shelf window for the given queue snapshot. No-op
+/// when the window does not exist or the snapshot is empty. The width
+/// of the window scales with the visible card count so all four cards
+/// fit side-by-side.
+pub fn show_queue<R: Runtime>(app: &AppHandle<R>, position: &ShelfPosition) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("shelf") else {
+        return Ok(());
+    };
+    window.set_position(tauri::PhysicalPosition::new(position.x, position.y))?;
+    window.set_size(tauri::PhysicalSize::new(position.width, position.height))?;
+    window.show()?;
     Ok(())
 }
 
