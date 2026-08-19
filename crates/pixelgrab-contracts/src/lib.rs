@@ -14,6 +14,7 @@
 pub mod cache;
 pub mod capture;
 pub mod coordinate;
+pub mod drag;
 pub mod error;
 pub mod ipc;
 pub mod monitor;
@@ -26,12 +27,17 @@ pub use coordinate::{
     transform, ClientBounds, ClientPoint, ClientSize, PhysicalBounds, PhysicalPoint, PhysicalSize,
     VirtualBounds,
 };
+pub use drag::{
+    DragDiagnostics, DragFormat, DragFormatRequest, DragOutcome, DragRequest, DragResult,
+    DragTargetEffect, DragTargetKind,
+};
 pub use error::{PlatformError, PlatformErrorKind, PlatformResult};
 pub use ipc::{
     CancelOutcome, CaptureDiagnostics, CaptureIntent, CaptureResponse, CommitOutcome,
     CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError,
     IpcResponse, OverlaySelection, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
-    RequestOverlayResult, SessionSnapshot, ShelfSnapshot, UpdateCacheMetadataRequest,
+    RequestOverlayResult, SessionSnapshot, ShelfSnapshot, StartShelfDragIntent,
+    StartShelfDragResult, UpdateCacheMetadataRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use session::{SessionState, SessionTransition};

@@ -227,6 +227,58 @@ export interface RequestCommitIntent {
   saveAs: boolean;
 }
 
+export type DragFormatKind = "hdrop" | "registered_png" | "dib_v5" | "unicode_text";
+
+export interface DragFormatRequest {
+  format: DragFormatKind;
+  atMs: number;
+}
+
+export type DragOutcomeKind = "accepted" | "rejected" | "cancelled" | "failed";
+
+export type DragTargetEffectKind = "copy" | "move" | "none" | "unknown";
+
+export type DragTargetKindKind =
+  | "chromium"
+  | "electron"
+  | "explorer"
+  | "ide"
+  | "rejecting"
+  | "other"
+  | "none";
+
+export interface DragDiagnostics {
+  startedAtMs: number;
+  completedAtMs: number;
+  durationMs: number;
+  requestedFormats?: DragFormatRequest[];
+  targetEffect: DragTargetEffectKind;
+  targetKind: DragTargetKindKind;
+  failureKind?: string;
+  captureId: string;
+  shelfId?: string;
+}
+
+export interface DragRequest {
+  captureId: string;
+  shelfId?: string;
+  pngPath: string;
+  bgraPixels: number[];
+  width: number;
+  height: number;
+}
+
+export interface StartShelfDragIntent {
+  request: DragRequest;
+  dismissOnAccepted?: boolean;
+}
+
+export interface StartShelfDragResult {
+  outcome: DragOutcomeKind;
+  diagnostics: DragDiagnostics;
+  shouldDismiss: boolean;
+}
+
 export interface PlatformErrorKind {
   kind:
     | "capture_unavailable"

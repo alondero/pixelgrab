@@ -4,6 +4,7 @@
 //! synthetic platform remains the default for CI.
 
 pub mod capture;
+pub mod drag;
 pub mod platform;
 
 pub use platform::WindowsPlatform;

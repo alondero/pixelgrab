@@ -249,6 +249,7 @@ pub fn run() {
             ipc::unhover_shelf_card,
             ipc::tick_shelf_queue,
             ipc::get_shelf_queue_snapshot,
+            ipc::start_shelf_drag,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");

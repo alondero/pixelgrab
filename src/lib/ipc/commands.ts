@@ -22,6 +22,8 @@ import type {
   SessionSnapshot,
   ShelfQueueSnapshot,
   ShelfSnapshot,
+  StartShelfDragIntent,
+  StartShelfDragResult,
   UnhoverShelfCardRequest,
   UpdateCacheMetadataRequest,
 } from "./types";
@@ -100,4 +102,10 @@ export async function unhoverShelfCard(
 
 export async function tickShelfQueue(): Promise<IpcResponse<ShelfQueueSnapshot>> {
   return invoke<IpcResponse<ShelfQueueSnapshot>>("tick_shelf_queue");
+}
+
+export async function startShelfDrag(
+  payload: StartShelfDragIntent,
+): Promise<IpcResponse<StartShelfDragResult>> {
+  return invoke<IpcResponse<StartShelfDragResult>>("start_shelf_drag", { payload });
 }

@@ -6,6 +6,7 @@
 use pixelgrab_contracts::{
     capture::{CaptureRequest, CaptureResolution},
     coordinate::{PhysicalBounds, PhysicalSize},
+    drag::{DragRequest, DragResult},
     monitor::MonitorLayout,
     PlatformResult,
 };
@@ -142,5 +143,20 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
             .and_then(|s| s.to_str())
             .unwrap_or("cached");
         self.publish_clipboard(capture_id, &buf, size)
+    }
+
+    /// Start an external drag-and-drop operation. The platform contract
+    /// owns the OLE state for the full synchronous drag loop: it must
+    /// hold the file handle for the backing PNG, the COM allocations, and
+    /// any cache lock alive until `DoDragDrop` returns. The default
+    /// implementation rejects the call with `Unsupported` so the synthetic
+    /// adapter must opt in explicitly. The Windows adapter implements
+    /// `IDataObject` / `IDropSource` and translates the terminal HRESULT
+    /// into a `DragResult`.
+    fn start_drag(&self, _request: &DragRequest) -> PlatformResult<DragResult> {
+        Err(pixelgrab_contracts::PlatformError::new(
+            pixelgrab_contracts::PlatformErrorKind::Unsupported,
+            "platform does not expose an external drag implementation",
+        ))
     }
 }

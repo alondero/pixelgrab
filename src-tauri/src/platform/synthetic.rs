@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use pixelgrab_contracts::{
     capture::{CaptureFormat, CaptureRequest, CaptureResolution},
     coordinate::{PhysicalBounds, PhysicalSize},
+    drag::{DragRequest, DragResult},
     monitor::MonitorLayout,
     PlatformError, PlatformErrorKind, PlatformResult,
 };
@@ -16,6 +17,7 @@ use pixelgrab_test_support::{layout::SyntheticMonitorLayout, SyntheticCapture, S
 use uuid::Uuid;
 
 use super::contract::PixelGrabPlatform;
+use super::drag_synthetic::SyntheticDragSource;
 
 /// The synthetic platform. Holds the test layout, the synthetic capture, and
 /// a path to the isolated filesystem root under which PNGs are written.
@@ -29,6 +31,7 @@ struct SyntheticPlatformState {
     layout: Mutex<MonitorLayout>,
     capture: SyntheticCapture,
     cache_root: Mutex<Option<PathBuf>>,
+    drag: SyntheticDragSource,
 }
 
 impl SyntheticPlatform {
@@ -45,6 +48,7 @@ impl SyntheticPlatform {
                 layout: Mutex::new(layout),
                 capture: SyntheticCapture::new(frame),
                 cache_root: Mutex::new(None),
+                drag: SyntheticDragSource::new(),
             }),
         }
     }
@@ -64,6 +68,7 @@ impl SyntheticPlatform {
                 layout: Mutex::new(layout),
                 capture: SyntheticCapture::new(frame),
                 cache_root: Mutex::new(None),
+                drag: SyntheticDragSource::new(),
             }),
         }
     }
@@ -78,6 +83,12 @@ impl SyntheticPlatform {
     /// display changes.
     pub fn set_layout(&self, layout: MonitorLayout) {
         *self.inner.layout.lock() = layout;
+    }
+
+    /// Borrow the synthetic drag source. Tests use this to install a
+    /// custom script and to read back the recorded outcomes.
+    pub fn drag_source(&self) -> SyntheticDragSource {
+        self.inner.drag.clone()
     }
 
     /// Try to downcast an `Arc<dyn PixelGrabPlatform>` to a concrete
@@ -228,5 +239,9 @@ impl PixelGrabPlatform for SyntheticPlatform {
         // the synthetic path doesn't key the buffer by id.
         let _ = capture_id;
         Ok((rgba, size))
+    }
+
+    fn start_drag(&self, request: &DragRequest) -> PlatformResult<DragResult> {
+        self.inner.drag.run(request)
     }
 }

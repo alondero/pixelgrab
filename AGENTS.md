@@ -361,3 +361,27 @@ Events:
   with all visible cards + overflow, their per-card timers, and the
   computed window position. The frontend re-renders the queue from
   the payload alone.
+
+## 14. External drag pipeline (tracer-09)
+
+The external drag lives behind the `PixelGrabPlatform::start_drag`
+trait method (`crates/pixelgrab-contracts/src/drag.rs`). The platform
+contract hides the Windows OLE pipeline behind the trait; the
+synthetic adapter is the fault-injection seam for CI.
+
+The drag offers four clipboard formats from a single stable PNG:
+`CF_HDROP`, a registered PNG format, `CF_DIBV5`, and
+`CF_UNICODETEXT`. The `OleState` owns the PNG bytes for the full
+synchronous `DoDragDrop` call, so the cache layer must hold a `Drag`
+lock on the entry for the duration of the call.
+
+The terminal outcome is one of `Accepted`, `Rejected`, `Cancelled`,
+or `Failed`. Only `Accepted` triggers the optional card dismissal.
+The `DragDiagnostics` record carries the formats the target pulled,
+the timings, the target effect, and the categorical failure kind —
+never the captured pixels or the absolute PNG path.
+
+The Windows adapter is hand-rolled on a minimal COM vtable so the
+build does not depend on the `windows` crate's macro evolution.
+Tests are wired into `synthetic_capture`, `session_lifecycle`, and
+the IPC contract suites.

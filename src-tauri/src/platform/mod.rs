@@ -4,6 +4,7 @@
 //! orchestrator without any OS dependency.
 
 pub mod contract;
+pub mod drag_synthetic;
 
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
@@ -12,6 +13,7 @@ pub mod synthetic;
 pub mod windows;
 
 pub use contract::{CaptureError, PixelGrabPlatform};
+pub use drag_synthetic::{DragOutcomePlan, SyntheticDragScript, SyntheticDragSource};
 
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform;
