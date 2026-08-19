@@ -2,21 +2,35 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { session } from "$lib/stores/session.svelte";
-  import { requestCapture, getSessionSnapshot } from "$lib/ipc/commands";
-  import type { CaptureResolutionDto, IpcResponse } from "$lib/ipc/types";
+  import { requestCapture, requestCancel, getSessionSnapshot } from "$lib/ipc/commands";
+  import type { CaptureDiagnostics, IpcResponse } from "$lib/ipc/types";
 
-  let lastCapture = $state<CaptureResolutionDto | null>(null);
+  let lastCaptureId = $state<string | null>(null);
+  let lastCaptureBounds = $state<string | null>(null);
+  let diagnostics = $state<CaptureDiagnostics | null>(null);
   let pendingError = $state<string | null>(null);
 
   async function onCaptureIntent() {
     pendingError = null;
     const response = await requestCapture({ intent: "region" });
     if (response.status === "ok") {
-      lastCapture = response.data;
+      lastCaptureId = response.data.capture.captureId;
+      lastCaptureBounds = `${response.data.capture.bounds.size.width}x${response.data.capture.bounds.size.height}`;
+      diagnostics = response.data.diagnostics ?? null;
       session.setSnapshot({
         state: "ready",
-        lastCapture: response.data,
+        lastCapture: response.data.capture,
       });
+    } else {
+      pendingError = response.error.message;
+    }
+  }
+
+  async function onCancelIntent() {
+    pendingError = null;
+    const response = await requestCancel();
+    if (response.status === "ok") {
+      session.setSnapshot(response.data.snapshot);
     } else {
       pendingError = response.error.message;
     }
@@ -43,12 +57,14 @@
 <main class="app">
   <h1>PixelGrab</h1>
   <p class="muted">
-    Tracer 01 foundation. The tray, shortcut, and overlay wiring are in place; subsequent tracers
-    deliver the capture pipeline and annotation experience.
+    Tracer 02 capture pipeline. The tray, shortcut, and overlay wiring drive a real Windows region
+    capture through the xcap-backed adapter; the overlay renders a dim mask, crosshair, and resize
+    handles and honours Ctrl+C commit and staged Escape.
   </p>
 
   <section class="controls">
-    <button type="button" onclick={onCaptureIntent}> Trigger synthetic capture </button>
+    <button type="button" onclick={onCaptureIntent}> Trigger capture </button>
+    <button type="button" onclick={onCancelIntent}> Cancel </button>
     <button type="button" onclick={refreshSnapshot}>Refresh snapshot</button>
   </section>
 
@@ -59,13 +75,17 @@
       <dd data-testid="session-state">{session.snapshot.state}</dd>
       <dt>Last capture id</dt>
       <dd data-testid="session-capture-id">
-        {lastCapture?.captureId ?? "(none)"}
+        {lastCaptureId ?? "(none)"}
       </dd>
       <dt>Last capture bounds</dt>
       <dd data-testid="session-capture-bounds">
-        {lastCapture
-          ? `${lastCapture.bounds.size.width}x${lastCapture.bounds.size.height}`
-          : "(none)"}
+        {lastCaptureBounds ?? "(none)"}
+      </dd>
+      <dt>Capture-to-overlay latency</dt>
+      <dd data-testid="capture-to-overlay">
+        {diagnostics?.captureToOverlayMs !== undefined
+          ? `${diagnostics.captureToOverlayMs} ms`
+          : "(n/a)"}
       </dd>
     </dl>
     {#if pendingError}

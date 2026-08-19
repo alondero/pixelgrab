@@ -3,19 +3,28 @@
 // reproduces the deterministic synthetic capture described in ADR-0004.
 
 import type {
-  CaptureResolutionDto,
+  CancelOutcome,
+  CaptureDiagnostics,
+  CaptureResponse,
   CommitResponse,
   IpcResponse,
   PhysicalBounds,
   RequestCaptureIntent,
   RequestCommitIntent,
   RequestOverlayIntent,
+  RequestOverlayResult,
   SessionSnapshot,
   SessionState,
 } from "./types";
 
 const sessionState: { value: SessionState } = $state({ value: "idle" });
-let lastCapture: CaptureResolutionDto | undefined;
+let lastCapture:
+  | {
+      captureId: string;
+      bounds: PhysicalBounds;
+    }
+  | undefined;
+let lastDiagnostics: CaptureDiagnostics | undefined;
 let selection: PhysicalBounds | undefined;
 
 /** Read the current session state for tests. */
@@ -36,33 +45,63 @@ function err<T>(message: string): IpcResponse<T> {
 
 export async function mockRequestCapture(
   intent: RequestCaptureIntent,
-): Promise<IpcResponse<CaptureResolutionDto>> {
+): Promise<IpcResponse<CaptureResponse>> {
   if (sessionState.value !== "idle") {
     return err("capture already in progress");
   }
   sessionState.value = "capturing";
+  const startedAt = Date.now();
   const captureId = crypto.randomUUID();
-  const capture: CaptureResolutionDto = {
-    format: "virtual_desktop",
-    bounds: { origin: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } },
+  const bounds = { origin: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } };
+  const capture = {
+    format: "virtual_desktop" as const,
+    bounds,
     assetUrl: `data:image/png;base64,${syntheticPngBase64(intent.intent)}`,
     captureId,
     capturedAtMs: Date.now(),
   };
-  lastCapture = capture;
+  lastCapture = { captureId, bounds };
+  lastDiagnostics = {
+    captureId,
+    captureStartedAtMs: startedAt,
+    captureCompletedAtMs: Date.now(),
+    captureDurationMs: Date.now() - startedAt,
+    monitorId: "virtual-desktop",
+    bounds,
+  };
   sessionState.value = "ready";
-  return ok(capture);
+  return ok({ capture, diagnostics: lastDiagnostics });
 }
 
 export async function mockRequestOverlay(
   payload: RequestOverlayIntent,
-): Promise<IpcResponse<SessionSnapshot>> {
+): Promise<IpcResponse<RequestOverlayResult>> {
   if (sessionState.value !== "ready" && sessionState.value !== "selecting") {
     return err("overlay not ready");
   }
   selection = payload.selection;
   sessionState.value = "selecting";
-  return ok({ state: sessionState.value, lastCapture, selection });
+  if (lastDiagnostics) {
+    lastDiagnostics = {
+      ...lastDiagnostics,
+      overlayVisibleAtMs: Date.now(),
+      captureToOverlayMs: Date.now() - lastDiagnostics.captureCompletedAtMs,
+    };
+  }
+  const snapshot: SessionSnapshot = {
+    state: sessionState.value,
+    lastCapture: lastCapture
+      ? {
+          format: "virtual_desktop",
+          bounds: lastCapture.bounds,
+          assetUrl: `data:image/png;base64,${syntheticPngBase64("region")}`,
+          captureId: lastCapture.captureId,
+          capturedAtMs: Date.now(),
+        }
+      : undefined,
+    selection,
+  };
+  return ok({ snapshot, diagnostics: lastDiagnostics });
 }
 
 export async function mockRequestCommit(
@@ -72,9 +111,12 @@ export async function mockRequestCommit(
     return err("nothing to commit");
   }
   const captureId = crypto.randomUUID();
+  sessionState.value = "committing";
   sessionState.value = "cleanup";
-  sessionState.value = "idle";
   selection = undefined;
+  lastDiagnostics = undefined;
+  lastCapture = undefined;
+  sessionState.value = "idle";
   return ok({
     outcome: {
       captureId,
@@ -84,13 +126,54 @@ export async function mockRequestCommit(
   });
 }
 
+export async function mockRequestCancel(): Promise<IpcResponse<CancelOutcome>> {
+  const state = sessionState.value;
+  let action: CancelOutcome["action"] = "noop";
+  if (state === "selecting" && hasSelection()) {
+    selection = undefined;
+    action = "selection_cleared";
+  } else if (state !== "idle") {
+    action = "session_cancelled";
+    sessionState.value = "cleanup";
+    sessionState.value = "idle";
+    selection = undefined;
+    lastDiagnostics = undefined;
+    lastCapture = undefined;
+  }
+  return ok({
+    action,
+    snapshot: {
+      state: sessionState.value,
+      selection,
+    },
+  });
+}
+
+function hasSelection(): boolean {
+  if (!selection) return false;
+  return selection.size.width > 0 && selection.size.height > 0;
+}
+
 export async function mockGetSessionSnapshot(): Promise<IpcResponse<SessionSnapshot>> {
-  return ok({ state: sessionState.value, lastCapture, selection });
+  return ok({
+    state: sessionState.value,
+    lastCapture: lastCapture
+      ? {
+          format: "virtual_desktop",
+          bounds: lastCapture.bounds,
+          assetUrl: `data:image/png;base64,${syntheticPngBase64("region")}`,
+          captureId: lastCapture.captureId,
+          capturedAtMs: Date.now(),
+        }
+      : undefined,
+    selection,
+  });
 }
 
 export function __resetMock() {
   sessionState.value = "idle";
   lastCapture = undefined;
+  lastDiagnostics = undefined;
   selection = undefined;
 }
 

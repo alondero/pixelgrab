@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (tracer-01).
+Accepted (tracer-01). Extended in tracer-02 with the four conversion boundaries
+introduced by the real Windows capture pipeline.
 
 ## Context
 
@@ -36,16 +37,48 @@ core uses the same physical bounds to:
 
 Conversions only happen at the Rust / frontend boundary:
 
-| From                | To          | Where                              |
-| ------------------- | ----------- | ---------------------------------- |
-| Client (CSS pixels) | Physical    | Rust core, on commit               |
-| Physical            | Client      | Rust core, on overlay show         |
-| Capture buffer      | Physical    | Rust core, when stitching monitors |
-| Physical            | Export crop | Rust core, on commit               |
+| From                | To          | Where                        |
+| ------------------- | ----------- | ---------------------------- |
+| Client (CSS pixels) | Physical    | Rust core, on overlay commit |
+| Physical            | Capture buf | Rust core, on commit flatten |
+| Capture buf         | Export      | Rust core, on commit flatten |
+| Capture buf         | Physical    | Rust core, when cropping     |
 
 The frontend never infers a physical coordinate from a CSS coordinate.
 Every selection report is in physical coordinates, and the overlay
 recomputes the on-screen crop from the physical bounds it received.
+
+### Conversion boundaries (tracer-02)
+
+1. **Client → Physical (`client_to_physical`).** The overlay drags a
+   rectangle in CSS pixels; on commit, the Rust core converts to
+   physical pixels using `capture_bounds.size / stage_size` as the
+   scale factor and `capture_bounds.origin` as the translation. Both
+   axes use `round-half-away-from-zero` so a click that lands on a
+   half-pixel rounds consistently.
+2. **Physical → Capture buffer (`physical_to_capture_buffer`).** The
+   commit pipeline translates the physical crop into the frozen
+   framebuffer's local coordinate space by subtracting the capture
+   bounds origin. The result is clamped to zero so a crop that lies
+   before the capture origin cannot produce a negative offset.
+3. **Capture buffer → Export (`clamp_to_capture_buffer`).** The final
+   clamp ensures the export crop stays within the captured framebuffer
+   extents. This is the last guard before the PNG and bitmap clipboard
+   representations are encoded.
+4. **Capture buffer → Physical (crop extract).** When the Windows
+   `FrozenFrame::crop` reads bytes out of the framebuffer, it returns
+   the rectangle in physical coordinates by re-adding the capture
+   bounds origin to the in-buffer coordinates.
+
+### Rounding policy
+
+All conversions round to the nearest pixel using
+`f64::round`-away-from-zero semantics. NaN and non-finite inputs
+collapse to zero so a bad transform cannot propagate a wildly
+out-of-range coordinate downstream. The exact rules live in
+`pixelgrab_contracts::coordinate::transform::round_to_i32` /
+`round_to_u32`; both functions are unit-tested for the boundary
+conditions (NaN, infinity, exact half, overflow).
 
 ## Consequences
 
@@ -54,13 +87,16 @@ recomputes the on-screen crop from the physical bounds it received.
 - The Rust core is the single source of truth for physical coordinates.
 - Selections are stable across DPI changes.
 - Multi-monitor layouts with negative origins are handled correctly.
+- The four boundary functions cover every pixel-shuffling operation in
+  the codebase, so auditing coordinate correctness reduces to reading
+  one module.
 
 ### Negative
 
 - The frontend must always report physical coordinates, even when the
   user is dragging in CSS pixels.
-- Negligible: the conversion happens once per overlay show and once per
-  commit.
+- Negligible: each conversion is a handful of arithmetic operations
+  per commit.
 
 ### Trade-offs
 
@@ -76,3 +112,5 @@ recomputes the on-screen crop from the physical bounds it received.
   and varies between monitors on the same machine.
 - **WebView client coordinates are physical.** Rejected. The WebView
   uses CSS pixels, which scale with the browser zoom and DPI.
+- **Inline per-call rounding.** Rejected. Spreads rounding policy
+  across the codebase and makes consistency impossible to audit.

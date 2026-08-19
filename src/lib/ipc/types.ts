@@ -48,10 +48,37 @@ export interface CaptureResolutionDto {
   capturedAtMs: number;
 }
 
+export interface CaptureDiagnostics {
+  captureId: string;
+  captureStartedAtMs: number;
+  captureCompletedAtMs: number;
+  captureDurationMs: number;
+  overlayVisibleAtMs?: number;
+  captureToOverlayMs?: number;
+  monitorId: string;
+  bounds: PhysicalBounds;
+  failureKind?: string;
+}
+
+export interface CaptureResponse {
+  capture: CaptureResolutionDto;
+  diagnostics?: CaptureDiagnostics;
+}
+
 export interface SessionSnapshot {
   state: SessionState;
   lastCapture?: CaptureResolutionDto;
   selection?: PhysicalBounds;
+}
+
+export interface RequestOverlayResult {
+  snapshot: SessionSnapshot;
+  diagnostics?: CaptureDiagnostics;
+}
+
+export interface CancelOutcome {
+  action: "selection_cleared" | "session_cancelled" | "noop";
+  snapshot: SessionSnapshot;
 }
 
 export interface CommitRequest {

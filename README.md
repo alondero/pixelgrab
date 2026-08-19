@@ -1,7 +1,7 @@
 # PixelGrab
 
 > Local-first Windows desktop capture and annotation utility.
-> Tracer-01: project foundation and runnable capture spine.
+> Tracer-02: real Windows region capture with structured diagnostics.
 
 PixelGrab lets you turn anything visible on a Windows desktop into precise
 visual context for an agent, browser, IDE, or collaborator. Capture a region,
@@ -10,17 +10,28 @@ application. All processing happens locally.
 
 ## Status
 
-This is the **tracer-01** build. It establishes the project foundation:
+This is the **tracer-02** build. It extends the tracer-01 foundation with the
+real Windows capture pipeline:
 
-- Build system and tooling (Tauri 2, Rust, Svelte 5, TypeScript, Konva, Vite, pnpm).
-- Test harnesses (Cargo, Vitest, golden-image, Tauri mock runtime).
-- A synthetic capture pipeline that exercises the full Rust -> IPC -> Svelte
-  -> Konva -> PNG path with no real desktop content.
-- A single-instance tray and pre-allocated overlay window.
-- Quality gates, CI workflow, and the documentation suite.
+- `xcap`-backed Windows capture engine (`src-tauri/src/platform/windows/`)
+  implementing the `PixelGrabPlatform` trait behind Windows Graphics Capture.
+- Centralised coordinate conversion utilities in
+  `pixelgrab_contracts::coordinate::transform` (client ↔ physical,
+  physical ↔ capture buffer, capture buffer ↔ export).
+- Frozen-frame retention so the commit pipeline can flatten without
+  re-capturing; the flattened RGBA is the single source for the PNG
+  and the bitmap-compatible clipboard representation.
+- Overlay UI with dim mask, crosshair, and eight resize handles, wired
+  to Ctrl+C commit and staged Escape behaviour via the
+  `request_cancel` IPC.
+- Structured capture diagnostics (`CaptureDiagnostics`) carrying
+  capture-to-overlay latency and failure categorisation without ever
+  recording pixels or clipboard content.
+- Session orchestrator that rejects overlapping capture requests and
+  returns to `Idle` deterministically on every exit path.
 
-Subsequent tracers (issues #14 through #27) deliver the real Windows
-capture, the annotation experience, the shelf, the OLE drag, and the pin
+Subsequent tracers (issues #15 through #27) deliver multi-monitor
+overlay, the annotation experience, the shelf, the OLE drag, and the pin
 references.
 
 ## Quickstart (Windows)

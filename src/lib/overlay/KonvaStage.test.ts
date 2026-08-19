@@ -51,6 +51,11 @@ vi.mock("konva", () => {
     position(_v?: { x: number; y: number }) {}
     size(_v?: { width: number; height: number }) {}
     visible(_v?: boolean) {}
+    points(_v?: number[]) {}
+  }
+  class FakeLine {
+    points(_v?: number[]) {}
+    visible(_v?: boolean) {}
   }
   return {
     default: {
@@ -58,6 +63,7 @@ vi.mock("konva", () => {
       Layer: FakeLayer,
       Image: FakeImage,
       Rect: FakeRect,
+      Line: FakeLine,
     },
   };
 });
@@ -71,6 +77,8 @@ describe("KonvaStage", () => {
       props: {
         assetUrl: "data:image/png;base64,AAAA",
         bounds: { origin: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } },
+        stageWidth: 960,
+        stageHeight: 540,
         onSelectionChange: () => {},
       },
     });

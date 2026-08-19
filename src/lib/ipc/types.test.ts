@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import type {
+  CaptureDiagnostics,
   CaptureResolutionDto,
   CommitRequest,
   CommitResponse,
@@ -124,5 +125,22 @@ describe("IPC type contract", () => {
     };
     expect(bounds.origin.x).toBe(1);
     expect(bounds.size.height).toBe(4);
+  });
+
+  it("CaptureDiagnostics serialises to camelCase", () => {
+    const diag: CaptureDiagnostics = {
+      captureId: "id",
+      captureStartedAtMs: 1,
+      captureCompletedAtMs: 30,
+      captureDurationMs: 29,
+      overlayVisibleAtMs: 40,
+      captureToOverlayMs: 10,
+      monitorId: "primary",
+      bounds: { origin: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } },
+    };
+    const json = JSON.parse(JSON.stringify(diag));
+    expect(json.captureStartedAtMs).toBe(1);
+    expect(json.captureToOverlayMs).toBe(10);
+    expect(json.monitorId).toBe("primary");
   });
 });

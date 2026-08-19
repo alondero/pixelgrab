@@ -4,6 +4,6 @@
 
 pub mod state;
 
-pub use state::SessionOrchestrator;
+pub use state::{EscapeAction, SessionOrchestrator};
 
 pub use pixelgrab_contracts::session::SessionState;

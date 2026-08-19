@@ -191,6 +191,45 @@ pub struct SessionSnapshot {
     pub selection: Option<PhysicalBounds>,
 }
 
+/// Wire shape for the `request_capture` response. Carries the capture
+/// metadata and the structured diagnostics record for telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureResponse {
+    /// Capture resolution (DTO shape for the frontend).
+    pub capture: CaptureResolutionDto,
+    /// Diagnostics record for the capture. `None` if the orchestrator has
+    /// not stamped a record yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<CaptureDiagnostics>,
+}
+
+/// Wire shape for the `request_overlay` response. Includes the snapshot
+/// the UI uses to render and the diagnostics record (now with the
+/// capture-to-overlay latency populated).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestOverlayResult {
+    /// Updated session snapshot after the overlay has acknowledged its
+    /// selection.
+    pub snapshot: SessionSnapshot,
+    /// Diagnostics record with the overlay-visible timestamp stamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<CaptureDiagnostics>,
+}
+
+/// Wire shape for the `request_cancel` response. The `action` field is a
+/// stable string the frontend uses to drive the visual state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelOutcome {
+    /// Stable action label - one of "selection_cleared", "session_cancelled",
+    /// or "noop".
+    pub action: String,
+    /// Updated session snapshot after the cancel has been processed.
+    pub snapshot: SessionSnapshot,
+}
+
 /// The overlay's view of the user's selection. Mirrors `RequestOverlayIntent`
 /// but is the *outcome* sent back to the core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,4 +239,82 @@ pub struct OverlaySelection {
     pub crop: PhysicalBounds,
     /// Whether the user confirmed the selection (vs cancelled).
     pub confirmed: bool,
+}
+
+/// Structured capture diagnostics. Returned alongside the
+/// `CaptureResolution` so the frontend can drive its loading spinner and the
+/// telemetry layer can attribute latency without inspecting log lines.
+///
+/// The struct never includes captured pixel bytes, clipboard content, or
+/// file paths outside the application cache root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDiagnostics {
+    /// Stable capture id (matches `CaptureResolution::capture_id`).
+    pub capture_id: String,
+    /// Wall-clock millisecond timestamp at which the capture request started.
+    pub capture_started_at_ms: i64,
+    /// Wall-clock millisecond timestamp at which the capture pipeline returned.
+    pub capture_completed_at_ms: i64,
+    /// Elapsed milliseconds from request start to capture complete.
+    pub capture_duration_ms: i64,
+    /// Wall-clock millisecond timestamp at which the overlay became visible.
+    pub overlay_visible_at_ms: Option<i64>,
+    /// Total latency (capture complete -> overlay visible). Populated after
+    /// the overlay is shown; None during the capturing phase.
+    pub capture_to_overlay_ms: Option<i64>,
+    /// Identifier of the monitor captured (or "virtual-desktop" if stitched).
+    pub monitor_id: String,
+    /// Resolution the capture pipeline reported.
+    pub bounds: PhysicalBounds,
+    /// Stable failure discriminant, if the capture failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+}
+
+impl CaptureDiagnostics {
+    /// Build a fresh diagnostics record at capture-request time.
+    pub fn started(
+        capture_id: impl Into<String>,
+        monitor_id: impl Into<String>,
+        bounds: PhysicalBounds,
+        started_at_ms: i64,
+    ) -> Self {
+        Self {
+            capture_id: capture_id.into(),
+            capture_started_at_ms: started_at_ms,
+            capture_completed_at_ms: 0,
+            capture_duration_ms: 0,
+            overlay_visible_at_ms: None,
+            capture_to_overlay_ms: None,
+            monitor_id: monitor_id.into(),
+            bounds,
+            failure_kind: None,
+        }
+    }
+
+    /// Mark the capture as completed and compute the duration.
+    pub fn completed(mut self, completed_at_ms: i64) -> Self {
+        self.capture_completed_at_ms = completed_at_ms;
+        self.capture_duration_ms = completed_at_ms.saturating_sub(self.capture_started_at_ms);
+        self
+    }
+
+    /// Mark the overlay as visible and compute the capture-to-overlay
+    /// latency.
+    pub fn overlay_visible(mut self, overlay_at_ms: i64) -> Self {
+        self.overlay_visible_at_ms = Some(overlay_at_ms);
+        if self.capture_completed_at_ms > 0 {
+            self.capture_to_overlay_ms =
+                Some(overlay_at_ms.saturating_sub(self.capture_completed_at_ms));
+        }
+        self
+    }
+
+    /// Record a failure discriminant. Use only the categorical kind string
+    /// (e.g. `"capture_unavailable"`) - never the raw error message.
+    pub fn failed(mut self, kind: impl Into<String>) -> Self {
+        self.failure_kind = Some(kind.into());
+        self
+    }
 }

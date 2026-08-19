@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   __resetMock,
+  mockRequestCancel,
   mockRequestCapture,
   mockRequestCommit,
   mockRequestOverlay,
@@ -21,7 +22,8 @@ describe("synthetic capture end-to-end", () => {
     const capture = await mockRequestCapture({ intent: "region" });
     expect(capture.status).toBe("ok");
     if (capture.status === "ok") {
-      expect(capture.data.captureId).toBeTruthy();
+      expect(capture.data.capture.captureId).toBeTruthy();
+      expect(capture.data.diagnostics?.captureId).toBe(capture.data.capture.captureId);
     }
     expect(mockSessionState()).toBe("ready");
 
@@ -29,6 +31,9 @@ describe("synthetic capture end-to-end", () => {
       selection: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
     });
     expect(overlay.status).toBe("ok");
+    if (overlay.status === "ok") {
+      expect(overlay.data.diagnostics?.captureToOverlayMs).toBeTypeOf("number");
+    }
     expect(mockSessionState()).toBe("selecting");
 
     const commit = await mockRequestCommit({
@@ -59,5 +64,27 @@ describe("synthetic capture end-to-end", () => {
       saveAs: false,
     });
     expect(commit.status).toBe("err");
+  });
+
+  it("Escape clears a selection then cancels the session", async () => {
+    await mockRequestCapture({ intent: "region" });
+    await mockRequestOverlay({
+      selection: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
+    });
+    expect(mockSessionState()).toBe("selecting");
+
+    const first = await mockRequestCancel();
+    expect(first.status).toBe("ok");
+    if (first.status === "ok") {
+      expect(first.data.action).toBe("selection_cleared");
+    }
+    expect(mockSessionState()).toBe("selecting");
+
+    const second = await mockRequestCancel();
+    expect(second.status).toBe("ok");
+    if (second.status === "ok") {
+      expect(second.data.action).toBe("session_cancelled");
+    }
+    expect(mockSessionState()).toBe("idle");
   });
 });

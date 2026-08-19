@@ -19,12 +19,15 @@ pub mod monitor;
 pub mod session;
 
 pub use capture::{CaptureFormat, CaptureRequest, CaptureResolution};
-pub use coordinate::{PhysicalBounds, PhysicalPoint, PhysicalSize, VirtualBounds};
+pub use coordinate::{
+    transform, ClientBounds, ClientPoint, ClientSize, PhysicalBounds, PhysicalPoint, PhysicalSize,
+    VirtualBounds,
+};
 pub use error::{PlatformError, PlatformErrorKind, PlatformResult};
 pub use ipc::{
-    CaptureIntent, CommitOutcome, CommitRequest, CommitResponse, IpcError, IpcResponse,
-    OverlaySelection, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
-    SessionSnapshot,
+    CancelOutcome, CaptureDiagnostics, CaptureIntent, CaptureResponse, CommitOutcome,
+    CommitRequest, CommitResponse, IpcError, IpcResponse, OverlaySelection, RequestCaptureIntent,
+    RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SessionSnapshot,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use session::{SessionState, SessionTransition};
