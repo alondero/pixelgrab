@@ -15,8 +15,10 @@ import type {
   RequestOverlayResult,
   SessionSnapshot,
   SessionState,
+  ShelfPreferencesDto,
   StartShelfDragIntent,
   StartShelfDragResult,
+  UpdateShelfPreferencesRequest,
 } from "./types";
 
 const sessionState: { value: SessionState } = $state({ value: "idle" });
@@ -28,6 +30,19 @@ let lastCapture:
   | undefined;
 let lastDiagnostics: CaptureDiagnostics | undefined;
 let selection: PhysicalBounds | undefined;
+// Tracer 12: in-memory mock for shelf preferences so the App can
+// render the SettingsPanel without the Tauri runtime. Updated by
+// `mockUpdateShelfPreferences`, read by `mockGetShelfPreferences`.
+let preferences: ShelfPreferencesDto = {
+  schemaVersion: 1,
+  corner: "bottom_right",
+  targetMonitorId: null,
+  marginPx: 24,
+  autoDismissEnabled: true,
+  lifetimeSeconds: 60,
+  visibleCardCount: 4,
+  showCountdown: true,
+};
 
 /** Read the current session state for tests. */
 export function mockSessionState(): SessionState {
@@ -195,11 +210,37 @@ export async function mockStartShelfDrag(
   });
 }
 
+// Tracer 12 mocks: in-memory preferences so the SettingsPanel can
+// render and update without a Tauri runtime. The Rust core is the
+// source of truth in production; here we only need the round-trip
+// to satisfy component tests.
+
+export async function mockGetShelfPreferences(): Promise<IpcResponse<ShelfPreferencesDto>> {
+  return ok({ ...preferences });
+}
+
+export async function mockUpdateShelfPreferences(
+  payload: UpdateShelfPreferencesRequest,
+): Promise<IpcResponse<ShelfPreferencesDto>> {
+  preferences = { ...preferences, ...payload.preferences };
+  return ok({ ...preferences });
+}
+
 export function __resetMock() {
   sessionState.value = "idle";
   lastCapture = undefined;
   lastDiagnostics = undefined;
   selection = undefined;
+  preferences = {
+    schemaVersion: 1,
+    corner: "bottom_right",
+    targetMonitorId: null,
+    marginPx: 24,
+    autoDismissEnabled: true,
+    lifetimeSeconds: 60,
+    visibleCardCount: 4,
+    showCountdown: true,
+  };
 }
 
 /**

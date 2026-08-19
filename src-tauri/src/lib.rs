@@ -12,6 +12,7 @@ pub mod error;
 pub mod ipc;
 pub mod overlay;
 pub mod platform;
+pub mod preferences;
 pub mod session;
 pub mod shelf;
 pub mod singleton;
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::preferences::PreferencesStore;
 use crate::session::SessionState;
 use crate::shelf::queue::ShelfQueueEngine;
 
@@ -50,6 +52,11 @@ pub struct PixelGrabApp {
     /// list-ordering and timer purposes; the cache still owns
     /// durability and the lock registry.
     shelf_queue: Arc<ShelfQueueEngine>,
+    /// Persistent user shelf preferences (corner, monitor, margins,
+    /// timer settings, visible card count, countdown visibility).
+    /// Tracer 12. The store owns the in-memory state and debounces
+    /// disk writes; `flush_blocking` is called during shutdown.
+    preferences: Arc<PreferencesStore>,
 }
 
 impl PixelGrabApp {
@@ -60,11 +67,13 @@ impl PixelGrabApp {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
         let cache = Arc::new(Cache::new());
         let shelf_queue = Arc::new(ShelfQueueEngine::default());
+        let preferences = Arc::new(PreferencesStore::new());
         Self {
             platform,
             session,
             cache,
             shelf_queue,
+            preferences,
         }
     }
 
@@ -90,6 +99,14 @@ impl PixelGrabApp {
     pub fn shelf_queue(&self) -> Arc<ShelfQueueEngine> {
         self.shelf_queue.clone()
     }
+
+    /// Handle to the preferences store. Tracer 12 surfaces user
+    /// shelf preferences (corner, monitor, margins, auto-dismiss,
+    /// visible-card count, countdown visibility) with debounced
+    /// persistence.
+    pub fn preferences(&self) -> Arc<PreferencesStore> {
+        self.preferences.clone()
+    }
 }
 
 /// Spawn the background shelf ticker. The thread wakes every
@@ -110,11 +127,12 @@ pub fn spawn_shelf_ticker<R: tauri::Runtime>(
     cache: Arc<Cache>,
     queue: Arc<ShelfQueueEngine>,
     platform: Arc<dyn platform::PixelGrabPlatform>,
+    preferences: Arc<crate::preferences::PreferencesStore>,
     handle: AppHandle<R>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("pixelgrab-shelf-ticker".to_string())
-        .spawn(move || shelf_ticker_loop(cache, queue, platform, handle))
+        .spawn(move || shelf_ticker_loop(cache, queue, platform, preferences, handle))
         .expect("spawn shelf ticker thread")
 }
 
@@ -125,6 +143,7 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
     cache: Arc<Cache>,
     queue: Arc<ShelfQueueEngine>,
     platform: Arc<dyn platform::PixelGrabPlatform>,
+    preferences: Arc<crate::preferences::PreferencesStore>,
     handle: AppHandle<R>,
 ) {
     let epoch = Instant::now();
@@ -147,14 +166,13 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
         // removal even when the rAF loop was not running.
         let snapshot = {
             let mut snap = queue.snapshot(elapsed_ms);
+            let prefs = preferences.current();
             if let Ok(layout) = platform.monitor_layout() {
-                if let Some(monitor) = layout
-                    .monitors
-                    .iter()
-                    .find(|m| m.is_primary)
-                    .or_else(|| layout.monitors.first())
+                if let Some(monitor) =
+                    crate::ipc::commands::resolve_preferred_monitor(&prefs, &layout)
                 {
-                    snap.position = Some(pixelgrab_contracts::ShelfPosition::shelf_queue_position(
+                    snap.position = Some(pixelgrab_contracts::placement_for(
+                        &prefs,
                         monitor,
                         snap.cards.len(),
                     ));
@@ -200,6 +218,33 @@ pub fn run() {
             } else if let Err(err) = app_state.cache().load_or_recover() {
                 log::warn!("cache recovery failed: {err}");
             }
+            // Wire the preferences root under the same per-app
+            // directory as the cache. Both share the `%LOCALAPPDATA%
+            // \com.pixelgrab.app` parent; the cache has its own
+            // subdirectory so the two cannot collide. The loader
+            // tolerates missing / corrupt files (returns defaults),
+            // so a first-run install boots cleanly.
+            let prefs_root = crate::preferences::default_preferences_root();
+            if let Err(err) = app_state.preferences().set_root(prefs_root.clone()) {
+                log::warn!(
+                    "preferences root {} is unusable: {err}",
+                    prefs_root.display()
+                );
+            }
+            // Apply the loaded timer config to the queue so cards
+            // added immediately after startup honour the persisted
+            // lifetime. A zero lifetime (auto-dismiss off) leaves the
+            // existing cards running with their previous deadline —
+            // we deliberately don't retroactively expire them, so
+            // toggling auto-dismiss on a populated shelf is non-
+            // destructive.
+            let prefs = app_state.preferences().current();
+            let cfg = pixelgrab_contracts::ShelfTimerConfig {
+                lifetime_ms: prefs.lifetime().as_millis() as i64,
+                grace_ms: pixelgrab_contracts::DEFAULT_HOVER_GRACE_MS,
+            };
+            app_state.shelf_queue().apply_timer_config(cfg);
+
             // Rehydrate the queue from the durable cache so cards
             // surviving a process restart remain visible until their
             // timers expire. Uses monotonic millis so a clock change
@@ -214,6 +259,7 @@ pub fn run() {
             let ticker_cache = app_state.cache().clone();
             let ticker_queue = app_state.shelf_queue().clone();
             let ticker_platform = app_state.platform().clone();
+            let ticker_prefs = app_state.preferences().clone();
             app.manage(app_state);
 
             // Build the resident tray, the hidden overlay window, and
@@ -230,6 +276,7 @@ pub fn run() {
                 ticker_cache,
                 ticker_queue,
                 ticker_platform,
+                ticker_prefs,
                 app.handle().clone(),
             );
             Ok(())
@@ -250,6 +297,8 @@ pub fn run() {
             ipc::tick_shelf_queue,
             ipc::get_shelf_queue_snapshot,
             ipc::start_shelf_drag,
+            ipc::get_shelf_preferences,
+            ipc::update_shelf_preferences,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");

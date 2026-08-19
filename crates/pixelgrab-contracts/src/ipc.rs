@@ -11,6 +11,7 @@ use crate::coordinate::PhysicalBounds;
 use crate::drag::{DragDiagnostics, DragOutcome, DragRequest};
 use crate::error::PlatformError;
 use crate::session::SessionState;
+use crate::shelf_preferences::ShelfPreferences;
 
 /// Frontend-friendly DTO mirroring `CaptureResolution`. Used as the wire
 /// shape for the `request_capture` response; the field names match the
@@ -417,4 +418,78 @@ impl CaptureDiagnostics {
         self.failure_kind = Some(kind.into());
         self
     }
+}
+
+/// Wire shape for the shelf preferences snapshot returned by
+/// `get_shelf_preferences`. Mirrors [`ShelfPreferences`] exactly so the
+/// frontend can hold an exact replica in its settings store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfPreferencesDto {
+    /// Schema version.
+    pub schema_version: u32,
+    /// Anchor corner.
+    pub corner: crate::shelf_preferences::ShelfCorner,
+    /// Optional target monitor id.
+    #[serde(default)]
+    pub target_monitor_id: Option<String>,
+    /// Inset from the work-area edges in physical pixels.
+    pub margin_px: u32,
+    /// Whether cards auto-dismiss.
+    pub auto_dismiss_enabled: bool,
+    /// Per-card lifetime in seconds.
+    pub lifetime_seconds: u64,
+    /// Visible card count.
+    pub visible_card_count: u32,
+    /// Whether the per-card countdown is shown.
+    pub show_countdown: bool,
+}
+
+impl From<ShelfPreferences> for ShelfPreferencesDto {
+    fn from(p: ShelfPreferences) -> Self {
+        Self {
+            schema_version: p.schema_version,
+            corner: p.corner,
+            target_monitor_id: p.target_monitor_id,
+            margin_px: p.margin_px,
+            auto_dismiss_enabled: p.auto_dismiss_enabled,
+            lifetime_seconds: p.lifetime_seconds,
+            visible_card_count: p.visible_card_count,
+            show_countdown: p.show_countdown,
+        }
+    }
+}
+
+impl From<ShelfPreferencesDto> for ShelfPreferences {
+    fn from(p: ShelfPreferencesDto) -> Self {
+        Self {
+            schema_version: p.schema_version,
+            corner: p.corner,
+            target_monitor_id: p.target_monitor_id,
+            margin_px: p.margin_px,
+            auto_dismiss_enabled: p.auto_dismiss_enabled,
+            lifetime_seconds: p.lifetime_seconds,
+            visible_card_count: p.visible_card_count,
+            show_countdown: p.show_countdown,
+        }
+    }
+}
+
+/// Wire shape for the `update_shelf_preferences` IPC. The frontend
+/// sends the new full preferences body; the Rust core sanitizes and
+/// persists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateShelfPreferencesRequest {
+    /// New preferences. Sanitized on receipt so out-of-range numbers
+    /// are clamped and unknown enum variants fall back to the
+    /// default.
+    pub preferences: ShelfPreferencesDto,
+    /// When true, the new settings are applied to running shelves
+    /// without waiting for the debounced disk write. The frontend
+    /// sets this when the user releases a slider (live preview is
+    /// already in place via the `corner` change; commit triggers the
+    /// persistence).
+    #[serde(default)]
+    pub commit: bool,
 }

@@ -260,4 +260,47 @@ describe("IPC type contract", () => {
     const json = JSON.parse(JSON.stringify(req));
     expect(json.shelfId).toBe("shelf-2");
   });
+
+  it("ShelfPreferencesDto round-trips every field", () => {
+    // Mirrors the Rust struct in
+    // `crates/pixelgrab-contracts/src/shelf_preferences.rs`.
+    const prefs: import("./types").ShelfPreferencesDto = {
+      schemaVersion: 1,
+      corner: "top_left",
+      targetMonitorId: "secondary",
+      marginPx: 32,
+      autoDismissEnabled: false,
+      lifetimeSeconds: 45,
+      visibleCardCount: 2,
+      showCountdown: false,
+    };
+    const json = JSON.parse(JSON.stringify(prefs));
+    expect(json.schemaVersion).toBe(1);
+    expect(json.corner).toBe("top_left");
+    expect(json.targetMonitorId).toBe("secondary");
+    expect(json.marginPx).toBe(32);
+    expect(json.autoDismissEnabled).toBe(false);
+    expect(json.lifetimeSeconds).toBe(45);
+    expect(json.visibleCardCount).toBe(2);
+    expect(json.showCountdown).toBe(false);
+  });
+
+  it("UpdateShelfPreferencesRequest carries the preferences + commit flag", () => {
+    const req: import("./types").UpdateShelfPreferencesRequest = {
+      preferences: {
+        schemaVersion: 1,
+        corner: "bottom_right",
+        targetMonitorId: null,
+        marginPx: 24,
+        autoDismissEnabled: true,
+        lifetimeSeconds: 60,
+        visibleCardCount: 4,
+        showCountdown: true,
+      },
+      commit: true,
+    };
+    const json = JSON.parse(JSON.stringify(req));
+    expect(json.commit).toBe(true);
+    expect(json.preferences.corner).toBe("bottom_right");
+  });
 });

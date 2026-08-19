@@ -15,6 +15,8 @@ vi.mock("$lib/ipc/commands", async () => {
     requestCommit: shell.mockRequestCommit,
     requestCancel: shell.mockRequestCancel,
     getSessionSnapshot: shell.mockGetSessionSnapshot,
+    getShelfPreferences: shell.mockGetShelfPreferences,
+    updateShelfPreferences: shell.mockUpdateShelfPreferences,
   };
 });
 

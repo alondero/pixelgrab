@@ -19,6 +19,7 @@ pub mod error;
 pub mod ipc;
 pub mod monitor;
 pub mod session;
+pub mod shelf_preferences;
 pub mod shelf_queue;
 
 pub use cache::{CacheEntry, CacheEntryMetadata, CaptureId, LockOwner, ShelfId, ShelfPosition};
@@ -36,11 +37,16 @@ pub use ipc::{
     CancelOutcome, CaptureDiagnostics, CaptureIntent, CaptureResponse, CommitOutcome,
     CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError,
     IpcResponse, OverlaySelection, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
-    RequestOverlayResult, SessionSnapshot, ShelfSnapshot, StartShelfDragIntent,
-    StartShelfDragResult, UpdateCacheMetadataRequest,
+    RequestOverlayResult, SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot,
+    StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+    UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use session::{SessionState, SessionTransition};
+pub use shelf_preferences::{
+    placement_for, ShelfCorner, ShelfPreferences, ShelfTimerConfigLike, MAX_LIFETIME_SECONDS,
+    MAX_MARGIN_PX, MIN_LIFETIME_SECONDS, MIN_MARGIN_PX, MIN_VISIBLE_CARDS, SETTINGS_SCHEMA_VERSION,
+};
 pub use shelf_queue::{
     CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest, SaveShelfCardAsResponse,
     ShelfQueueCard, ShelfQueueSnapshot, ShelfTimerConfig, ShelfTimerState,
