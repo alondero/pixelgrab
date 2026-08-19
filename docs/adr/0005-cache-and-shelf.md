@@ -77,17 +77,23 @@ in `src-tauri/src/ipc/commands.rs`:
 
 1. `flatten_crop` is the single source of truth for the flattened
    RGBA. Both the on-disk PNG and the clipboard bitmap derive from the
-   same buffer.
-2. `Cache::commit` writes assets atomically, then writes the
-   manifest.
-3. On success the shelf window is positioned and shown, the
+   same buffer. RGBA length is validated at the IPC boundary so a
+   corrupt platform response never reaches either the clipboard or
+   the cache.
+2. The clipboard is published _first_. A clipboard failure aborts
+   the commit before the cache is touched, so a clipboard error
+   never leaves a phantom card.
+3. `Cache::commit` writes assets atomically, then writes the
+   manifest. Phase-1 or phase-2 failures reap the partial directory
+   before the error is returned.
+4. On success the shelf window is positioned and shown, the
    `pixelgrab://shelf-updated` event is emitted to the frontend, and
    a `Shelf` lock guard is held inside the cache.
-4. The session is transitioned `Committing -> Cleanup -> Idle`.
+5. `session.finish()` runs once at the end of every commit attempt
+   (success or failure) so the session is always reset to `Idle`.
 
 On any failure: no card is shown, no event is emitted, no entry is
-left in the in-memory map, and the partial directory is reaped on the
-next startup scan.
+left in the in-memory map, and the partial directory is reaped.
 
 ## Consequences
 

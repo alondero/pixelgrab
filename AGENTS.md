@@ -275,16 +275,27 @@ the lock; see `LockOwner` for the exhaustive list.
 
 New IPC commands (registered in `src-tauri/src/lib.rs`):
 
-- `request_commit` — now writes through `Cache::commit` instead of
-  `platform.write_png` directly. The cache is the single owner of
-  the on-disk entry.
+- `request_commit` — runs the two-phase commit pipeline
+  (`flatten_crop` → optional clipboard → optional cache commit →
+  optional `save_as` PNG). The IPC layer publishes the clipboard
+  _before_ committing to the cache so a clipboard error never leaves
+  a phantom card. `session.finish()` runs once at the end of every
+  commit attempt so the session is always reset to `Idle` — even on
+  failure.
 - `update_cache_metadata` — atomic rewrite of `metadata.json` and
   refresh of `manifest.json`'s `lastAccessAtMs`.
 - `dismiss_cache_entry` — releases the `Shelf` lock and reaps the
-  entry when no other locks remain.
+  entry when no other locks remain. Emits
+  `pixelgrab://shelf-cleared` with a typed `{ shelfId }` payload so
+  the frontend listener can match its parameter.
 - `get_shelf_snapshot` — returns the current `ShelfSnapshot` for
   frontend rehydration after a process restart.
 
-The `pixelgrab://shelf-updated` event carries a `ShelfCardView`
-serialised from the latest `CacheEntry`. The shelf window subscribes
-to this event in `src/shelf.ts`.
+Events:
+
+- `pixelgrab://shelf-updated` carries a `ShelfCardView` serialised
+  from the latest `CacheEntry`. The shelf window subscribes to this
+  event in `src/shelf.ts`.
+- `pixelgrab://shelf-cleared` carries a typed
+  `ShelfClearedEvent { shelfId: string }` payload. Emitted when a
+  dismissal removes the entry from disk.

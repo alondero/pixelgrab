@@ -35,6 +35,6 @@ listen<ShelfCardView>("pixelgrab://shelf-updated", (event) => {
 // When the backend signals that the shelf is empty (e.g. after a
 // dismissal) the card is hidden, not destroyed — Tauri's webview is
 // cheap to keep alive.
-listen<void>("pixelgrab://shelf-cleared", () => {
+listen<{ shelfId: string }>("pixelgrab://shelf-cleared", (event) => {
   currentCard = null;
 });

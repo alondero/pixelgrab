@@ -69,6 +69,10 @@ add them here.
   `pixelgrab_contracts::ShelfPosition::inside_primary_work_area`.
 - **Shelf timer** — the 60-second default countdown for each card. Hover
   pauses it; leave resumes with a three-second grace period.
+- **`pixelgrab://shelf-cleared`** — event the backend emits when a
+  dismissal removes an entry from disk. Carries a typed
+  `{ shelfId: string }` payload; the frontend uses it to clear its
+  local card.
 - **Pin** — a TopMost reference window that displays a captured image.
   Independent of the shelf. Acquires a `LockOwner::Pin` lock on the
   backing cache entry so the entry cannot be reaped while the pin is

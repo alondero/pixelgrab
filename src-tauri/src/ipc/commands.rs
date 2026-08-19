@@ -176,10 +176,16 @@ pub fn dismiss_cache_entry(
     let result = match app.cache().dismiss(&payload.shelf_id) {
         Ok(outcome) => {
             // Hide the shelf window when the only card is gone and
-            // tell the frontend to clear its local copy.
+            // tell the frontend to clear its local copy. The event
+            // payload is the dismissed shelf id, wrapped in a
+            // typed struct so the TS listener can match its
+            // parameter without `any`.
             if outcome.removed {
                 let _ = crate::shelf::hide_card(&handle);
-                let _ = handle.emit("pixelgrab://shelf-cleared", &payload.shelf_id);
+                let event = ShelfClearedEvent {
+                    shelf_id: payload.shelf_id.clone(),
+                };
+                let _ = handle.emit("pixelgrab://shelf-cleared", &event);
             }
             Ok(DismissCacheEntryResponse {
                 removed: outcome.removed,
@@ -189,6 +195,14 @@ pub fn dismiss_cache_entry(
         Err(err) => Err(err),
     };
     IpcResponse::from_result(result)
+}
+
+/// Wire payload for the `pixelgrab://shelf-cleared` event.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShelfClearedEvent {
+    /// Shelf id that was dismissed.
+    shelf_id: String,
 }
 
 /// Snapshot of the current shelf state. Used by the frontend to
@@ -260,11 +274,25 @@ fn commit(
             )
         })?;
 
-    // Single source of truth: flatten the crop once. The PNG bytes and the
-    // clipboard bitmap are both derived from this buffer. RGBA length is
-    // validated by `Cache::encode_png` when the cache path is taken; the
-    // clipboard path trusts the platform contract.
+    // Single source of truth: flatten the crop once. The PNG bytes and
+    // the clipboard bitmap are both derived from this buffer. Validate
+    // the buffer length here so a corrupt platform response never
+    // reaches either the clipboard or the cache; the cache's
+    // `encode_png` re-validates as the last line of defence.
     let (rgba, size) = app.platform().flatten_crop(&capture_id, bbox)?;
+    let expected_len = (size.width as usize) * (size.height as usize) * 4;
+    if rgba.len() != expected_len {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            format!(
+                "flatten_crop returned {} bytes for {}x{}; expected {}",
+                rgba.len(),
+                size.width,
+                size.height,
+                expected_len
+            ),
+        ));
+    }
 
     let mut outcome = CommitOutcome {
         capture_id: capture_id.clone(),
@@ -275,75 +303,86 @@ fn commit(
         created_at_ms: 0,
     };
 
-    // Clipboard first. The clipboard publish is the cheapest
-    // non-reversible side effect; if it fails we abort before
-    // touching the cache or the shelf, so a clipboard error never
-    // leaves a phantom card or a wedged session.
-    if request.to_clipboard {
-        app.platform().publish_clipboard(&capture_id, &rgba, size)?;
-    }
+    // The commit body collects every side effect into `commit_result`
+    // so the function can run `session.finish()` exactly once before
+    // returning — even on clipboard or cache failures. Otherwise the
+    // session would stay in `Committing` and block the next capture.
+    let commit_result: Result<(), PlatformError> = (|| {
+        // Clipboard first. The clipboard publish is the cheapest
+        // non-reversible side effect; if it fails we abort before
+        // touching the cache or the shelf, so a clipboard error never
+        // leaves a phantom card.
+        if request.to_clipboard {
+            app.platform().publish_clipboard(&capture_id, &rgba, size)?;
+        }
 
-    if request.to_shelf {
-        let primary_monitor_id =
-            crate::cache::Cache::primary_monitor_id(&app.platform().monitor_layout()?)?;
-        let result = app.cache().commit(crate::cache::CacheCommitRequest {
-            bounds: bbox,
-            size,
-            rgba: rgba.clone(),
-            metadata: CacheEntryMetadata::default(),
-            monitor_id: primary_monitor_id.clone(),
-        });
-        match result {
-            Ok(commit_result) => {
-                let entry = commit_result.entry;
-                outcome.shelf_id = Some(entry.shelf_id.clone());
-                outcome.png_path = Some(entry.png_path.clone());
-                outcome.png_bytes = commit_result.png_bytes;
-                outcome.size_bytes = entry.size_bytes;
-                outcome.created_at_ms = entry.created_at_ms;
+        if request.to_shelf {
+            let primary_monitor_id =
+                crate::cache::Cache::primary_monitor_id(&app.platform().monitor_layout()?)?;
+            let commit = app.cache().commit(crate::cache::CacheCommitRequest {
+                bounds: bbox,
+                size,
+                rgba: rgba.clone(),
+                metadata: CacheEntryMetadata::default(),
+                monitor_id: primary_monitor_id.clone(),
+            });
+            match commit {
+                Ok(commit_result) => {
+                    let entry = commit_result.entry;
+                    outcome.shelf_id = Some(entry.shelf_id.clone());
+                    outcome.png_path = Some(entry.png_path.clone());
+                    outcome.png_bytes = commit_result.png_bytes;
+                    outcome.size_bytes = entry.size_bytes;
+                    outcome.created_at_ms = entry.created_at_ms;
 
-                // Compute the shelf placement and show the card. The
-                // cache owns the shelf lock until the entry is
-                // dismissed, so we don't need to keep a guard alive
-                // here.
-                let layout = app.platform().monitor_layout()?;
-                let position = app.cache().shelf_position(&entry.shelf_id, &layout)?;
-                if let Err(err) = crate::shelf::show_card(handle, &position, &entry.shelf_id) {
-                    log::warn!("shelf window show failed: {err}");
+                    // Compute the shelf placement and show the card.
+                    // The cache owns the shelf lock until the entry
+                    // is dismissed, so we don't need to keep a guard
+                    // alive here.
+                    let layout = app.platform().monitor_layout()?;
+                    let position = app.cache().shelf_position(&entry.shelf_id, &layout)?;
+                    if let Err(err) = crate::shelf::show_card(handle, &position, &entry.shelf_id) {
+                        log::warn!("shelf window show failed: {err}");
+                    }
+                    emit_shelf_updated(handle, &entry);
                 }
-                emit_shelf_updated(handle, &entry);
-            }
-            Err(err) => {
-                // Two-phase commit failed: the entry is either fully
-                // absent (reaped on the next startup scan) or partial.
-                // Surface the error and leave the shelf empty.
-                log::warn!("cache commit failed: {err}");
-                return Err(err);
+                Err(err) => {
+                    // Two-phase commit failed: the entry is either
+                    // fully absent or partial. Surface the error and
+                    // leave the shelf empty.
+                    log::warn!("cache commit failed: {err}");
+                    return Err(err);
+                }
             }
         }
-    }
 
-    if request.save_as {
-        // Save-as writes a loose PNG to the platform's cache root in
-        // addition to whatever the shelf path produced. `to_shelf`
-        // and `save_as` are independent; a commit with both flags
-        // shelves the capture AND produces a loose copy.
-        let path = app.platform().write_png(&capture_id, bbox, &rgba)?;
-        if outcome.png_path.is_none() {
-            outcome.png_path = Some(path.to_string_lossy().to_string());
-            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            outcome.png_bytes = bytes;
+        if request.save_as {
+            // Save-as writes a loose PNG to the platform's cache
+            // root in addition to whatever the shelf path produced.
+            // `to_shelf` and `save_as` are independent; a commit
+            // with both flags shelves the capture AND produces a
+            // loose copy. The `if outcome.png_path.is_none()` guard
+            // keeps the shelf path's png_path authoritative when
+            // both flags are set.
+            let path = app.platform().write_png(&capture_id, bbox, &rgba)?;
+            if outcome.png_path.is_none() {
+                outcome.png_path = Some(path.to_string_lossy().to_string());
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                outcome.png_bytes = bytes;
+            }
         }
-    }
 
-    if !request.to_shelf && !request.save_as {
-        outcome.png_bytes = rgba.len() as u64;
-    }
+        if !request.to_shelf && !request.save_as {
+            outcome.png_bytes = rgba.len() as u64;
+        }
+
+        Ok(())
+    })();
 
     if let Err(err) = app.session().finish() {
         log::warn!("session.finish failed: {err}");
     }
-    Ok(outcome)
+    commit_result.map(|_| outcome)
 }
 
 /// Derive a diagnostic monitor id from a capture resolution.

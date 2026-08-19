@@ -6,15 +6,14 @@
 //! - Failed commits (each stage injected) leave no manifest on disk
 //!   and the cache has no entry.
 //! - Restart after a partial commit reaps the partial directory.
+//! - The cached PNG decodes to the same pixels as the input RGBA.
 //!
-//! The synthetic adapter does not currently expose failure-injection
-//! hooks for `write_png`; the cache store has its own failure path
-//! (the `bitmap_bytes` step is always a no-op and the metadata encode
-//! step is exercised by every commit). To exercise the full
-//! per-stage matrix we rely on the atomic-write helper's own unit
-//! tests and on a forced failure: the cache commit always uses
-//! `write_atomic`, so any platform-level fault at the I/O layer
-//! surfaces the same way the production Windows adapter would.
+//! The cache store exposes a one-shot fault-injection API
+//! (`Cache::arm_failure`) so each commit stage can be exercised in
+//! isolation. The helper is available in production builds because
+//! the integration test crate compiles the cache as a regular
+//! dependency; the cost is a single `Option` discriminant per
+//! commit stage, and the field is never set outside tests.
 
 use std::fs;
 use std::sync::Arc;
@@ -275,7 +274,6 @@ fn failure_injection_at_write_metadata_reaps_partial() {
 // PNG and the clipboard bitmap).
 #[test]
 fn image_equivalence_between_rgba_and_cached_png() {
-    use std::io::Read;
     let cache = Cache::new();
     let tmp = std::env::temp_dir().join(format!("pixelgrab-cache-equiv-{}", {
         uuid::Uuid::new_v4().simple()
@@ -291,19 +289,22 @@ fn image_equivalence_between_rgba_and_cached_png() {
             monitor_id: "primary".into(),
         })
         .expect("commit");
-    let png_path = result.entry.png_path.clone();
-    // The cached PNG starts with the PNG signature.
-    let mut bytes = Vec::new();
-    std::fs::File::open(&png_path)
-        .expect("open png")
-        .read_to_end(&mut bytes)
-        .expect("read png");
-    assert!(
-        bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]),
-        "cached PNG has the PNG signature",
-    );
-    // The PNG byte length matches the IPC-reported `png_bytes`.
-    assert_eq!(bytes.len() as u64, result.png_bytes);
+    // Decode the cached PNG and assert the underlying pixels
+    // match the input RGBA buffer. A `png` reader is already in
+    // the dependency tree (the cache uses it for `encode_png`), so
+    // no new dependency is needed.
+    let decoder = png::Decoder::new(std::fs::File::open(&result.entry.png_path).expect("png"));
+    let mut reader = decoder.read_info().expect("png info");
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut buf).expect("png frame");
+    let info = reader.info().clone();
+    assert_eq!(info.width, 4);
+    assert_eq!(info.height, 4);
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    let decoded = &buf[..frame.buffer_size()];
+    // The encoder stores the RGBA buffer as-is, so the decoded
+    // pixels must equal the input bytes.
+    assert_eq!(decoded, original.as_slice());
     fs::remove_dir_all(&tmp).ok();
 }
 
