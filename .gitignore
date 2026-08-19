@@ -37,3 +37,7 @@ yarn-error.log*
 # Local cache (from PNG captures, etc.)
 .cache/
 fixtures/local/
+
+# Ad-hoc scratch files created by tooling in the repo root
+/.tmp_*/
+*.tmp.diff
