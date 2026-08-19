@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::cache::{CacheEntryMetadata, LockOwner, ShelfId, ShelfPosition};
 use crate::capture::CaptureResolution;
 use crate::coordinate::PhysicalBounds;
+use crate::drag::{DragDiagnostics, DragOutcome, DragRequest};
 use crate::error::PlatformError;
 use crate::session::SessionState;
 
@@ -300,6 +301,44 @@ pub struct OverlaySelection {
     pub crop: PhysicalBounds,
     /// Whether the user confirmed the selection (vs cancelled).
     pub confirmed: bool,
+}
+
+/// Wire shape for the `start_shelf_drag` IPC. The frontend assembles the
+/// drag payload from the shelf card's stored capture and forwards it to
+/// the platform contract. The Rust side retains the file handle for the
+/// full synchronous OLE drag loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartShelfDragIntent {
+    /// The drag payload. The platform contract owns the PNG bytes for
+    /// the duration of the drag.
+    pub request: DragRequest,
+    /// Whether to dismiss the originating shelf card on a successful
+    /// drop. The default is `true` so the tray does not accumulate
+    /// accepted cards.
+    #[serde(default = "default_dismiss")]
+    pub dismiss_on_accepted: bool,
+}
+
+fn default_dismiss() -> bool {
+    true
+}
+
+/// Wire shape for the `start_shelf_drag` response. Carries the terminal
+/// outcome of the OLE drag and the diagnostics record. The
+/// `should_dismiss` field is the frontend's hint — the Rust side
+/// computes it from the configured policy and the outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartShelfDragResult {
+    /// Terminal outcome.
+    pub outcome: DragOutcome,
+    /// Diagnostics record. Always present so the UI can log telemetry.
+    pub diagnostics: DragDiagnostics,
+    /// Whether the originating shelf card should be dismissed. Only
+    /// `true` when the policy was `dismiss_on_accepted` and the outcome
+    /// was `Accepted`.
+    pub should_dismiss: bool,
 }
 
 /// Structured capture diagnostics. Returned alongside the

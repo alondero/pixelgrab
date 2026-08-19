@@ -3,9 +3,13 @@
 
 use pixelgrab_contracts::capture::{CaptureFormat, CaptureResolution};
 use pixelgrab_contracts::coordinate::{PhysicalBounds, PhysicalSize};
+use pixelgrab_contracts::drag::{
+    DragDiagnostics, DragFormat, DragOutcome, DragRequest, DragTargetEffect, DragTargetKind,
+};
 use pixelgrab_contracts::ipc::{
     CaptureResolutionDto, CommitRequest, CommitResponse, IpcResponse, RequestCaptureIntent,
-    RequestCommitIntent, RequestOverlayIntent, SessionSnapshot,
+    RequestCommitIntent, RequestOverlayIntent, SessionSnapshot, StartShelfDragIntent,
+    StartShelfDragResult,
 };
 use pixelgrab_contracts::session::SessionState;
 
@@ -174,4 +178,74 @@ fn shelf_card_view_round_trips() {
     assert_eq!(parsed.shelf_id, view.shelf_id);
     assert_eq!(parsed.metadata.title, "Example");
     assert_eq!(parsed.bounds.size.width, 320);
+}
+
+#[test]
+fn start_shelf_drag_intent_serialises_camel_case() {
+    let req = DragRequest {
+        capture_id: "capture-1".into(),
+        shelf_id: Some("shelf-1".to_string()),
+        png_path: "C:/cache/capture.png".into(),
+        bgra_pixels: vec![0u8; 4 * 4 * 4],
+        width: 4,
+        height: 4,
+    };
+    let intent = StartShelfDragIntent {
+        request: req,
+        dismiss_on_accepted: true,
+    };
+    let json = serde_json::to_string(&intent).expect("serialize");
+    assert!(json.contains("\"dismissOnAccepted\":true"));
+    assert!(json.contains("\"pngPath\":"));
+    assert!(json.contains("\"bgraPixels\":"));
+    assert!(json.contains("\"captureId\":\"capture-1\""));
+}
+
+#[test]
+fn start_shelf_drag_result_serialises_terminal_outcome() {
+    let diag = DragDiagnostics::started("cap", Some("shelf".to_string()), 1_000)
+        .completed(1_500)
+        .with_target_effect(DragTargetEffect::Copy)
+        .with_target_kind(DragTargetKind::Chromium);
+    let result = StartShelfDragResult {
+        outcome: DragOutcome::Accepted,
+        diagnostics: diag,
+        should_dismiss: true,
+    };
+    let json = serde_json::to_string(&result).expect("serialize");
+    assert!(json.contains("\"outcome\":\"accepted\""));
+    assert!(json.contains("\"shouldDismiss\":true"));
+    assert!(json.contains("\"targetEffect\":\"copy\""));
+    assert!(json.contains("\"targetKind\":\"chromium\""));
+    assert!(json.contains("\"durationMs\":500"));
+}
+
+#[test]
+fn drag_request_validates_buffer_length() {
+    let req = DragRequest {
+        capture_id: "cap".into(),
+        shelf_id: None,
+        png_path: "C:/cache/cap.png".into(),
+        bgra_pixels: vec![0u8; 8],
+        width: 4,
+        height: 4,
+    };
+    let result = req.validate();
+    assert!(result.is_err());
+}
+
+#[test]
+fn drag_outcome_dismiss_card_only_for_accepted() {
+    assert!(DragOutcome::Accepted.dismiss_card());
+    assert!(!DragOutcome::Rejected.dismiss_card());
+    assert!(!DragOutcome::Cancelled.dismiss_card());
+    assert!(!DragOutcome::Failed.dismiss_card());
+}
+
+#[test]
+fn drag_format_labels_are_stable() {
+    assert_eq!(DragFormat::Hdrop.as_label(), "hdrop");
+    assert_eq!(DragFormat::RegisteredPng.as_label(), "registered_png");
+    assert_eq!(DragFormat::DibV5.as_label(), "dib_v5");
+    assert_eq!(DragFormat::UnicodeText.as_label(), "unicode_text");
 }

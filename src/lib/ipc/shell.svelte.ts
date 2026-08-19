@@ -15,6 +15,8 @@ import type {
   RequestOverlayResult,
   SessionSnapshot,
   SessionState,
+  StartShelfDragIntent,
+  StartShelfDragResult,
 } from "./types";
 
 const sessionState: { value: SessionState } = $state({ value: "idle" });
@@ -167,6 +169,29 @@ export async function mockGetSessionSnapshot(): Promise<IpcResponse<SessionSnaps
         }
       : undefined,
     selection,
+  });
+}
+
+export async function mockStartShelfDrag(
+  payload: StartShelfDragIntent,
+): Promise<IpcResponse<StartShelfDragResult>> {
+  const startedAt = Date.now();
+  // The mock always returns "cancelled" — the same outcome the
+  // synthetic adapter returns when the script is `Stable`. The shelf
+  // card remains visible so the user can retry.
+  const completedAt = Date.now();
+  return ok({
+    outcome: "cancelled",
+    diagnostics: {
+      startedAtMs: startedAt,
+      completedAtMs: completedAt,
+      durationMs: completedAt - startedAt,
+      targetEffect: "unknown",
+      targetKind: "none",
+      captureId: payload.request.captureId,
+      shelfId: payload.request.shelfId,
+    },
+    shouldDismiss: false,
   });
 }
 

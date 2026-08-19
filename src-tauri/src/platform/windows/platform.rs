@@ -143,6 +143,13 @@ impl PixelGrabPlatform for WindowsPlatform {
     ) -> PlatformResult<()> {
         publish_to_clipboard(capture_id, rgba, size)
     }
+
+    fn start_drag(
+        &self,
+        request: &pixelgrab_contracts::drag::DragRequest,
+    ) -> PlatformResult<pixelgrab_contracts::drag::DragResult> {
+        super::drag::start_drag(request)
+    }
 }
 
 /// Push the flattened crop to the system clipboard. The single

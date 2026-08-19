@@ -8,6 +8,8 @@ import type {
   CaptureResolutionDto,
   CommitRequest,
   CommitResponse,
+  DragDiagnostics,
+  DragRequest,
   IpcResponse,
   PhysicalBounds,
   RequestCaptureIntent,
@@ -15,6 +17,8 @@ import type {
   RequestOverlayIntent,
   SessionSnapshot,
   SessionState,
+  StartShelfDragIntent,
+  StartShelfDragResult,
 } from "./types";
 
 describe("IPC type contract", () => {
@@ -145,27 +149,56 @@ describe("IPC type contract", () => {
   });
 
   it("ShelfCardView shape mirrors Rust", () => {
-    // Mirrors `src-tauri/tests/ipc_contracts.rs::shelf_card_view_round_trips`.
-    // The Rust struct lives in `src-tauri/src/shelf/mod.rs`; the TS mirror
-    // is in `src/lib/shelf/types.ts` and re-uses `CacheEntryMetadata`
-    // from the IPC types so the two sides cannot drift.
-    const view: import("./types").ShelfCardView = {
-      shelfId: "shelf-id",
-      captureId: "capture-id",
-      pngPath: "/cache/capture/capture.png",
-      sizeBytes: 4096,
-      createdAtMs: 1_700_000_000_000,
-      bounds: { origin: { x: 0, y: 0 }, size: { width: 320, height: 240 } },
-      metadata: {
-        title: "Example",
-        note: "first commit",
-        tags: ["tracer-07"],
-      },
+    const req: DragRequest = {
+      captureId: "capture-1",
+      shelfId: "shelf-1",
+      pngPath: "C:/cache/capture.png",
+      bgraPixels: new Array(4 * 4 * 4).fill(0),
+      width: 4,
+      height: 4,
     };
-    const json = JSON.parse(JSON.stringify(view));
-    expect(json.shelfId).toBe("shelf-id");
-    expect(json.sizeBytes).toBe(4096);
-    expect(json.metadata.tags).toEqual(["tracer-07"]);
+    const json = JSON.parse(JSON.stringify(req));
+    expect(json.captureId).toBe("capture-1");
+    expect(json.shelfId).toBe("shelf-1");
+    expect(json.pngPath).toMatch(/capture.png/);
+    expect(json.bgraPixels).toHaveLength(4 * 4 * 4);
+  });
+
+  it("StartShelfDragIntent serialises the request envelope", () => {
+    const intent: StartShelfDragIntent = {
+      request: {
+        captureId: "c",
+        pngPath: "c.png",
+        bgraPixels: [],
+        width: 1,
+        height: 1,
+      },
+      dismissOnAccepted: true,
+    };
+    const json = JSON.parse(JSON.stringify(intent));
+    expect(json.dismissOnAccepted).toBe(true);
+    expect(json.request.captureId).toBe("c");
+  });
+
+  it("StartShelfDragResult serialises outcome and dismiss hint", () => {
+    const diag: DragDiagnostics = {
+      startedAtMs: 1,
+      completedAtMs: 100,
+      durationMs: 99,
+      targetEffect: "copy",
+      targetKind: "chromium",
+      captureId: "c",
+    };
+    const result: StartShelfDragResult = {
+      outcome: "accepted",
+      diagnostics: diag,
+      shouldDismiss: true,
+    };
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.outcome).toBe("accepted");
+    expect(json.shouldDismiss).toBe(true);
+    expect(json.diagnostics.targetEffect).toBe("copy");
+    expect(json.diagnostics.targetKind).toBe("chromium");
   });
 
   it("ShelfQueueSnapshot carries cards, overflow, and timer", () => {

@@ -12,7 +12,7 @@ use pixelgrab_contracts::{
         CancelOutcome, CaptureResponse, CommitRequest, CommitResponse, DismissCacheEntryRequest,
         DismissCacheEntryResponse, IpcResponse, RequestCaptureIntent, RequestCommitIntent,
         RequestOverlayIntent, RequestOverlayResult, SessionSnapshot, ShelfSnapshot,
-        UpdateCacheMetadataRequest,
+        StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
     },
     shelf_queue::{
         CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
@@ -527,6 +527,31 @@ fn emit_shelf_updated<R: tauri::Runtime>(
 ) {
     let view = crate::shelf::ShelfCardView::from_entry(entry);
     let _ = handle.emit("pixelgrab://shelf-updated", &view);
+}
+
+/// Start an external drag from a shelf card. The IPC layer hands the
+/// payload to the platform contract, which owns the PNG bytes for the
+/// full synchronous OLE drag loop. The terminal outcome and the
+/// diagnostics record are returned alongside the dismiss hint.
+///
+/// The cache's `Drag` lock acquisition is a future wiring — the cache
+/// adds `acquire_drag_lock` / `release_drag_lock` in the same change
+/// that promotes the lock contract to the cache layer. For now the
+/// drag honors the file-handle-only contract.
+#[tauri::command]
+pub fn start_shelf_drag(
+    app: AppState<'_>,
+    payload: StartShelfDragIntent,
+) -> IpcResponse<StartShelfDragResult> {
+    let result = app
+        .platform()
+        .start_drag(&payload.request)
+        .map(|drag_result| StartShelfDragResult {
+            should_dismiss: payload.dismiss_on_accepted && drag_result.outcome.dismiss_card(),
+            outcome: drag_result.outcome,
+            diagnostics: drag_result.diagnostics,
+        });
+    IpcResponse::from_result(result)
 }
 
 fn commit(

@@ -97,10 +97,27 @@ add them here.
 ## Delivery
 
 - **OLE drag** — the native drag-and-drop protocol used to send a
-  capture to other applications. Offers CF_HDROP, PNG, CF_DIBV5, and
-  CF_UNICODETEXT.
-- **Drop-target** — the application receiving a drag. Chromium browsers,
-  Electron apps, Windows Explorer, and IDEs are the primary targets.
+  capture to other applications. Offers `CF_HDROP`, a registered PNG
+  format, `CF_DIBV5`, and `CF_UNICODETEXT` from a single stable
+  capture. See `docs/adr/0006-external-drag.md`.
+- **Drop-target** — the application receiving a drag. Chromium
+  browsers, Electron apps, Windows Explorer, and IDEs are the primary
+  targets.
+- **Drag outcome** — the terminal classification of a drag:
+  `Accepted`, `Rejected`, `Cancelled`, or `Failed`. Only `Accepted`
+  triggers the optional card dismissal.
+- **Drag lock** — the cache lock that owns a shelf entry for the
+  full synchronous OLE drag. The cache must not prune an entry while
+  the lock is held.
+- **CF_HDROP** — the Windows clipboard format that exposes a file
+  group descriptor. The borrow is the absolute PNG path.
+- **CF_DIBV5** — the legacy bitmap clipboard format with a V5
+  header. Pixel data is top-down BGRA.
+- **CF_UNICODETEXT** — the Windows clipboard format for a UTF-16
+  wide string. The drag returns the absolute PNG path.
+- **Registered PNG** — the `image/png` clipboard format registered
+  via `RegisterClipboardFormatW`. Chrome and Edge accept this in
+  preference to the bitmap.
 
 ## Settings
 
