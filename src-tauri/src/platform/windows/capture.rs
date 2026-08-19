@@ -35,6 +35,7 @@ impl fmt::Debug for CaptureEngine {
         f.debug_struct("CaptureEngine")
             .field("has_frozen", &state.frozen.is_some())
             .field("layout_cached", &state.layout.is_some())
+            .field("topology_changed", &state.topology_dirty)
             .finish()
     }
 }
@@ -44,7 +45,28 @@ struct EngineState {
     frozen: Option<FrozenFrame>,
     /// Cached monitor layout from the most recent `monitor_layout()` call.
     layout: Option<MonitorLayout>,
+    /// `true` when the cached layout is suspect and must be re-queried
+    /// before the next capture. Set by `invalidate_layout` and by the
+    /// hot-plug/unplug detection loop. The capture pipeline treats this as
+    /// authoritative — a stale layout could place pixels against the wrong
+    /// monitor offsets.
+    topology_dirty: bool,
 }
+
+/// Maximum number of physical pixels the composite framebuffer is allowed
+/// to allocate. The cap is intentionally generous (32K x 32K pixels,
+/// 32 GiB at 4 bytes per pixel) so the cap only fires on a malformed
+/// layout. The cap protects the process from a runaway enumeration
+/// (e.g. a virtual display driver reporting absurd sizes) and satisfies
+/// the tracer-03 acceptance criterion "Bound framebuffer allocation".
+pub const MAX_FRAMEBUFFER_PIXELS: u64 = 32 * 1024 * 1024 * 1024 / 4; // 32 GiB worth of pixels.
+
+/// Comfort cap on how many monitors a single composite pipeline accepts.
+/// `xcap` reports physical monitors; any number larger than this is a
+/// virtual display driver or a stuck enumeration. Coil keeps the
+/// composite bounded so a single capture cannot fan out to dozens of
+/// captures that block the orchestrator.
+pub const MAX_MONITORS_PER_CAPTURE: usize = 32;
 
 /// An immutable RGBA frame captured from the Windows desktop.
 #[derive(Debug, Clone)]
@@ -105,26 +127,67 @@ impl CaptureEngine {
             inner: Arc::new(Mutex::new(EngineState {
                 frozen: None,
                 layout: None,
+                topology_dirty: true,
             })),
         }
     }
 
     /// Return the cached monitor layout, querying the OS if not yet cached.
+    /// The cache is invalidated by [`CaptureEngine::invalidate_layout`] so
+    /// hot-plug/unplug events force a fresh enumeration before the next
+    /// capture.
     pub fn monitor_layout(&self) -> PlatformResult<MonitorLayout> {
         let mut state = self.inner.lock();
-        if let Some(layout) = &state.layout {
-            return Ok(layout.clone());
+        let dirty = state.topology_dirty;
+        if !dirty {
+            if let Some(layout) = &state.layout {
+                return Ok(layout.clone());
+            }
         }
         let layout = query_monitor_layout().map_err(map_xcap_err)?;
         state.layout = Some(layout.clone());
+        state.topology_dirty = false;
         Ok(layout)
+    }
+
+    /// Mark the cached layout as suspect. The next call to
+    /// `monitor_layout()` re-queries the OS. The platform contract calls
+    /// this on `WM_DISPLAYCHANGE` (or its polled equivalent) so a
+    /// re-enumeration happens before the next capture, not after.
+    pub fn invalidate_layout(&self) {
+        let mut state = self.inner.lock();
+        state.topology_dirty = true;
+        // The frozen frame was captured against the previous topology; it
+        // is no longer trustworthy. The session must observe this on
+        // commit (the `flatten_crop` path rejects the stale id) so we
+        // also drop the cached frame. The orchestrator will be notified
+        // through the next `monitor_layout()` call instead.
+        state.frozen = None;
+    }
+
+    /// Returns `true` when the cached layout has been invalidated since
+    /// the last query. Used by the orchestrator to debug timeline
+    /// regressions; the capture pipeline itself ignores the flag.
+    pub fn is_topology_dirty(&self) -> bool {
+        self.inner.lock().topology_dirty
     }
 
     /// Run a capture pipeline. The captured framebuffer is stored in the
     /// engine and the resulting `CaptureResolution` references it by id.
+    ///
+    /// `VirtualDesktop` captures fan out to every active monitor in
+    /// parallel (`xcap` runs on a background thread per monitor) and
+    /// composite the per-monitor framebuffers into one RGBA virtual
+    /// framebuffer. `SingleMonitor` captures one monitor at its native
+    /// resolution. `PhysicalRegion` captures the requested region against
+    /// whichever monitor it overlaps; multi-monitor spans are not yet
+    /// supported through this path (the issue is owned by a future
+    /// tracer) — callers wanting a stitched result go through
+    /// `VirtualDesktop` instead.
     pub fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution> {
+        let layout = self.monitor_layout()?;
         let bounds = match request.format {
-            CaptureFormat::VirtualDesktop => self.virtual_desktop_bounds()?,
+            CaptureFormat::VirtualDesktop => virtual_bounds_from_layout(&layout)?,
             CaptureFormat::SingleMonitor => {
                 let id = request.monitor_id.as_deref().ok_or_else(|| {
                     PlatformError::new(
@@ -132,7 +195,6 @@ impl CaptureEngine {
                         "SingleMonitor format requires monitor_id",
                     )
                 })?;
-                let layout = self.monitor_layout()?;
                 layout
                     .monitors
                     .iter()
@@ -161,18 +223,35 @@ impl CaptureEngine {
         }
 
         let capture_id = uuid::Uuid::new_v4().to_string();
-        let rgba = capture_monitor(&bounds).map_err(map_xcap_err)?;
         let captured_at_ms = now_ms();
-        let frame = FrozenFrame {
-            capture_id: capture_id.clone(),
-            bounds,
-            rgba: Arc::new(rgba),
-            captured_at_ms,
+        let frame = match request.format {
+            CaptureFormat::VirtualDesktop => {
+                // Per-monitor fan-out: the composite pipeline captures every
+                // monitor in parallel and blits the per-monitor frames
+                // into one RGBA virtual framebuffer.
+                let cached_layout = layout.clone();
+                let (rgba, composite_bounds) = composite_virtual_desktop(&cached_layout)?;
+                FrozenFrame {
+                    capture_id: capture_id.clone(),
+                    bounds: composite_bounds,
+                    rgba: Arc::new(rgba),
+                    captured_at_ms,
+                }
+            }
+            CaptureFormat::SingleMonitor | CaptureFormat::PhysicalRegion => {
+                let rgba = capture_single_monitor(&bounds).map_err(map_xcap_err)?;
+                FrozenFrame {
+                    capture_id: capture_id.clone(),
+                    bounds,
+                    rgba: Arc::new(rgba),
+                    captured_at_ms,
+                }
+            }
         };
         let asset_url = encode_png_data_url(&frame)?;
         let resolution = CaptureResolution {
             format: request.format,
-            bounds,
+            bounds: frame.bounds,
             asset_url,
             capture_id,
             captured_at_ms,
@@ -200,29 +279,17 @@ impl CaptureEngine {
     pub fn clear(&self) {
         self.inner.lock().frozen = None;
     }
+}
 
-    fn virtual_desktop_bounds(&self) -> PlatformResult<PhysicalBounds> {
-        let layout = self.monitor_layout()?;
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
-        for monitor in &layout.monitors {
-            min_x = min_x.min(monitor.bounds.origin.x);
-            min_y = min_y.min(monitor.bounds.origin.y);
-            max_x = max_x.max(monitor.bounds.right());
-            max_y = max_y.max(monitor.bounds.bottom());
-        }
-        if min_x == i32::MAX {
-            return Err(CaptureError::MonitorEnumeration("no monitors detected".into()).into());
-        }
-        Ok(PhysicalBounds::from_xywh(
-            min_x,
-            min_y,
-            (max_x - min_x) as u32,
-            (max_y - min_y) as u32,
-        ))
-    }
+/// Derive the virtual desktop bounds from a `MonitorLayout`. Returns the
+/// inclusive-min / exclusive-max rectangle the composite framebuffer should
+/// cover. Pure function — also used by the synthetic adapter so the two
+/// platforms stay aligned on the rounding policy.
+fn virtual_bounds_from_layout(layout: &MonitorLayout) -> PlatformResult<PhysicalBounds> {
+    let vb = layout
+        .virtual_bounds()
+        .ok_or_else(|| CaptureError::MonitorEnumeration("no monitors detected".into()))?;
+    Ok(vb.as_top_left_bounds())
 }
 
 impl Default for CaptureEngine {
@@ -267,16 +334,11 @@ fn query_monitor_layout() -> Result<MonitorLayout, xcap::XCapError> {
 }
 
 /// Capture the pixels for the given physical bounds. Routes through the
-/// Capture the pixels for the given physical bounds. Routes through the
 /// primary monitor when one exists, falling back to the first enumerated
 /// monitor when no primary is reported. The chosen monitor's local
 /// coordinate space is used to clip the requested bounds so a partially
 /// off-screen request never causes the capture pipeline to fail.
-///
-/// Multi-monitor stitching (requesting bounds that span more than one
-/// monitor) is intentionally out of scope for tracer-02; the tracer-04
-/// issue owns that capability.
-fn capture_monitor(bounds: &PhysicalBounds) -> Result<Vec<u8>, xcap::XCapError> {
+fn capture_single_monitor(bounds: &PhysicalBounds) -> Result<Vec<u8>, xcap::XCapError> {
     let monitors = xcap::Monitor::all()?;
     let monitor = monitors
         .iter()
@@ -301,6 +363,222 @@ fn capture_monitor(bounds: &PhysicalBounds) -> Result<Vec<u8>, xcap::XCapError> 
     }
     let image = monitor.capture_region(local_x, local_y, local_w, local_h)?;
     Ok(image.into_raw())
+}
+
+/// Result of a single monitor's parallel capture. The pixels are
+/// tightly-packed RGBA bytes with the monitor's full size; the compositor
+/// blits them into the virtual framebuffer at the offset reported by
+/// [`MonitorCapture::buffer_offset`].
+struct MonitorCapture {
+    /// The monitor id (from the `MonitorLayout`).
+    #[allow(dead_code)]
+    monitor_id: String,
+    /// `PhysicalBounds` in the captured framebuffer's local coordinate
+    /// space where the captured pixels should be blitted.
+    buffer_offset: PhysicalBounds,
+    /// RGBA pixels, tightly packed, `width * height * 4` bytes.
+    rgba: Vec<u8>,
+}
+
+/// Composite pipeline: fan out one `xcap::Monitor::capture_image` per
+/// monitor on a worker thread, then blit each monitor's framebuffer into
+/// the virtual framebuffer at the offset that corresponds to the
+/// virtual-desktop origin. The composite is rejected if any monitor
+/// fails — the platform never commits a partial desktop as a complete
+/// capture.
+fn composite_virtual_desktop(layout: &MonitorLayout) -> PlatformResult<(Vec<u8>, PhysicalBounds)> {
+    if layout.monitors.is_empty() {
+        return Err(CaptureError::MonitorEnumeration("no monitors detected".into()).into());
+    }
+    if layout.monitors.len() > MAX_MONITORS_PER_CAPTURE {
+        return Err(CaptureError::FramebufferTooLarge {
+            width: layout.monitors.len() as u32,
+            height: 1,
+        }
+        .into());
+    }
+
+    let virtual_bounds = layout
+        .virtual_bounds()
+        .ok_or_else(|| CaptureError::MonitorEnumeration("no monitors detected".into()))?;
+    let composite_bounds = virtual_bounds.as_top_left_bounds();
+    let buffer_size = composite_bounds.size;
+    let total_pixels = (buffer_size.width as u64) * (buffer_size.height as u64);
+    if total_pixels > MAX_FRAMEBUFFER_PIXELS {
+        return Err(CaptureError::FramebufferTooLarge {
+            width: buffer_size.width,
+            height: buffer_size.height,
+        }
+        .into());
+    }
+
+    // Fan out: one capture per monitor on a worker thread. The
+    // `xcap::Monitor::capture_image` call is the long pole; parallel
+    // capture on a typical 2-monitor desktop takes the same wall-clock
+    // as the slowest monitor rather than the sum.
+    let captures = capture_all_monitors_parallel(layout)?;
+    let mut composite = vec![0u8; (buffer_size.width as usize) * (buffer_size.height as usize) * 4];
+    for cap in &captures {
+        blit_rgba(&mut composite, buffer_size, &cap.buffer_offset, &cap.rgba);
+    }
+
+    Ok((composite, composite_bounds))
+}
+
+/// Capture every monitor in parallel. Each monitor's framebuffer is
+/// captured against the full monitor size so the compositor can blit it
+/// without masking. The offset in the virtual framebuffer is computed
+/// from the virtual desktop origin (the difference between the monitor's
+/// physical origin and the virtual desktop's inclusive minimum).
+///
+/// `xcap::Monitor` is not `Send` (it wraps an `HMONITOR`), so we cannot
+/// ship the monitor reference across threads. Each capture thread
+/// re-queries the OS monitor list and locates the descriptor by id.
+/// The cost is one extra `Monitor::all()` call per monitor, which is
+/// negligible compared to the capture itself.
+fn capture_all_monitors_parallel(layout: &MonitorLayout) -> PlatformResult<Vec<MonitorCapture>> {
+    let virtual_bounds = layout
+        .virtual_bounds()
+        .ok_or_else(|| CaptureError::MonitorEnumeration("no monitors detected".into()))?;
+    let buffer_size = virtual_bounds.as_top_left_bounds().size;
+
+    // Spawn one thread per monitor. Each thread re-queries monitors and
+    // captures the one matching its target id; the main thread joins
+    // back into a single `MonitorCapture` list and blits.
+    let handles: Vec<std::thread::JoinHandle<MonitorThreadResult>> = layout
+        .monitors
+        .iter()
+        .map(|descriptor| {
+            let id = descriptor.id.clone();
+            let id_for_thread = id.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("pixelgrab-capture-{id_for_thread}"))
+                .spawn(move || {
+                    let image = capture_one_monitor(&id_for_thread);
+                    MonitorThreadResult {
+                        monitor_id: id_for_thread,
+                        image,
+                    }
+                })
+                .map_err(|err| {
+                    CaptureError::Pipeline(format!("capture thread spawn failed for {id}: {err}"))
+                })?;
+            Ok(handle)
+        })
+        .collect::<PlatformResult<Vec<_>>>()?;
+
+    let mut captures = Vec::with_capacity(handles.len());
+    for handle in handles {
+        let result = handle
+            .join()
+            .map_err(|_| CaptureError::Pipeline("capture worker thread panicked".into()))?;
+        let xcap_image = match result.image {
+            Ok(image) => image,
+            Err(_err) => {
+                // Privacy: keep the monitor id (categorical) but replace
+                // the raw xcap error string with a stable kind. xcap
+                // errors can echo COM HRESULTs that are not telemetry we
+                // want to ship through the platform errors.
+                log::warn!(
+                    "monitor {} capture failed: xcap capture_image returned an error",
+                    result.monitor_id
+                );
+                return Err(CaptureError::MonitorCaptureFailed {
+                    monitor_id: result.monitor_id,
+                    reason: "capture_image_failed".into(),
+                }
+                .into());
+            }
+        };
+        let descriptor = layout
+            .monitors
+            .iter()
+            .find(|m| m.id == result.monitor_id)
+            .ok_or_else(|| {
+                CaptureError::MonitorEnumeration(format!(
+                    "monitor {} disappeared mid-capture",
+                    result.monitor_id
+                ))
+            })?;
+        let buffer_offset = pixelgrab_contracts::coordinate::transform::monitor_to_capture_buffer(
+            &descriptor.bounds,
+            virtual_bounds.min,
+            buffer_size,
+        );
+        let raw = xcap_image.into_raw();
+        if raw.len()
+            != (descriptor.bounds.size.width as usize)
+                * (descriptor.bounds.size.height as usize)
+                * 4
+        {
+            return Err(CaptureError::InvalidOutput(format!(
+                "monitor {} returned {} bytes; expected {}x{}x4",
+                result.monitor_id,
+                raw.len(),
+                descriptor.bounds.size.width,
+                descriptor.bounds.size.height
+            ))
+            .into());
+        }
+        captures.push(MonitorCapture {
+            monitor_id: result.monitor_id,
+            buffer_offset,
+            rgba: raw,
+        });
+    }
+    Ok(captures)
+}
+
+/// Capture a single monitor by id. Re-queries the OS monitor list inside
+/// the current thread (xcap's `Monitor` is not `Send`) and matches by
+/// the stable id assigned by `query_monitor_layout`. Returns the raw
+/// RGBA buffer the caller can blit into a composite framebuffer.
+fn capture_one_monitor(target_id: &str) -> Result<xcap::image::RgbaImage, xcap::XCapError> {
+    let monitors = xcap::Monitor::all()?;
+    let monitor = monitors
+        .into_iter()
+        .find(|m| matches!(m.id(), Ok(id) if id.to_string() == target_id))
+        .ok_or_else(|| xcap::XCapError::new("monitor id not found during capture"))?;
+    monitor.capture_image()
+}
+
+/// Internal result type for the per-monitor capture thread. The image
+/// field is `Err` only when the xcap call itself failed; thread panics
+/// are reported through the `JoinHandle::join` return.
+struct MonitorThreadResult {
+    monitor_id: String,
+    image: Result<xcap::image::RgbaImage, xcap::XCapError>,
+}
+
+/// Copy an RGBA framebuffer into a destination framebuffer at the given
+/// offset. The offset is in the destination's local coordinate space;
+/// pixels that fall outside the destination are silently dropped.
+fn blit_rgba(dst: &mut [u8], dst_size: PhysicalSize, offset: &PhysicalBounds, src: &[u8]) {
+    let dst_width = dst_size.width as i32;
+    let dst_height = dst_size.height as i32;
+    let src_width = offset.size.width as i32;
+    let src_height = offset.size.height as i32;
+    let dst_x = offset.origin.x;
+    let dst_y = offset.origin.y;
+    if dst_x < 0 || dst_y < 0 || dst_x + src_width <= 0 || dst_y + src_height <= 0 {
+        return;
+    }
+    let copy_x0 = 0.max(-dst_x);
+    let copy_y0 = 0.max(-dst_y);
+    let copy_x1 = src_width.min(dst_width - dst_x);
+    let copy_y1 = src_height.min(dst_height - dst_y);
+    if copy_x1 <= copy_x0 || copy_y1 <= copy_y0 {
+        return;
+    }
+    let dst_stride = (dst_size.width as usize) * 4;
+    let src_stride = (offset.size.width as usize) * 4;
+    let copy_w = (copy_x1 - copy_x0) as usize;
+    for row in copy_y0..copy_y1 {
+        let src_offset = (row as usize) * src_stride + (copy_x0 as usize) * 4;
+        let dst_offset = ((dst_y + row) as usize) * dst_stride + ((dst_x + copy_x0) as usize) * 4;
+        dst[dst_offset..dst_offset + copy_w * 4]
+            .copy_from_slice(&src[src_offset..src_offset + copy_w * 4]);
+    }
 }
 
 fn physical_bounds_of(monitor: &xcap::Monitor) -> PhysicalBounds {
@@ -424,10 +702,12 @@ pub fn diagnostics_failure(
     let kind = match failure {
         CaptureError::MonitorEnumeration(_) => "monitor_query_failed",
         CaptureError::UnsupportedFormat(_) => "unsupported",
+        CaptureError::MonitorCaptureFailed { .. } => "monitor_capture_failed",
         CaptureError::Pipeline(_) => "capture_unavailable",
         CaptureError::InvalidOutput(_) => "capture_unavailable",
         CaptureError::CropOutOfBounds(_) => "coordinate_transform",
         CaptureError::CoordinateTransform(_) => "coordinate_transform",
+        CaptureError::FramebufferTooLarge { .. } => "framebuffer_too_large",
     };
     CaptureDiagnostics::started(capture_id, monitor_id, bounds, started_at_ms)
         .completed(now_ms())

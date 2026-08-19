@@ -76,6 +76,129 @@ impl SyntheticMonitorLayout {
         ])
     }
 
+    /// Stacked layout: primary on top, secondary directly below. Tests
+    /// vertical monitor arrangements.
+    pub fn stacked() -> MonitorLayout {
+        MonitorLayout::new(vec![
+            Self::primary(
+                "monitor-0",
+                "Test Primary",
+                PhysicalBounds::from_xywh(0, 0, 1920, 1080),
+                1.0,
+            ),
+            Self::secondary(
+                "monitor-1",
+                "Test Secondary",
+                PhysicalBounds::from_xywh(0, 1080, 1920, 1080),
+                1.0,
+            ),
+        ])
+    }
+
+    /// Vertically offset layout: secondary hangs above the primary by
+    /// 200 px. Exercises the vertical negative-origin code path.
+    pub fn vertically_offset() -> MonitorLayout {
+        MonitorLayout::new(vec![
+            Self::primary(
+                "monitor-0",
+                "Test Primary",
+                PhysicalBounds::from_xywh(0, 0, 1920, 1080),
+                1.0,
+            ),
+            Self::secondary(
+                "monitor-1",
+                "Test Secondary",
+                PhysicalBounds::from_xywh(0, -200, 1920, 1080),
+                1.0,
+            ),
+        ])
+    }
+
+    /// Overlapping-edge layout: secondary overlaps the primary by 100 px
+    /// so the seam is not at a clean monitor boundary. Useful for the
+    /// acceptance criterion "DPI boundaries do not produce selection or
+    /// annotation jumps".
+    pub fn overlapping_edge() -> MonitorLayout {
+        MonitorLayout::new(vec![
+            Self::primary(
+                "monitor-0",
+                "Test Primary",
+                PhysicalBounds::from_xywh(0, 0, 1920, 1080),
+                1.0,
+            ),
+            Self::secondary(
+                "monitor-1",
+                "Test Secondary",
+                PhysicalBounds::from_xywh(1820, 0, 1920, 1080),
+                1.0,
+            ),
+        ])
+    }
+
+    /// 100% / 200% mixed-DPI layout. The 200% monitor reports
+    /// physical pixels that are 2x the logical pixels, so the framework
+    /// has to honour the physical extent regardless of DPI.
+    pub fn mixed_dpi_200() -> MonitorLayout {
+        MonitorLayout::new(vec![
+            Self::primary(
+                "monitor-0",
+                "Test Primary",
+                PhysicalBounds::from_xywh(0, 0, 1920, 1080),
+                1.0,
+            ),
+            Self::secondary(
+                "monitor-1",
+                "Test Secondary",
+                PhysicalBounds::from_xywh(1920, 0, 3840, 2160),
+                2.0,
+            ),
+        ])
+    }
+
+    /// Three-monitor layout: primary in the centre with secondaries
+    /// left and right. Exercises the fan-out path with more than two
+    /// capture workers.
+    pub fn tri_monitor() -> MonitorLayout {
+        MonitorLayout::new(vec![
+            Self::secondary(
+                "monitor-0",
+                "Test Left",
+                PhysicalBounds::from_xywh(-1920, 0, 1920, 1080),
+                1.0,
+            ),
+            Self::primary(
+                "monitor-1",
+                "Test Primary",
+                PhysicalBounds::from_xywh(0, 0, 1920, 1080),
+                1.0,
+            ),
+            Self::secondary(
+                "monitor-2",
+                "Test Right",
+                PhysicalBounds::from_xywh(1920, 0, 1920, 1080),
+                1.0,
+            ),
+        ])
+    }
+
+    /// Build a layout from a list of `(id, x, y, w, h, scale, primary)`
+    /// tuples. Public hook for table-driven tests that want to enumerate
+    /// many permutations without a dedicated fixture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn arbitrary(monitors: &[(&str, i32, i32, u32, u32, f32, bool)]) -> MonitorLayout {
+        let descriptors = monitors
+            .iter()
+            .map(|(id, x, y, w, h, scale, primary)| {
+                if *primary {
+                    Self::primary(id, id, PhysicalBounds::from_xywh(*x, *y, *w, *h), *scale)
+                } else {
+                    Self::secondary(id, id, PhysicalBounds::from_xywh(*x, *y, *w, *h), *scale)
+                }
+            })
+            .collect();
+        MonitorLayout::new(descriptors)
+    }
+
     fn primary(id: &str, label: &str, bounds: PhysicalBounds, scale: f32) -> MonitorDescriptor {
         MonitorDescriptor {
             id: id.to_string(),

@@ -146,6 +146,24 @@ impl VirtualBounds {
     pub fn height(&self) -> i32 {
         self.max.y - self.min.y
     }
+
+    /// True when the bounds have zero width or height (no monitors).
+    pub fn is_empty(&self) -> bool {
+        self.width() <= 0 || self.height() <= 0
+    }
+
+    /// Bounds as a top-left `PhysicalBounds` aligned to the virtual
+    /// desktop's top-left. This is the storage shape for the captured
+    /// framebuffer: the captured RGBA pixels are row-major from this
+    /// origin, and the buffer's size is `width() x height()`.
+    pub fn as_top_left_bounds(&self) -> PhysicalBounds {
+        PhysicalBounds::from_xywh(
+            self.min.x,
+            self.min.y,
+            self.width().max(0) as u32,
+            self.height().max(0) as u32,
+        )
+    }
 }
 
 /// A client-coordinate rectangle (CSS pixels in the WebView). Used to express
@@ -333,6 +351,114 @@ mod tests {
         assert_eq!(clamped.size.width, 50);
         assert_eq!(clamped.size.height, 50);
     }
+
+    #[test]
+    fn virtual_bounds_as_top_left_uses_min_as_origin() {
+        let v = VirtualBounds {
+            min: PhysicalPoint::new(-200, -100),
+            max: PhysicalPoint::new(2120, 1240),
+        };
+        let tl = v.as_top_left_bounds();
+        assert_eq!(tl.origin.x, -200);
+        assert_eq!(tl.origin.y, -100);
+        assert_eq!(tl.size.width, 2320);
+        assert_eq!(tl.size.height, 1340);
+    }
+
+    #[test]
+    fn virtual_bounds_is_empty_on_degenerate() {
+        let v = VirtualBounds {
+            min: PhysicalPoint::new(0, 0),
+            max: PhysicalPoint::new(0, 0),
+        };
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn capture_buffer_to_physical_round_trip() {
+        // Subtracting the capture origin then adding it back returns the
+        // original physical selection. The negative-origin layout is the
+        // relevant case for tracer-03; the round-trip must preserve it.
+        let origin = PhysicalPoint::new(-1920, -200);
+        let physical = PhysicalBounds::from_xywh(-1910, 100, 1920, 1080);
+        let buffer = transform::physical_to_capture_buffer(&physical, origin);
+        let back = transform::capture_buffer_to_physical(&buffer, origin);
+        assert_eq!(back, physical);
+    }
+
+    #[test]
+    fn project_to_capture_buffer_clamps_outside() {
+        // A selection that lies entirely outside the captured buffer
+        // collapses to empty bounds instead of leaking negative coordinates.
+        let origin = PhysicalPoint::new(0, 0);
+        let buffer_size = PhysicalSize::new(1920, 1080);
+        let physical = PhysicalBounds::from_xywh(2000, 1100, 50, 50);
+        let projected = transform::project_to_capture_buffer(&physical, origin, buffer_size);
+        assert!(projected.is_empty());
+    }
+
+    #[test]
+    fn project_to_capture_buffer_keeps_partial_overlap() {
+        // A selection that straddles the buffer edge is clipped to the
+        // overlap rather than rejected outright.
+        let origin = PhysicalPoint::new(0, 0);
+        let buffer_size = PhysicalSize::new(1920, 1080);
+        let physical = PhysicalBounds::from_xywh(1900, 1060, 40, 40);
+        let projected = transform::project_to_capture_buffer(&physical, origin, buffer_size);
+        assert_eq!(projected.size.width, 20);
+        assert_eq!(projected.size.height, 20);
+    }
+
+    #[test]
+    fn monitor_to_capture_buffer_translates_by_virtual_origin() {
+        let origin = PhysicalPoint::new(-1920, -200);
+        let buffer_size = PhysicalSize::new(4480, 2160);
+        let monitor = PhysicalBounds::from_xywh(0, 0, 1920, 1080);
+        let projected = transform::monitor_to_capture_buffer(&monitor, origin, buffer_size);
+        assert_eq!(projected.origin.x, 1920);
+        assert_eq!(projected.origin.y, 200);
+        assert_eq!(projected.size.width, 1920);
+        assert_eq!(projected.size.height, 1080);
+    }
+
+    #[test]
+    fn monitor_to_capture_buffer_clamps_to_buffer() {
+        // A monitor whose bounds exceed the captured buffer (e.g. a
+        // topology that has shrunk since the descriptor was cached) is
+        // clamped to the buffer extents rather than overflowing.
+        let origin = PhysicalPoint::new(0, 0);
+        let buffer_size = PhysicalSize::new(1920, 1080);
+        let monitor = PhysicalBounds::from_xywh(1800, 1000, 500, 400);
+        let projected = transform::monitor_to_capture_buffer(&monitor, origin, buffer_size);
+        assert_eq!(projected.origin.x, 1800);
+        assert_eq!(projected.origin.y, 1000);
+        assert_eq!(projected.size.width, 120);
+        assert_eq!(projected.size.height, 80);
+    }
+
+    #[test]
+    fn physical_to_logical_applies_scale_factor() {
+        // 100% scale: divisions are identity.
+        let origin = PhysicalPoint::new(1920, 1080);
+        let out = transform::physical_to_logical(&origin, 1.0);
+        assert_eq!(out, origin);
+        // 200% scale: logical pixels are half the physical pixels.
+        let origin = PhysicalPoint::new(1920, 1080);
+        let out = transform::physical_to_logical(&origin, 2.0);
+        assert_eq!(out, PhysicalPoint::new(960, 540));
+        // 125% scale: round-half-away-from-zero.
+        let origin = PhysicalPoint::new(1250, 0);
+        let out = transform::physical_to_logical(&origin, 1.25);
+        assert_eq!(out, PhysicalPoint::new(1000, 0));
+    }
+
+    #[test]
+    fn physical_size_to_logical_zero_scale_factor_falls_back() {
+        // A zero or invalid scale factor must not divide by zero.
+        let size = PhysicalSize::new(1920, 1080);
+        let out = transform::physical_size_to_logical(size, 0.0);
+        assert_eq!(out, size);
+    }
 }
 
 /// Coordinate conversion utilities. Centralised here so the same rounding
@@ -415,6 +541,23 @@ pub mod transform {
         PhysicalBounds::from_xywh(x, y, width, height)
     }
 
+    /// Translate a capture-buffer rectangle back into physical coordinates.
+    /// The inverse of [`physical_to_capture_buffer`]. The result is the
+    /// `PhysicalBounds` the user originally intended; safe to use for
+    /// re-projecting a crop into the global virtual desktop coordinate
+    /// system.
+    pub fn capture_buffer_to_physical(
+        buffer: &PhysicalBounds,
+        capture_origin: PhysicalPoint,
+    ) -> PhysicalBounds {
+        PhysicalBounds::from_xywh(
+            capture_origin.x + buffer.origin.x,
+            capture_origin.y + buffer.origin.y,
+            buffer.size.width,
+            buffer.size.height,
+        )
+    }
+
     /// Ensure a capture-buffer crop stays within the framebuffer's physical
     /// extents. Used as the last guard before exporting.
     pub fn clamp_to_capture_buffer(
@@ -423,5 +566,89 @@ pub mod transform {
     ) -> PhysicalBounds {
         let extent = PhysicalBounds::from_xywh(0, 0, buffer_size.width, buffer_size.height);
         crop.clamped_to(&extent)
+    }
+
+    /// Project a physical selection into the captured framebuffer's local
+    /// coordinate space, clamping to the buffer's extents. Returns an empty
+    /// `PhysicalBounds` when the selection is entirely outside the buffer.
+    ///
+    /// This is the canonical tracer-03 sequence: convert the user's
+    /// physical-pixel selection (which lives in the virtual desktop
+    /// coordinate system) into the captured framebuffer's local coordinate
+    /// space, then drop any portion that lies outside the buffer. The
+    /// caller passes the resulting `PhysicalBounds` to the existing
+    /// `FrozenFrame::crop` to extract the pixel rectangle.
+    pub fn project_to_capture_buffer(
+        physical: &PhysicalBounds,
+        capture_origin: PhysicalPoint,
+        buffer_size: PhysicalSize,
+    ) -> PhysicalBounds {
+        let projected = physical_to_capture_buffer(physical, capture_origin);
+        let clamped = clamp_to_capture_buffer(&projected, buffer_size);
+        if clamped.is_empty() {
+            PhysicalBounds::EMPTY
+        } else {
+            clamped
+        }
+    }
+
+    /// Compute the capture-buffer rectangle that a single monitor occupies
+    /// inside a virtual desktop framebuffer. The monitor's bounds are in
+    /// physical desktop coordinates; the returned `PhysicalBounds` is in
+    /// the captured framebuffer's local coordinate space (origin = top-left
+    /// of the virtual desktop). The result is clamped to the framebuffer so
+    /// a partially-out-of-range monitor never produces a negative offset.
+    ///
+    /// This is the counterpart used by the composite-blit pipeline: while
+    /// `project_to_capture_buffer` maps a user selection, this helper maps
+    /// a monitor's bounds into the buffer it is about to be drawn into.
+    pub fn monitor_to_capture_buffer(
+        monitor_bounds: &PhysicalBounds,
+        virtual_origin: PhysicalPoint,
+        buffer_size: PhysicalSize,
+    ) -> PhysicalBounds {
+        let projected = PhysicalBounds::from_xywh(
+            monitor_bounds.origin.x - virtual_origin.x,
+            monitor_bounds.origin.y - virtual_origin.y,
+            monitor_bounds.size.width,
+            monitor_bounds.size.height,
+        );
+        // Clamp to the buffer: the source rectangle can't lie outside the
+        // destination, and we want the largest axis-aligned rectangle we
+        // can blit without copying pixel data that doesn't exist.
+        let extent = PhysicalBounds::from_xywh(0, 0, buffer_size.width, buffer_size.height);
+        projected.clamped_to(&extent)
+    }
+
+    /// Convert a physical origin into logical pixels using the WebView's
+    /// scale factor. Used by the overlay window so the window is sized
+    /// to cover the entire virtual desktop regardless of DPI.
+    /// Returns floating-point logical pixels so the result can be
+    /// handed to `tauri::LogicalPosition` without a second rounding step.
+    pub fn physical_to_logical(origin: &PhysicalPoint, scale_factor: f32) -> PhysicalPoint {
+        let scale = if scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        } as f64;
+        PhysicalPoint::new(
+            round_to_i32(origin.x as f64 / scale),
+            round_to_i32(origin.y as f64 / scale),
+        )
+    }
+
+    /// Convert a physical size into logical pixels using the WebView's
+    /// scale factor. Used by the overlay window so the window is sized
+    /// to cover the entire virtual desktop regardless of DPI.
+    pub fn physical_size_to_logical(size: PhysicalSize, scale_factor: f32) -> PhysicalSize {
+        let scale = if scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        } as f64;
+        PhysicalSize::new(
+            round_to_u32(size.width as f64 / scale),
+            round_to_u32(size.height as f64 / scale),
+        )
     }
 }

@@ -21,6 +21,19 @@ pub enum CaptureError {
     /// The platform could not enumerate monitors.
     #[error("monitor enumeration failed: {0}")]
     MonitorEnumeration(String),
+    /// One monitor's capture failed during the composite pipeline. The
+    /// composite is rejected — the platform never commits a partial
+    /// desktop as a complete capture.
+    ///
+    /// The `monitor_id` is included for diagnostics only; it is the
+    /// caller-provided wire identifier, not a path or pixel payload.
+    #[error("monitor capture failed for {monitor_id}: {reason}")]
+    MonitorCaptureFailed {
+        /// Stable monitor id (from `MonitorDescriptor::id`).
+        monitor_id: String,
+        /// Categorical failure kind.
+        reason: String,
+    },
     /// The underlying capture pipeline failed.
     #[error("capture pipeline failed: {0}")]
     Pipeline(String),
@@ -33,6 +46,16 @@ pub enum CaptureError {
     /// A coordinate transform produced a non-finite value.
     #[error("coordinate transform failed: {0}")]
     CoordinateTransform(String),
+    /// The captured framebuffer would exceed the engine's allocation
+    /// guard. The cap exists so a malformed layout can never cause the
+    /// process to allocate hundreds of GB.
+    #[error("framebuffer too large: requested {width}x{height} bytes")]
+    FramebufferTooLarge {
+        /// Requested width in pixels.
+        width: u32,
+        /// Requested height in pixels.
+        height: u32,
+    },
 }
 
 impl From<CaptureError> for pixelgrab_contracts::PlatformError {
@@ -41,10 +64,12 @@ impl From<CaptureError> for pixelgrab_contracts::PlatformError {
         let kind = match &err {
             CaptureError::UnsupportedFormat(_) => PlatformErrorKind::Unsupported,
             CaptureError::MonitorEnumeration(_) => PlatformErrorKind::MonitorQueryFailed,
+            CaptureError::MonitorCaptureFailed { .. } => PlatformErrorKind::CaptureUnavailable,
             CaptureError::Pipeline(_) => PlatformErrorKind::CaptureUnavailable,
             CaptureError::InvalidOutput(_) => PlatformErrorKind::CaptureUnavailable,
             CaptureError::CropOutOfBounds(_) => PlatformErrorKind::CoordinateTransform,
             CaptureError::CoordinateTransform(_) => PlatformErrorKind::CoordinateTransform,
+            CaptureError::FramebufferTooLarge { .. } => PlatformErrorKind::CaptureUnavailable,
         };
         PlatformError::new(kind, err.to_string())
     }
@@ -60,6 +85,16 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
     /// Enumerate the current monitor layout.
     fn monitor_layout(&self) -> PlatformResult<MonitorLayout>;
 
+    /// Invalidate the cached monitor layout. The next call to
+    /// `monitor_layout` re-queries the OS instead of returning the cached
+    /// value. Sessions that are about to start a capture should call this
+    /// when the OS reports a display, DPI, resolution, work-area, or
+    /// topology change so the next capture uses fresh geometry.
+    ///
+    /// The default implementation is a no-op (the synthetic adapter does
+    /// not need to invalidate anything — it shares state with the test).
+    /// Windows replaces it with a flag the capture engine checks.
+    fn invalidate_layout(&self) {}
     /// Run a capture pipeline and return a `CaptureResolution`.
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution>;
 
