@@ -20,12 +20,14 @@ import type {
   SaveShelfCardAsRequest,
   SaveShelfCardAsResponse,
   SessionSnapshot,
+  ShelfPreferencesDto,
   ShelfQueueSnapshot,
   ShelfSnapshot,
   StartShelfDragIntent,
   StartShelfDragResult,
   UnhoverShelfCardRequest,
   UpdateCacheMetadataRequest,
+  UpdateShelfPreferencesRequest,
 } from "./types";
 
 export async function requestCapture(
@@ -108,4 +110,14 @@ export async function startShelfDrag(
   payload: StartShelfDragIntent,
 ): Promise<IpcResponse<StartShelfDragResult>> {
   return invoke<IpcResponse<StartShelfDragResult>>("start_shelf_drag", { payload });
+}
+
+export async function getShelfPreferences(): Promise<IpcResponse<ShelfPreferencesDto>> {
+  return invoke<IpcResponse<ShelfPreferencesDto>>("get_shelf_preferences");
+}
+
+export async function updateShelfPreferences(
+  payload: UpdateShelfPreferencesRequest,
+): Promise<IpcResponse<ShelfPreferencesDto>> {
+  return invoke<IpcResponse<ShelfPreferencesDto>>("update_shelf_preferences", { payload });
 }

@@ -13,12 +13,14 @@ use pixelgrab_contracts::{
         DismissCacheEntryResponse, IpcResponse, RequestCaptureIntent, RequestCommitIntent,
         RequestOverlayIntent, RequestOverlayResult, SessionSnapshot, ShelfSnapshot,
         StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+        UpdateShelfPreferencesRequest,
     },
     shelf_queue::{
         CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
         SaveShelfCardAsResponse, ShelfQueueSnapshot,
     },
-    CaptureDiagnostics, PlatformError, PlatformErrorKind, ShelfId,
+    CaptureDiagnostics, MonitorDescriptor, MonitorLayout, PlatformError, PlatformErrorKind,
+    ShelfId, ShelfPreferences,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -45,25 +47,44 @@ pub fn now_ms() -> i64 {
 }
 
 /// Resolve the shelf position for the queue's current visible card
-/// count. Returns `None` when the platform cannot enumerate monitors
-/// (callers should hide the shelf window in that case).
+/// count. Uses the user preferences to pick the corner, monitor,
+/// margin, and visible-card count; falls back to the primary monitor
+/// (and the default placement) when the named monitor is missing.
+/// Returns an error only when no monitor is available at all.
 fn queue_position(app: &PixelGrabApp) -> Result<pixelgrab_contracts::ShelfPosition, PlatformError> {
     let layout = app.platform().monitor_layout()?;
-    let monitor = layout
+    let prefs = app.preferences().current();
+    let monitor = resolve_preferred_monitor(&prefs, &layout).ok_or_else(|| {
+        PlatformError::new(
+            PlatformErrorKind::MonitorQueryFailed,
+            "no monitor available for shelf placement",
+        )
+    })?;
+    let visible = app.shelf_queue().snapshot(now_ms()).cards.len();
+    Ok(pixelgrab_contracts::placement_for(&prefs, monitor, visible))
+}
+
+/// Resolve the monitor the shelf should anchor to. Honours the user's
+/// `target_monitor_id` when the named monitor is present, otherwise
+/// falls back to the primary monitor (or the first one when no
+/// monitor claims primary). The preference is intentionally NOT
+/// cleared on a miss — the user's selection survives a temporary
+/// disconnect (cable unplugged) and is re-applied when the monitor
+/// reappears.
+pub fn resolve_preferred_monitor<'a>(
+    prefs: &ShelfPreferences,
+    layout: &'a MonitorLayout,
+) -> Option<&'a MonitorDescriptor> {
+    if let Some(id) = prefs.target_monitor_id.as_ref() {
+        if let Some(m) = layout.monitors.iter().find(|m| m.id == *id) {
+            return Some(m);
+        }
+    }
+    layout
         .monitors
         .iter()
         .find(|m| m.is_primary)
         .or_else(|| layout.monitors.first())
-        .ok_or_else(|| {
-            PlatformError::new(
-                PlatformErrorKind::MonitorQueryFailed,
-                "no monitor available for shelf placement",
-            )
-        })?;
-    let visible = app.shelf_queue().snapshot(now_ms()).cards.len();
-    Ok(pixelgrab_contracts::ShelfPosition::shelf_queue_position(
-        monitor, visible,
-    ))
 }
 
 /// Emit the shelf-queue-updated event with the latest snapshot. The
@@ -516,6 +537,57 @@ pub fn get_shelf_snapshot(app: AppState<'_>) -> IpcResponse<ShelfSnapshot> {
 #[tauri::command]
 pub fn get_session_snapshot(app: AppState<'_>) -> IpcResponse<SessionSnapshot> {
     IpcResponse::from_result(Ok(app.session().snapshot()))
+}
+
+/// Return the current persisted shelf preferences. The frontend
+/// loads this on startup so the settings UI can render the user's
+/// choices, and on every change to mirror the post-update state.
+#[tauri::command]
+pub fn get_shelf_preferences(
+    app: AppState<'_>,
+) -> IpcResponse<pixelgrab_contracts::ShelfPreferencesDto> {
+    IpcResponse::from_result(Ok(app.preferences().current().into()))
+}
+
+/// Replace the persisted shelf preferences. The Rust core sanitizes
+/// the payload, updates the in-memory state immediately, schedules
+/// a debounced disk write, and (when `commit = true`) reapplies the
+/// timer / position to the running shelf. `commit = false` is the
+/// "live preview" path used while the user drags a slider — the
+/// frontend has already positioned the shelf window optimistically
+/// via the placement maths it computes locally, so the Rust core
+/// only needs to mirror the change in memory.
+#[tauri::command]
+pub fn update_shelf_preferences(
+    app: AppState<'_>,
+    payload: UpdateShelfPreferencesRequest,
+    handle: AppHandle,
+) -> IpcResponse<pixelgrab_contracts::ShelfPreferencesDto> {
+    let prefs: ShelfPreferences = payload.preferences.into();
+    let sanitized = prefs.sanitize();
+    let prefs_for_apply = sanitized.clone();
+    // Update the in-memory state + schedule the debounced disk write.
+    app.preferences().update(sanitized.clone(), None);
+    if payload.commit {
+        // Apply the new timer config to the queue. Cards already in
+        // the queue keep their original deadlines; only future cards
+        // pick up the new lifetime.
+        let cfg = pixelgrab_contracts::ShelfTimerConfig {
+            lifetime_ms: prefs_for_apply.lifetime().as_millis() as i64,
+            grace_ms: pixelgrab_contracts::DEFAULT_HOVER_GRACE_MS,
+        };
+        app.shelf_queue().apply_timer_config(cfg);
+        // Force-flush the preferences so a process that exits
+        // immediately after the commit cannot lose the change.
+        if let Err(_err) = app.preferences().flush_blocking() {
+            log::warn!("update_shelf_preferences: flush_blocking failed");
+        }
+        // Re-emit the queue snapshot with the new position so the
+        // shelf window repositions itself immediately.
+        let snapshot = snapshot_with_position(&app);
+        let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
+    }
+    IpcResponse::from_result(Ok(sanitized.into()))
 }
 
 /// Internal helper: emit a shelf-updated event to the frontend.

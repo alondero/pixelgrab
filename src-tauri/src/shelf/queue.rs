@@ -129,7 +129,7 @@ impl QueueInner {
 #[derive(Debug, Clone)]
 pub struct ShelfQueueEngine {
     inner: Arc<Mutex<QueueInner>>,
-    config: ShelfTimerConfig,
+    config: Arc<Mutex<ShelfTimerConfig>>,
 }
 
 impl ShelfQueueEngine {
@@ -141,13 +141,27 @@ impl ShelfQueueEngine {
                 index: HashMap::new(),
                 last_clock_ms: 0,
             })),
-            config,
+            config: Arc::new(Mutex::new(config)),
         }
     }
 
     /// Read the timer configuration.
     pub fn config(&self) -> ShelfTimerConfig {
-        self.config
+        *self.config.lock()
+    }
+
+    /// Replace the timer configuration. Cards already in the queue
+    /// keep their original deadline — the new config only affects
+    /// cards added after this call. A lifetime of zero means "no
+    /// timer"; cards added after this call will never auto-expire.
+    ///
+    /// Tracer 12 calls this from the startup path (so rehydrated
+    /// cards pick up the persisted lifetime) and from the
+    /// `update_shelf_preferences` IPC handler (so live changes take
+    /// effect for the next commit without retroactively expiring
+    /// existing cards).
+    pub fn apply_timer_config(&self, config: ShelfTimerConfig) {
+        *self.config.lock() = config;
     }
 
     /// Number of cards currently in the queue (visible + overflow).
@@ -166,8 +180,9 @@ impl ShelfQueueEngine {
     /// bumps the oldest card deeper into the overflow — but does not
     /// remove it. Returns the new snapshot.
     pub fn add(&self, entry: CacheEntry, now_ms: i64) -> ShelfQueueSnapshot {
+        let cfg = *self.config.lock();
         let mut inner = self.inner.lock();
-        let timer = ShelfTimerState::started(now_ms, self.config);
+        let timer = ShelfTimerState::started(now_ms, cfg);
         inner.push_front(QueueEntry { entry, timer });
         inner.last_clock_ms = now_ms;
         inner.snapshot(now_ms)
@@ -178,6 +193,7 @@ impl ShelfQueueEngine {
     /// order; each card's timer is started at `now_ms` so a restart
     /// does not instantly expire pre-existing cards.
     pub fn rehydrate(&self, entries: Vec<CacheEntry>, now_ms: i64) {
+        let cfg = *self.config.lock();
         let mut inner = self.inner.lock();
         let mut sorted = entries;
         // Sort oldest-first; we push_front each entry in turn so the
@@ -188,7 +204,7 @@ impl ShelfQueueEngine {
         inner.cards.clear();
         inner.index.clear();
         for entry in sorted {
-            let timer = ShelfTimerState::started(now_ms, self.config);
+            let timer = ShelfTimerState::started(now_ms, cfg);
             inner.push_front(QueueEntry { entry, timer });
         }
         inner.last_clock_ms = now_ms;
@@ -212,10 +228,11 @@ impl ShelfQueueEngine {
     /// at least the configured grace period. Returns `None` if the
     /// shelf id is unknown.
     pub fn unhover(&self, shelf_id: &str, now_ms: i64) -> Option<ShelfQueueSnapshot> {
+        let cfg = *self.config.lock();
         let mut inner = self.inner.lock();
         let idx = *inner.index.get(shelf_id)?;
         let entry = inner.cards.get_mut(idx)?;
-        entry.timer.unhover(now_ms, self.config);
+        entry.timer.unhover(now_ms, cfg);
         inner.last_clock_ms = now_ms;
         Some(inner.snapshot(now_ms))
     }

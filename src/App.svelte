@@ -4,11 +4,14 @@
   import { session } from "$lib/stores/session.svelte";
   import { requestCapture, requestCancel, getSessionSnapshot } from "$lib/ipc/commands";
   import type { CaptureDiagnostics, IpcResponse } from "$lib/ipc/types";
+  import SettingsPanel from "$lib/preferences/SettingsPanel.svelte";
+  import { createPreferencesStore } from "$lib/preferences/store.svelte";
 
   let lastCaptureId = $state<string | null>(null);
   let lastCaptureBounds = $state<string | null>(null);
   let diagnostics = $state<CaptureDiagnostics | null>(null);
   let pendingError = $state<string | null>(null);
+  const preferences = createPreferencesStore();
 
   async function onCaptureIntent() {
     pendingError = null;
@@ -48,6 +51,7 @@
       onCaptureIntent();
     });
     refreshSnapshot();
+    void preferences.refresh();
     return () => {
       unlisten.then((fn) => fn());
     };
@@ -92,6 +96,8 @@
       <p class="error" data-testid="pending-error">{pendingError}</p>
     {/if}
   </section>
+
+  <SettingsPanel store={preferences} />
 </main>
 
 <style>

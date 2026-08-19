@@ -212,6 +212,24 @@ export interface UnhoverShelfCardRequest {
   shelfId: string;
 }
 
+export type ShelfCorner = "top_left" | "top_right" | "bottom_left" | "bottom_right";
+
+export interface ShelfPreferencesDto {
+  schemaVersion: number;
+  corner: ShelfCorner;
+  targetMonitorId?: string | null;
+  marginPx: number;
+  autoDismissEnabled: boolean;
+  lifetimeSeconds: number;
+  visibleCardCount: number;
+  showCountdown: boolean;
+}
+
+export interface UpdateShelfPreferencesRequest {
+  preferences: ShelfPreferencesDto;
+  commit?: boolean;
+}
+
 export interface RequestCaptureIntent {
   intent: "region" | "full_screen";
 }
