@@ -18,6 +18,7 @@ pub mod error;
 pub mod ipc;
 pub mod monitor;
 pub mod session;
+pub mod shelf_queue;
 
 pub use cache::{CacheEntry, CacheEntryMetadata, CaptureId, LockOwner, ShelfId, ShelfPosition};
 pub use capture::{CaptureFormat, CaptureRequest, CaptureResolution};
@@ -34,3 +35,8 @@ pub use ipc::{
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use session::{SessionState, SessionTransition};
+pub use shelf_queue::{
+    CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest, SaveShelfCardAsResponse,
+    ShelfQueueCard, ShelfQueueSnapshot, ShelfTimerConfig, ShelfTimerState,
+    DEFAULT_CARD_LIFETIME_MS, DEFAULT_HOVER_GRACE_MS, MAX_VISIBLE_CARDS,
+};

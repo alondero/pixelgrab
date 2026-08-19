@@ -9,7 +9,7 @@ use pixelgrab_contracts::{
     monitor::MonitorLayout,
     PlatformResult,
 };
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Internal capture error. Maps to `PlatformError` at the IPC boundary.
 #[derive(Debug, thiserror::Error)]
@@ -69,7 +69,7 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
         capture_id: &str,
         bounds: PhysicalBounds,
         rgba: &[u8],
-    ) -> PlatformResult<PathBuf>;
+    ) -> PlatformResult<std::path::PathBuf>;
 
     /// Flatten a physical crop from the most recent capture. Returns the
     /// RGBA pixel buffer and the resulting size. The flattened buffer is
@@ -100,5 +100,47 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
         _size: PhysicalSize,
     ) -> PlatformResult<()> {
         Ok(())
+    }
+
+    /// Publish an existing on-disk PNG to the system clipboard. Tracer 08
+    /// uses this for the shelf card Copy quick action: the cached PNG is
+    /// re-published to the clipboard without re-flattening the crop.
+    ///
+    /// The default implementation reads the PNG bytes, decodes them via
+    /// the `png` crate, and forwards the resulting RGBA buffer to
+    /// `publish_clipboard`. Platforms that own a native clipboard (e.g.
+    /// Windows via `arboard`) can override this to write the PNG bytes
+    /// directly.
+    fn publish_png_clipboard(&self, png_path: &Path) -> PlatformResult<()> {
+        let bytes = std::fs::read(png_path).map_err(|err| {
+            pixelgrab_contracts::PlatformError::new(
+                pixelgrab_contracts::PlatformErrorKind::Io,
+                format!("read png for clipboard: {err}"),
+            )
+        })?;
+        let decoder = png::Decoder::new(bytes.as_slice());
+        let mut reader = decoder.read_info().map_err(|e| {
+            pixelgrab_contracts::PlatformError::new(
+                pixelgrab_contracts::PlatformErrorKind::InvalidPayload,
+                format!("decode png: {e}"),
+            )
+        })?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).map_err(|e| {
+            pixelgrab_contracts::PlatformError::new(
+                pixelgrab_contracts::PlatformErrorKind::InvalidPayload,
+                format!("read png frame: {e}"),
+            )
+        })?;
+        buf.truncate(info.buffer_size());
+        let size = PhysicalSize::new(info.width, info.height);
+        // Capture id is the file stem; it has no meaning to the
+        // synthetic adapter but is kept for parity with
+        // `publish_clipboard`.
+        let capture_id = png_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("cached");
+        self.publish_clipboard(capture_id, &buf, size)
     }
 }

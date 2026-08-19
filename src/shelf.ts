@@ -1,11 +1,20 @@
-// Shelf window entrypoint. Mounts the ShelfCard component and listens
-// for `pixelgrab://shelf-updated` events from the Rust core.
+// Shelf window entrypoint. Mounts the ShelfQueue component and
+// listens for `pixelgrab://shelf-queue-updated` events from the
+// Rust core. Quick actions (copy, save-as, dismiss, hover, unhover)
+// are wired to the corresponding IPC commands.
 
 import { mount } from "svelte";
 import { listen } from "@tauri-apps/api/event";
-import ShelfCard from "./lib/shelf/ShelfCard.svelte";
-import { dismissCacheEntry } from "./lib/ipc/commands";
-import type { ShelfCardView } from "./lib/shelf/types";
+import ShelfQueue from "./lib/shelf/ShelfQueue.svelte";
+import {
+  copyShelfCard,
+  dismissCacheEntry,
+  hoverShelfCard,
+  saveShelfCardAs,
+  tickShelfQueue,
+  unhoverShelfCard,
+} from "./lib/ipc/commands";
+import type { ShelfQueueSnapshot } from "./lib/ipc/types";
 
 const target = document.getElementById("shelf");
 if (!target) {
@@ -13,28 +22,46 @@ if (!target) {
 }
 
 // Runes-mode reactive state: the component re-renders whenever
-// `currentCard` is reassigned.
-let currentCard = $state<ShelfCardView | null>(null);
+// `currentSnapshot` is reassigned.
+let currentSnapshot = $state<ShelfQueueSnapshot | null>(null);
 
-mount(ShelfCard, {
+mount(ShelfQueue, {
   target,
   props: {
-    get card() {
-      return currentCard;
+    get snapshot() {
+      return currentSnapshot;
+    },
+    onCopy: (shelfId: string) => {
+      void copyShelfCard({ shelfId });
+    },
+    onSaveAs: (shelfId: string) => {
+      void saveShelfCardAs({ shelfId });
     },
     onDismiss: (shelfId: string) => {
       void dismissCacheEntry({ shelfId });
     },
+    onHover: (shelfId: string) => {
+      void hoverShelfCard({ shelfId });
+    },
+    onUnhover: (shelfId: string) => {
+      void unhoverShelfCard({ shelfId });
+    },
+    onTickExpired: () => {
+      void tickShelfQueue();
+    },
   },
 });
 
-listen<ShelfCardView>("pixelgrab://shelf-updated", (event) => {
-  currentCard = event.payload;
+listen<ShelfQueueSnapshot>("pixelgrab://shelf-queue-updated", (event) => {
+  currentSnapshot = event.payload;
 });
 
 // When the backend signals that the shelf is empty (e.g. after a
 // dismissal) the card is hidden, not destroyed — Tauri's webview is
 // cheap to keep alive.
-listen<{ shelfId: string }>("pixelgrab://shelf-cleared", (event) => {
-  currentCard = null;
+listen<{ shelfId: string }>("pixelgrab://shelf-cleared", () => {
+  // A cleared event is followed (or preceded) by a queue snapshot
+  // update. Drop the local copy so the queue UI hides itself; the
+  // authoritative state comes from the next snapshot.
+  currentSnapshot = null;
 });

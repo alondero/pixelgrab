@@ -7,15 +7,22 @@ import type {
   CancelOutcome,
   CaptureResponse,
   CommitResponse,
+  CopyShelfCardRequest,
+  CopyShelfCardResponse,
   DismissCacheEntryRequest,
   DismissCacheEntryResponse,
+  HoverShelfCardRequest,
   IpcResponse,
   RequestCaptureIntent,
   RequestCommitIntent,
   RequestOverlayIntent,
   RequestOverlayResult,
+  SaveShelfCardAsRequest,
+  SaveShelfCardAsResponse,
   SessionSnapshot,
+  ShelfQueueSnapshot,
   ShelfSnapshot,
+  UnhoverShelfCardRequest,
   UpdateCacheMetadataRequest,
 } from "./types";
 
@@ -61,4 +68,36 @@ export async function dismissCacheEntry(
 
 export async function getShelfSnapshot(): Promise<IpcResponse<ShelfSnapshot>> {
   return invoke<IpcResponse<ShelfSnapshot>>("get_shelf_snapshot");
+}
+
+export async function getShelfQueueSnapshot(): Promise<IpcResponse<ShelfQueueSnapshot>> {
+  return invoke<IpcResponse<ShelfQueueSnapshot>>("get_shelf_queue_snapshot");
+}
+
+export async function copyShelfCard(
+  payload: CopyShelfCardRequest,
+): Promise<IpcResponse<CopyShelfCardResponse>> {
+  return invoke<IpcResponse<CopyShelfCardResponse>>("copy_shelf_card", { payload });
+}
+
+export async function saveShelfCardAs(
+  payload: SaveShelfCardAsRequest,
+): Promise<IpcResponse<SaveShelfCardAsResponse>> {
+  return invoke<IpcResponse<SaveShelfCardAsResponse>>("save_shelf_card_as", { payload });
+}
+
+export async function hoverShelfCard(
+  payload: HoverShelfCardRequest,
+): Promise<IpcResponse<ShelfQueueSnapshot>> {
+  return invoke<IpcResponse<ShelfQueueSnapshot>>("hover_shelf_card", { payload });
+}
+
+export async function unhoverShelfCard(
+  payload: UnhoverShelfCardRequest,
+): Promise<IpcResponse<ShelfQueueSnapshot>> {
+  return invoke<IpcResponse<ShelfQueueSnapshot>>("unhover_shelf_card", { payload });
+}
+
+export async function tickShelfQueue(): Promise<IpcResponse<ShelfQueueSnapshot>> {
+  return invoke<IpcResponse<ShelfQueueSnapshot>>("tick_shelf_queue");
 }

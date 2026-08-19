@@ -13,7 +13,11 @@ use pixelgrab_contracts::{
         RequestOverlayIntent, RequestOverlayResult, SessionSnapshot, ShelfSnapshot,
         UpdateCacheMetadataRequest,
     },
-    CaptureDiagnostics, PlatformError, PlatformErrorKind,
+    shelf_queue::{
+        CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
+        SaveShelfCardAsResponse, ShelfQueueSnapshot,
+    },
+    CaptureDiagnostics, PlatformError, PlatformErrorKind, ShelfId,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -26,6 +30,49 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Resolve the shelf position for the queue's current visible card
+/// count. Returns `None` when the platform cannot enumerate monitors
+/// (callers should hide the shelf window in that case).
+fn queue_position(app: &PixelGrabApp) -> Result<pixelgrab_contracts::ShelfPosition, PlatformError> {
+    let layout = app.platform().monitor_layout()?;
+    let monitor = layout
+        .monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .or_else(|| layout.monitors.first())
+        .ok_or_else(|| {
+            PlatformError::new(
+                PlatformErrorKind::MonitorQueryFailed,
+                "no monitor available for shelf placement",
+            )
+        })?;
+    let visible = app.shelf_queue().snapshot(now_ms()).cards.len();
+    Ok(pixelgrab_contracts::ShelfPosition::shelf_queue_position(
+        monitor, visible,
+    ))
+}
+
+/// Emit the shelf-queue-updated event with the latest snapshot. The
+/// frontend listener is idempotent and re-renders the queue from the
+/// payload alone.
+fn emit_shelf_queue_updated<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
+    snapshot: ShelfQueueSnapshot,
+) {
+    let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
+}
+
+/// Build a snapshot with the position field populated. Used by every
+/// event-emit path so the frontend never has to compute window
+/// geometry itself.
+fn snapshot_with_position(app: &PixelGrabApp) -> ShelfQueueSnapshot {
+    let mut snapshot = app.shelf_queue().snapshot(now_ms());
+    if let Ok(position) = queue_position(app) {
+        snapshot.position = Some(position);
+    }
+    snapshot
 }
 
 /// Begin a capture from the tray or shortcut. The orchestrator refuses the
@@ -165,8 +212,10 @@ pub fn update_cache_metadata(
     IpcResponse::from_result(result)
 }
 
-/// Dismiss a shelf card. Releases the `Shelf` lock and reaps the entry
-/// from disk when no other owners hold it.
+/// Dismiss a shelf card. Removes the card from the queue, releases
+/// the `Shelf` lock, and reaps the entry from disk when no other
+/// owners hold it. The shelf window hides itself when the queue is
+/// empty afterwards.
 #[tauri::command]
 pub fn dismiss_cache_entry(
     app: AppState<'_>,
@@ -175,13 +224,18 @@ pub fn dismiss_cache_entry(
 ) -> IpcResponse<DismissCacheEntryResponse> {
     let result = match app.cache().dismiss(&payload.shelf_id) {
         Ok(outcome) => {
-            // Hide the shelf window when the only card is gone and
-            // tell the frontend to clear its local copy. The event
-            // payload is the dismissed shelf id, wrapped in a
-            // typed struct so the TS listener can match its
-            // parameter without `any`.
-            if outcome.removed {
+            // Remove the card from the queue regardless of lock state
+            // (the user explicitly asked for it to be gone). When
+            // the cache reaped the entry we also emit a cleared event
+            // so listeners that don't care about queue ordering still
+            // learn about the removal.
+            app.shelf_queue().dismiss(&payload.shelf_id, now_ms());
+            let snapshot = snapshot_with_position(&app);
+            if snapshot.is_empty() {
                 let _ = crate::shelf::hide_card(&handle);
+            }
+            emit_shelf_queue_updated(&handle, snapshot);
+            if outcome.removed {
                 let event = ShelfClearedEvent {
                     shelf_id: payload.shelf_id.clone(),
                 };
@@ -197,12 +251,207 @@ pub fn dismiss_cache_entry(
     IpcResponse::from_result(result)
 }
 
+/// Copy a shelf card's flattened PNG to the system clipboard. Reads
+/// the PNG bytes from the cache root and forwards them to the
+/// platform's native clipboard.
+#[tauri::command]
+pub fn copy_shelf_card(
+    app: AppState<'_>,
+    payload: CopyShelfCardRequest,
+) -> IpcResponse<CopyShelfCardResponse> {
+    let png_path = match app.shelf_queue().png_path(&payload.shelf_id) {
+        Some(p) => p,
+        None => {
+            return IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                format!("unknown shelf id: {}", payload.shelf_id),
+            )));
+        }
+    };
+    let bytes = match app
+        .platform()
+        .publish_png_clipboard(std::path::Path::new(&png_path))
+    {
+        Ok(()) => std::fs::metadata(&png_path).map(|m| m.len()).unwrap_or(0),
+        Err(err) => return IpcResponse::from_result(Err(err)),
+    };
+    IpcResponse::from_result(Ok(CopyShelfCardResponse { png_bytes: bytes }))
+}
+
+/// Save a shelf card's PNG to a user-chosen location via the native
+/// Save As dialog. Returns `path = None` when the user cancels. The
+/// blocking dialog call is dispatched onto a worker thread so the
+/// async command future is `'static`-friendly. Tauri's async command
+/// macro requires a `Result` return when the inputs contain
+/// references, so the inner `IpcResponse` is wrapped in `Ok` here and
+/// surfaced as the Ok variant.
+#[tauri::command]
+pub async fn save_shelf_card_as(
+    app: AppState<'_>,
+    payload: SaveShelfCardAsRequest,
+    handle: AppHandle,
+) -> Result<IpcResponse<SaveShelfCardAsResponse>, PlatformError> {
+    use tauri_plugin_dialog::DialogExt;
+    let png_path = match app.shelf_queue().png_path(&payload.shelf_id) {
+        Some(p) => p,
+        None => {
+            return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                format!("unknown shelf id: {}", payload.shelf_id),
+            ))));
+        }
+    };
+    let bytes = match std::fs::read(&png_path) {
+        Ok(b) => b,
+        Err(err) => {
+            return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::Io,
+                format!("read png for save: {err}"),
+            ))));
+        }
+    };
+    let suggested = std::path::Path::new(&png_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("capture.png")
+        .to_string();
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .dialog()
+            .file()
+            .add_filter("PNG image", &["png"])
+            .set_file_name(&suggested)
+            .blocking_save_file()
+    })
+    .await
+    .unwrap_or(None);
+    let Some(target) = chosen else {
+        return Ok(IpcResponse::from_result(Ok(SaveShelfCardAsResponse {
+            path: None,
+            png_bytes: 0,
+        })));
+    };
+    let target_path = match target.into_path() {
+        Ok(p) => p,
+        Err(err) => {
+            return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::Io,
+                format!("save dialog returned invalid path: {err}"),
+            ))));
+        }
+    };
+    if let Err(err) = std::fs::write(&target_path, &bytes) {
+        return Ok(IpcResponse::from_result(Err(PlatformError::new(
+            PlatformErrorKind::Io,
+            format!("write save-as png: {err}"),
+        ))));
+    }
+    let written = bytes.len() as u64;
+    Ok(IpcResponse::from_result(Ok(SaveShelfCardAsResponse {
+        path: Some(target_path.to_string_lossy().to_string()),
+        png_bytes: written,
+    })))
+}
+
+/// Mark a shelf card as hovered at the current wall-clock millis.
+/// Only the targeted card's timer pauses.
+#[tauri::command]
+pub fn hover_shelf_card(
+    app: AppState<'_>,
+    payload: HoverShelfCardRequest,
+    handle: AppHandle,
+) -> IpcResponse<ShelfQueueSnapshot> {
+    let result = match app.shelf_queue().hover(&payload.shelf_id, now_ms()) {
+        Some(snapshot) => {
+            let snapshot = with_position(snapshot, &app);
+            emit_shelf_queue_updated(&handle, snapshot.clone());
+            Ok(snapshot)
+        }
+        None => Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            format!("unknown shelf id: {}", payload.shelf_id),
+        )),
+    };
+    IpcResponse::from_result(result)
+}
+
+/// Mark a shelf card as un-hovered at the current wall-clock millis.
+/// Resumes the timer with a three-second grace period when the
+/// remaining time is small.
+#[tauri::command]
+pub fn unhover_shelf_card(
+    app: AppState<'_>,
+    payload: UnhoverShelfCardRequest,
+    handle: AppHandle,
+) -> IpcResponse<ShelfQueueSnapshot> {
+    let result = match app.shelf_queue().unhover(&payload.shelf_id, now_ms()) {
+        Some(snapshot) => {
+            let snapshot = with_position(snapshot, &app);
+            emit_shelf_queue_updated(&handle, snapshot.clone());
+            Ok(snapshot)
+        }
+        None => Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            format!("unknown shelf id: {}", payload.shelf_id),
+        )),
+    };
+    IpcResponse::from_result(result)
+}
+
+/// Tick the queue. Removes expired cards and dismisses each one from
+/// the cache so the shelf lock is released and the entry reaped.
+/// Triggered by the frontend after a countdown animation reaches zero.
+#[tauri::command]
+pub fn tick_shelf_queue(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
+    let outcome = app.shelf_queue().tick(now_ms());
+    for shelf_id in &outcome.expired {
+        if let Err(err) = app.cache().dismiss(shelf_id) {
+            log::warn!("tick_shelf_queue: cache.dismiss({shelf_id}) failed: {err}");
+        }
+    }
+    let snapshot = with_position(outcome.snapshot, &app);
+    IpcResponse::from_result(Ok(snapshot))
+}
+
 /// Wire payload for the `pixelgrab://shelf-cleared` event.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShelfClearedEvent {
     /// Shelf id that was dismissed.
     shelf_id: String,
+}
+
+/// Wire payload for the `hover_shelf_card` IPC.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoverShelfCardRequest {
+    /// Shelf card id to mark as hovered.
+    pub shelf_id: ShelfId,
+}
+
+/// Wire payload for the `unhover_shelf_card` IPC.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnhoverShelfCardRequest {
+    /// Shelf card id to mark as un-hovered.
+    pub shelf_id: ShelfId,
+}
+
+/// Fill in the position field on a freshly-built snapshot. Pulled out
+/// so the hover / unhover / tick handlers can stay focused on their
+/// event semantics.
+fn with_position(mut snapshot: ShelfQueueSnapshot, app: &PixelGrabApp) -> ShelfQueueSnapshot {
+    if let Ok(position) = queue_position(app) {
+        snapshot.position = Some(position);
+    }
+    snapshot
+}
+
+/// Snapshot of the current shelf queue. Used by the frontend to
+/// rehydrate the queue UI on startup. Introduced by tracer 08.
+#[tauri::command]
+pub fn get_shelf_queue_snapshot(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
+    IpcResponse::from_result(Ok(snapshot_with_position(&app)))
 }
 
 /// Snapshot of the current shelf state. Used by the frontend to
@@ -335,16 +584,17 @@ fn commit(
                     outcome.size_bytes = entry.size_bytes;
                     outcome.created_at_ms = entry.created_at_ms;
 
-                    // Compute the shelf placement and show the card.
-                    // The cache owns the shelf lock until the entry
-                    // is dismissed, so we don't need to keep a guard
-                    // alive here.
-                    let layout = app.platform().monitor_layout()?;
-                    let position = app.cache().shelf_position(&entry.shelf_id, &layout)?;
-                    if let Err(err) = crate::shelf::show_card(handle, &position, &entry.shelf_id) {
-                        log::warn!("shelf window show failed: {err}");
+                    // Push the new card onto the queue and emit a
+                    // queue snapshot. The shelf window is shown with
+                    // the new multi-card geometry.
+                    app.shelf_queue().add(entry.clone(), now_ms());
+                    let snapshot = snapshot_with_position(app);
+                    if let Some(position) = snapshot.position.as_ref() {
+                        if let Err(err) = crate::shelf::show_queue(handle, position) {
+                            log::warn!("shelf window show failed: {err}");
+                        }
                     }
-                    emit_shelf_updated(handle, &entry);
+                    emit_shelf_queue_updated(handle, snapshot);
                 }
                 Err(err) => {
                     // Two-phase commit failed: the entry is either

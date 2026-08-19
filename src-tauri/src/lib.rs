@@ -27,6 +27,7 @@ use parking_lot::Mutex;
 use tauri::Manager;
 
 use crate::session::SessionState;
+use crate::shelf::queue::ShelfQueueEngine;
 
 /// Re-exported types for downstream tests and binaries.
 pub use crate::error::PixelGrabError;
@@ -37,6 +38,10 @@ pub struct PixelGrabApp {
     platform: Arc<dyn platform::PixelGrabPlatform>,
     session: Arc<SessionOrchestrator>,
     cache: Arc<Cache>,
+    /// Shelf queue engine. The queue mirrors the cache for
+    /// list-ordering and timer purposes; the cache still owns
+    /// durability and the lock registry.
+    shelf_queue: Arc<ShelfQueueEngine>,
 }
 
 impl PixelGrabApp {
@@ -46,10 +51,12 @@ impl PixelGrabApp {
     pub fn new(platform: Arc<dyn platform::PixelGrabPlatform>) -> Self {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
         let cache = Arc::new(Cache::new());
+        let shelf_queue = Arc::new(ShelfQueueEngine::default());
         Self {
             platform,
             session,
             cache,
+            shelf_queue,
         }
     }
 
@@ -67,6 +74,14 @@ impl PixelGrabApp {
     pub fn cache(&self) -> Arc<Cache> {
         self.cache.clone()
     }
+
+    /// Handle to the shelf queue engine. Tracer 08 moved the
+    /// per-card timer state and list ordering out of the cache and
+    /// into a dedicated engine so the cache can stay focused on
+    /// durability and locks.
+    pub fn shelf_queue(&self) -> Arc<ShelfQueueEngine> {
+        self.shelf_queue.clone()
+    }
 }
 
 /// Re-export so tests and the IPC layer can name `Cache` directly.
@@ -75,7 +90,7 @@ pub use cache::Cache;
 /// Run the Tauri application. This is the binary entrypoint.
 pub fn run() {
     init_tracing();
-    log::info!("PixelGrab starting (tracer-07 capture path)");
+    log::info!("PixelGrab starting (tracer-08 shelf queue path)");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -103,6 +118,16 @@ pub fn run() {
             } else if let Err(err) = app_state.cache().load_or_recover() {
                 log::warn!("cache recovery failed: {err}");
             }
+            // Rehydrate the queue from the durable cache so cards
+            // surviving a process restart remain visible until their
+            // timers expire.
+            app_state.shelf_queue().rehydrate(
+                app_state.cache().entries(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            );
             app.manage(app_state);
 
             // Build the resident tray, the hidden overlay window, and
@@ -121,6 +146,12 @@ pub fn run() {
             ipc::update_cache_metadata,
             ipc::dismiss_cache_entry,
             ipc::get_shelf_snapshot,
+            ipc::copy_shelf_card,
+            ipc::save_shelf_card_as,
+            ipc::hover_shelf_card,
+            ipc::unhover_shelf_card,
+            ipc::tick_shelf_queue,
+            ipc::get_shelf_queue_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");

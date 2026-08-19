@@ -60,15 +60,31 @@ add them here.
 ## Shelf
 
 - **Shelf** — the floating queue of recent captures that floats over
-  the taskbar. Tracer 07 ships one card; later tracers stack more.
-- **Shelf card** — a single capture on the shelf. Exposes copy, save,
-  pin, and dismiss actions.
+  the taskbar. Tracer 08 ships a queue of up to four cards with an
+  expandable `+N` overflow group.
+- **Shelf queue** — the ordered list of shelf cards managed by the
+  Rust `ShelfQueueEngine`. Newest-first; cards beyond `MAX_VISIBLE_CARDS`
+  live in the overflow group until the queue shrinks.
+- **Shelf card** — a single capture on the shelf. Exposes copy, save-as,
+  hover-pause, and dismiss actions. Rendered by `ShelfCard.svelte`.
 - **Shelf placement** — the shelf window is always 24 px inside the
   primary monitor's work area, anchored to the bottom-right. The
-  calculation lives in
-  `pixelgrab_contracts::ShelfPosition::inside_primary_work_area`.
-- **Shelf timer** — the 60-second default countdown for each card. Hover
-  pauses it; leave resumes with a three-second grace period.
+  single-card calculation lives in
+  `pixelgrab_contracts::ShelfPosition::inside_primary_work_area`; the
+  multi-card calculation lives in `ShelfPosition::shelf_queue_position`
+  and scales the window width with the visible card count.
+- **Shelf timer** — the 60-second default countdown for each card.
+  Tracked by the `ShelfTimerState` per-card struct in
+  `pixelgrab_contracts::shelf_queue`. Hover pauses the timer; leave
+  resumes it with a three-second grace period so a card with very
+  little remaining time still gets a fair chance to be read.
+- **Hover grace** — minimum remaining time after a card is un-hovered,
+  in milliseconds. Defaults to 3 000 ms. Configurable via
+  `ShelfTimerConfig`.
+- **`pixelgrab://shelf-queue-updated`** — event the backend emits when
+  the queue changes (new commit, hover state, dismissal, expiry).
+  Carries a typed `ShelfQueueSnapshot` payload so the frontend can
+  re-render the entire queue idempotently.
 - **`pixelgrab://shelf-cleared`** — event the backend emits when a
   dismissal removes an entry from disk. Carries a typed
   `{ shelfId: string }` payload; the frontend uses it to clear its
