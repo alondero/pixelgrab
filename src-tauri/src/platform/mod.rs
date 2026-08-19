@@ -8,4 +8,10 @@ pub mod contract;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 pub use contract::{CaptureError, PixelGrabPlatform};
+
+#[cfg(target_os = "windows")]
+pub use windows::WindowsPlatform;

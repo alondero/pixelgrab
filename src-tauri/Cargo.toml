@@ -46,6 +46,13 @@ image = { workspace = true }
 pixelgrab-contracts = { workspace = true }
 pixelgrab-test-support = { workspace = true, optional = true }
 
+# Windows-only native capture via the Windows Graphics Capture API.
+# `xcap` is only compiled when targeting Windows; the synthetic feature is
+# still what CI uses.
+[target.'cfg(target_os = "windows")'.dependencies]
+xcap = "0.7"
+arboard = "3.6"
+
 [dev-dependencies]
 tauri = { workspace = true, features = ["test"] }
 tempfile = "3.13"
@@ -53,8 +60,9 @@ tempfile = "3.13"
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
-# Tracer-01 ships only the synthetic platform. The real Windows platform
-# adapter is added in tracer-02 and the synthetic feature is then removed
-# from the default features.
+# The `synthetic` feature remains for tests and for local development on
+# non-Windows hosts. Production Windows builds run the real adapter by
+# default (see `lib::default_platform`); CI runs the synthetic path so
+# no real desktop session is required.
 synthetic = ["dep:pixelgrab-test-support"]
 default = ["synthetic"]

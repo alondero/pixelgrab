@@ -1,5 +1,5 @@
 // Mount the main App against the mock IPC layer and verify the
-// tray-intent -> synthetic capture flow renders the expected UI.
+// tray-intent -> capture -> cancel flow renders the expected UI.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/svelte";
@@ -13,6 +13,7 @@ vi.mock("$lib/ipc/commands", async () => {
     requestCapture: shell.mockRequestCapture,
     requestOverlay: shell.mockRequestOverlay,
     requestCommit: shell.mockRequestCommit,
+    requestCancel: shell.mockRequestCancel,
     getSessionSnapshot: shell.mockGetSessionSnapshot,
   };
 });
@@ -35,12 +36,21 @@ describe("App", () => {
     expect(screen.getByTestId("session-state")).toHaveTextContent("idle");
   });
 
-  it("updates the session state after a synthetic capture", async () => {
+  it("updates the session state after a capture", async () => {
     const user = userEvent.setup();
     render(App);
-    await user.click(screen.getByRole("button", { name: /trigger synthetic capture/i }));
+    await user.click(screen.getByRole("button", { name: /trigger capture/i }));
     const state = await screen.findByTestId("session-state");
     expect(state).toHaveTextContent("ready");
     expect(screen.getByTestId("session-capture-id")).toBeTruthy();
+  });
+
+  it("exposes a cancel button that returns the session to idle", async () => {
+    const user = userEvent.setup();
+    render(App);
+    await user.click(screen.getByRole("button", { name: /trigger capture/i }));
+    expect(screen.getByTestId("session-state")).toHaveTextContent("ready");
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.getByTestId("session-state")).toHaveTextContent("idle");
   });
 });

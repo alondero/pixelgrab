@@ -197,4 +197,36 @@ impl PixelGrabPlatform for SyntheticPlatform {
         }
         Ok(path)
     }
+
+    fn flatten_crop(
+        &self,
+        capture_id: &str,
+        crop: PhysicalBounds,
+    ) -> PlatformResult<(Vec<u8>, PhysicalSize)> {
+        // The synthetic adapter has no frozen framebuffer; produce a
+        // deterministic gradient identical to the commit pipeline's tracer-01
+        // behaviour so the IPC contract stays exercised end-to-end.
+        if crop.size.width == 0 || crop.size.height == 0 {
+            return Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                "synthetic flatten_crop: zero-sized crop",
+            ));
+        }
+        let width = crop.size.width as usize;
+        let height = crop.size.height as usize;
+        let mut rgba = vec![0u8; width * height * 4];
+        for (i, chunk) in rgba.chunks_exact_mut(4).enumerate() {
+            let x = (i % width) as u32;
+            let y = (i / width) as u32;
+            chunk[0] = (x & 0xFF) as u8;
+            chunk[1] = (y & 0xFF) as u8;
+            chunk[2] = (((x ^ y) >> 1) & 0xFF) as u8;
+            chunk[3] = 0xFF;
+        }
+        let size = crop.size;
+        // `capture_id` is consumed for parity with the Windows contract;
+        // the synthetic path doesn't key the buffer by id.
+        let _ = capture_id;
+        Ok((rgba, size))
+    }
 }

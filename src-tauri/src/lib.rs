@@ -27,7 +27,7 @@ use crate::session::SessionState;
 
 /// Re-exported types for downstream tests and binaries.
 pub use crate::error::PixelGrabError;
-pub use crate::session::SessionOrchestrator;
+pub use crate::session::{EscapeAction, SessionOrchestrator};
 
 /// Application builder used by both the binary and tests.
 pub struct PixelGrabApp {
@@ -56,7 +56,7 @@ impl PixelGrabApp {
 /// Run the Tauri application. This is the binary entrypoint.
 pub fn run() {
     init_tracing();
-    log::info!("PixelGrab starting (tracer-01 foundation)");
+    log::info!("PixelGrab starting (tracer-02 capture path)");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -67,11 +67,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            // Compose the application with the synthetic platform for the
-            // tracer-01 build. Real implementations will swap this for the
-            // Windows platform adapter in tracer-02.
-            let platform: Arc<dyn platform::PixelGrabPlatform> =
-                Arc::new(platform::synthetic::SyntheticPlatform::new());
+            // Pick the production platform for the current target. The
+            // `synthetic` feature is only used by tests and CI - real
+            // builds on Windows always run through the Windows adapter
+            // and capture a frozen frame before the overlay is revealed.
+            let platform: Arc<dyn platform::PixelGrabPlatform> = default_platform();
             let app_state = PixelGrabApp::new(platform);
             app.manage(app_state);
 
@@ -84,6 +84,7 @@ pub fn run() {
             ipc::request_capture,
             ipc::request_overlay,
             ipc::request_commit,
+            ipc::request_cancel,
             ipc::get_session_snapshot,
         ])
         .run(tauri::generate_context!())
@@ -101,6 +102,24 @@ pub fn test_app() -> PixelGrabApp {
     let platform: Arc<dyn platform::PixelGrabPlatform> =
         Arc::new(platform::synthetic::SyntheticPlatform::new());
     PixelGrabApp::new(platform)
+}
+
+/// Pick the production platform for the current target. The Windows
+/// adapter is selected on Windows builds; the synthetic adapter is the
+/// fallback for non-Windows builds and for CI runs with the `synthetic`
+/// feature enabled.
+fn default_platform() -> Arc<dyn platform::PixelGrabPlatform> {
+    #[cfg(target_os = "windows")]
+    {
+        if cfg!(feature = "synthetic") {
+            return Arc::new(platform::synthetic::SyntheticPlatform::new());
+        }
+        return Arc::new(platform::windows::WindowsPlatform::new());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Arc::new(platform::synthetic::SyntheticPlatform::new())
+    }
 }
 
 /// Concise state-machine summary used by tests and the IPC layer.

@@ -5,7 +5,7 @@
 
 use pixelgrab_contracts::{
     capture::{CaptureRequest, CaptureResolution},
-    coordinate::PhysicalBounds,
+    coordinate::{PhysicalBounds, PhysicalSize},
     monitor::MonitorLayout,
     PlatformResult,
 };
@@ -26,6 +26,12 @@ pub enum CaptureError {
     /// The capture output was rejected (e.g. zero-byte frame).
     #[error("invalid capture output: {0}")]
     InvalidOutput(String),
+    /// The crop lies outside the captured framebuffer.
+    #[error("crop outside framebuffer: {0}")]
+    CropOutOfBounds(String),
+    /// A coordinate transform produced a non-finite value.
+    #[error("coordinate transform failed: {0}")]
+    CoordinateTransform(String),
 }
 
 impl From<CaptureError> for pixelgrab_contracts::PlatformError {
@@ -36,6 +42,8 @@ impl From<CaptureError> for pixelgrab_contracts::PlatformError {
             CaptureError::MonitorEnumeration(_) => PlatformErrorKind::MonitorQueryFailed,
             CaptureError::Pipeline(_) => PlatformErrorKind::CaptureUnavailable,
             CaptureError::InvalidOutput(_) => PlatformErrorKind::CaptureUnavailable,
+            CaptureError::CropOutOfBounds(_) => PlatformErrorKind::CoordinateTransform,
+            CaptureError::CoordinateTransform(_) => PlatformErrorKind::CoordinateTransform,
         };
         PlatformError::new(kind, err.to_string())
     }
@@ -62,4 +70,35 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
         bounds: PhysicalBounds,
         rgba: &[u8],
     ) -> PlatformResult<PathBuf>;
+
+    /// Flatten a physical crop from the most recent capture. Returns the
+    /// RGBA pixel buffer and the resulting size. The flattened buffer is
+    /// the single source from which the PNG and bitmap clipboard
+    /// representations are derived (per the tracer-02 acceptance criteria).
+    ///
+    /// The default implementation rejects the call with `Unsupported` so the
+    /// synthetic adapter (which has no captured pixels) does not need to
+    /// override it; Windows replaces it with a frozen-framebuffer read.
+    fn flatten_crop(
+        &self,
+        _capture_id: &str,
+        _crop: PhysicalBounds,
+    ) -> PlatformResult<(Vec<u8>, PhysicalSize)> {
+        Err(pixelgrab_contracts::PlatformError::new(
+            pixelgrab_contracts::PlatformErrorKind::Unsupported,
+            "platform does not expose a frozen framebuffer",
+        ))
+    }
+
+    /// Publish the flattened crop to the system clipboard as both PNG and
+    /// a bitmap-compatible representation. Returns Ok when the platform
+    /// does not own a clipboard (synthetic adapter).
+    fn publish_clipboard(
+        &self,
+        _capture_id: &str,
+        _rgba: &[u8],
+        _size: PhysicalSize,
+    ) -> PlatformResult<()> {
+        Ok(())
+    }
 }
