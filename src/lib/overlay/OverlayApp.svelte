@@ -3,6 +3,8 @@
   import { mockGetSessionSnapshot } from "$lib/ipc/shell.svelte";
   import { requestCommit, requestCancel } from "$lib/ipc/commands";
   import KonvaStage from "./KonvaStage.svelte";
+  import AnnotationToolbar from "$lib/annotation/AnnotationToolbar.svelte";
+  import { annotationStore } from "$lib/annotation/store.svelte";
   import type { CaptureResolutionDto, PhysicalBounds } from "$lib/ipc/types";
 
   let capture = $state<CaptureResolutionDto | null>(null);
@@ -16,10 +18,6 @@
   const STAGE_HEIGHT = 1080;
 
   onMount(async () => {
-    // The overlay does not own a tray or a session — it borrows the
-    // snapshot from the main process via the real IPC. The mock is
-    // only used by Vitest, which replaces the entire `$lib/ipc/commands`
-    // module; in production this resolves to the Tauri-backed function.
     const response = await mockGetSessionSnapshot();
     if (response.status === "ok" && response.data.lastCapture) {
       capture = response.data.lastCapture;
@@ -30,7 +28,6 @@
   function onSelectionChange(next: PhysicalBounds | null) {
     selection = next;
     if (!next) {
-      // Selection cleared - hide commit error from the prior attempt.
       commitError = null;
     }
   }
@@ -38,13 +35,20 @@
   async function onCommit() {
     if (!selection) return;
     commitError = null;
-    // Tracer 07: Enter (and Ctrl+C) commit atomically to cache +
-    // clipboard + shelf card. The backend runs the two-phase commit
-    // pipeline so either everything lands or nothing does. The IPC
-    // layer is the same module the App uses, so the test mock that
-    // swaps `$lib/ipc/commands` continues to work.
+    // Tracer 04: ship the editor's annotations alongside the crop so
+    // the Rust commit pipeline can flatten them onto the frozen
+    // framebuffer before publishing to the clipboard or the cache.
+    const annotations = annotationStore.annotations.map((a) => ({
+      id: a.id,
+      geometry: a.geometry,
+      color: a.color,
+      stroke: a.stroke,
+      zOrder: a.zOrder,
+      ...(a.number !== undefined ? { number: a.number } : {}),
+    }));
     const result = await requestCommit({
       crop: selection,
+      annotations,
       toShelf: true,
       toClipboard: true,
       saveAs: false,
@@ -53,16 +57,22 @@
       commitError = result.error.message;
       return;
     }
+    // Successful commit cleans up the session so a fresh capture
+    // starts with no annotations, no badge counter, and no history.
     selection = null;
+    annotationStore.reset();
   }
 
   async function onCancel() {
     const result = await requestCancel();
     if (result.status === "ok") {
       if (result.data.action === "selection_cleared") {
+        // Staged escape: selection cleared, annotations retained.
         selection = null;
       } else if (result.data.action === "session_cancelled") {
+        // Full cancel: drop the in-flight annotations + draft too.
         selection = null;
+        annotationStore.reset();
       }
     }
   }
@@ -79,21 +89,31 @@
     {/if}
   </header>
   {#if capture}
-    <KonvaStage
-      assetUrl={capture.assetUrl}
-      bounds={capture.bounds}
-      stageWidth={STAGE_WIDTH}
-      stageHeight={STAGE_HEIGHT}
-      {onSelectionChange}
-      {onCommit}
-      {onCancel}
-    />
+    <div class="stage-wrap">
+      <KonvaStage
+        assetUrl={capture.assetUrl}
+        bounds={capture.bounds}
+        stageWidth={STAGE_WIDTH}
+        stageHeight={STAGE_HEIGHT}
+        {onSelectionChange}
+        {onCommit}
+        {onCancel}
+      />
+      <div class="toolbar-slot" data-testid="toolbar-slot">
+        <AnnotationToolbar visible={selection !== null} />
+      </div>
+    </div>
   {:else}
     <div class="placeholder">No capture</div>
   {/if}
   {#if selection}
     <footer class="footer" data-testid="selection">
       Selection: {selection.size.width} x {selection.size.height}
+      {#if annotationStore.annotations.length > 0}
+        · {annotationStore.annotations.length} annotation{annotationStore.annotations.length === 1
+          ? ""
+          : "s"}
+      {/if}
     </footer>
   {/if}
   {#if commitError}
@@ -131,6 +151,21 @@
     font-family: monospace;
     opacity: 0.7;
     font-size: 0.75rem;
+  }
+  .stage-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .toolbar-slot {
+    position: absolute;
+    bottom: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    pointer-events: auto;
   }
   .placeholder {
     flex: 1;

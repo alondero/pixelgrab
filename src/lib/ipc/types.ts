@@ -240,6 +240,7 @@ export interface RequestOverlayIntent {
 
 export interface RequestCommitIntent {
   crop: PhysicalBounds;
+  annotations?: Annotation[];
   toShelf: boolean;
   toClipboard: boolean;
   saveAs: boolean;
@@ -296,6 +297,36 @@ export interface StartShelfDragResult {
   diagnostics: DragDiagnostics;
   shouldDismiss: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Annotation primitives (tracer-04). Wire shape must mirror
+// `crates/pixelgrab-contracts/src/annotation.rs`. The contract tests in
+// `src/lib/ipc/types.test.ts` cover the JSON-shape half; the
+// semantics are covered by the store + history tests in
+// `src/lib/annotation/store.svelte.test.ts`.
+// ---------------------------------------------------------------------------
+
+export type AnnotationColor = "red" | "green" | "blue" | "yellow" | "white";
+
+export type AnnotationStroke = "thin" | "medium" | "thick";
+
+export type AnnotationKind = "arrow" | "rectangle" | "numbered_badge";
+
+export type AnnotationGeometry =
+  | { kind: "arrow"; tail: PhysicalPoint; tip: PhysicalPoint }
+  | { kind: "rectangle"; origin: PhysicalPoint; size: PhysicalSize }
+  | { kind: "numbered_badge"; center: PhysicalPoint; radius: number };
+
+export interface Annotation {
+  id: number;
+  geometry: AnnotationGeometry;
+  color: AnnotationColor;
+  stroke: AnnotationStroke;
+  zOrder: number;
+  number?: number;
+}
+
+export type AnnotationTool = "select" | "arrow" | "rectangle" | "numbered_badge";
 
 export interface PlatformErrorKind {
   kind:

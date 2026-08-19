@@ -54,6 +54,7 @@ fn ipc_response_err_serializes() {
 fn commit_request_carries_commit_flags() {
     let req = CommitRequest {
         crop: PhysicalBounds::from_xywh(10, 20, 300, 400),
+        annotations: vec![],
         to_shelf: true,
         to_clipboard: true,
         save_as: false,
@@ -99,6 +100,7 @@ fn overlay_intent_carries_selection() {
 fn commit_intent_serialises_with_crop() {
     let intent = RequestCommitIntent {
         crop: PhysicalBounds::from_xywh(0, 0, 800, 600),
+        annotations: vec![],
         to_shelf: false,
         to_clipboard: true,
         save_as: false,
@@ -106,6 +108,87 @@ fn commit_intent_serialises_with_crop() {
     let json = serde_json::to_string(&intent).expect("serialize");
     assert!(json.contains("\"crop\""));
     assert!(json.contains("\"toClipboard\":true"));
+}
+
+#[test]
+fn commit_intent_carries_annotation_list() {
+    use pixelgrab_contracts::annotation::{
+        Annotation, AnnotationColor, AnnotationGeometry, AnnotationId, AnnotationStroke,
+    };
+    let intent = RequestCommitIntent {
+        crop: PhysicalBounds::from_xywh(0, 0, 100, 100),
+        annotations: vec![
+            Annotation::arrow(
+                AnnotationId(1),
+                pixelgrab_contracts::PhysicalPoint::new(0, 0),
+                pixelgrab_contracts::PhysicalPoint::new(50, 50),
+                AnnotationColor::Red,
+                AnnotationStroke::Medium,
+                0,
+            ),
+            Annotation::rectangle(
+                AnnotationId(2),
+                pixelgrab_contracts::PhysicalPoint::new(10, 10),
+                pixelgrab_contracts::PhysicalSize::new(20, 20),
+                AnnotationColor::Blue,
+                AnnotationStroke::Thin,
+                1,
+            ),
+            Annotation::numbered_badge(
+                AnnotationId(3),
+                pixelgrab_contracts::PhysicalPoint::new(80, 80),
+                pixelgrab_contracts::BADGE_RADIUS_PX,
+                1,
+                AnnotationColor::Yellow,
+                AnnotationStroke::Thin,
+                2,
+            ),
+        ],
+        to_shelf: false,
+        to_clipboard: true,
+        save_as: false,
+    };
+    // Round-trip via JSON to confirm every annotation survives the
+    // wire shape (camelCase + nested enum tags).
+    let json = serde_json::to_string(&intent).expect("serialize");
+    let parsed: RequestCommitIntent = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.annotations.len(), 3);
+    assert!(matches!(
+        parsed.annotations[0].geometry,
+        AnnotationGeometry::Arrow { .. }
+    ));
+    assert!(matches!(
+        parsed.annotations[1].geometry,
+        AnnotationGeometry::Rectangle { .. }
+    ));
+    assert!(matches!(
+        parsed.annotations[2].geometry,
+        AnnotationGeometry::NumberedBadge { .. }
+    ));
+    assert_eq!(parsed.annotations[2].number, Some(1));
+    // camelCase field names must be on the wire (the frontend mirror
+    // in `src/lib/ipc/types.ts` asserts the same shape).
+    assert!(json.contains("\"zOrder\""));
+    assert!(json.contains("\"color\":\"red\""));
+}
+
+/// Pin the palette + stroke widths on the Rust side. The frontend
+/// mirror in `src/lib/overlay/KonvaStage.svelte::COLOR_HEX` and
+/// `src/lib/annotation/AnnotationToolbar.svelte::COLORS/STROKES`
+/// MUST agree with these values; a contract test on the TS side
+/// covers the frontend half.
+#[test]
+fn annotation_palette_and_stroke_widths_are_pinned() {
+    use pixelgrab_contracts::annotation::{AnnotationColor, AnnotationStroke};
+    assert_eq!(AnnotationColor::Red.rgba(), (0xE5, 0x3B, 0x3B, 0xFF));
+    assert_eq!(AnnotationColor::Green.rgba(), (0x3B, 0xE5, 0x5C, 0xFF));
+    assert_eq!(AnnotationColor::Blue.rgba(), (0x3B, 0x82, 0xE5, 0xFF));
+    assert_eq!(AnnotationColor::Yellow.rgba(), (0xF6, 0xE3, 0x3B, 0xFF));
+    assert_eq!(AnnotationColor::White.rgba(), (0xFF, 0xFF, 0xFF, 0xFF));
+    assert_eq!(AnnotationStroke::Thin.width_px(), 2);
+    assert_eq!(AnnotationStroke::Medium.width_px(), 4);
+    assert_eq!(AnnotationStroke::Thick.width_px(), 8);
+    assert_eq!(pixelgrab_contracts::BADGE_RADIUS_PX, 18);
 }
 
 #[test]

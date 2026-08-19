@@ -385,3 +385,101 @@ The Windows adapter is hand-rolled on a minimal COM vtable so the
 build does not depend on the `windows` crate's macro evolution.
 Tests are wired into `synthetic_capture`, `session_lifecycle`, and
 the IPC contract suites.
+
+## 15. Annotation tools (tracer-04)
+
+Tracer 04 introduces the Arrow, Rectangle, and fixed-size Numbered
+Badge tools, the five-colour / three-stroke preset palette, semantic
+undo/redo, and the deterministic flatten pipeline that bakes the
+annotations onto the frozen framebuffer before the PNG and the
+clipboard bitmap are derived.
+
+### Normalized annotation entities
+
+The Rust core owns the wire shape in
+[`crates/pixelgrab-contracts/src/annotation.rs`](crates/pixelgrab-contracts/src/annotation.rs).
+Every annotation is a typed entity with a stable id, geometry, style,
+and z-order:
+
+- `AnnotationKind` = `Arrow { tail, tip } | Rectangle { origin, size }
+| NumberedBadge { center, radius }`.
+- `AnnotationColor` is the closed set `{Red, Green, Blue, Yellow, White}`}
+  — the palette is typed so the toolbar cannot offer free-form colours.
+- `AnnotationStroke` is the closed set `{Thin (2px), Medium (4px),
+Thick (8px)}`.
+- `BADGE_RADIUS_PX = 18` is the single source of truth for the badge
+  size; the frontend mirror lives in
+  `src/lib/annotation/store.svelte.ts`.
+
+The TypeScript mirror lives in `src/lib/ipc/types.ts` and is verified
+by the IPC contract tests on both sides.
+
+### Frontend editor store
+
+The editor lives in
+[`src/lib/annotation/store.svelte.ts`](src/lib/annotation/store.svelte.ts):
+a single `annotationStore` Svelte 5 runes object owns the active tool,
+the active style, the in-flight draft, the committed annotations, the
+badge counter, and the semantic undo/redo history. The
+[`AnnotationToolbar.svelte`](src/lib/annotation/AnnotationToolbar.svelte)
+component renders the tool / colour / stroke / undo buttons; the
+keyboard shortcuts (A / R / N / V, Ctrl+Z, Ctrl+Shift+Z) live on the
+`KonvaStage` because the overlay window is borderless and does not
+receive keyboard focus by default.
+
+### History semantics
+
+`commitDraft()` pushes the _pre-mutation_ snapshot of the annotation
+list onto `past`. `undo()` pops from `past`, pushes the current state
+onto `future`, and restores the popped snapshot. Any new mutation
+clears `future` — matching the spec's "A new action after undo
+discards the obsolete redo branch." Pointer-move frames never enter
+history because they only mutate the in-flight `draft`, never the
+committed `annotations` array. The store also discards degenerate
+drafts (zero-length arrows / rectangles) so a stray click does not
+leave a phantom annotation.
+
+### Deterministic flatten
+
+`flatten_annotations(rgba, size, annotations)` is a pure function in
+the contracts crate. Annotations are sorted by `(z_order, id)` and
+rasterized in that order so two annotations sharing `z_order` and
+`id` produce byte-identical pixels every run. The flatten produces
+the RGBA buffer that both the PNG and the clipboard bitmap consume,
+preserving the tracer-02 "single source of truth" invariant.
+
+The rasterizer is hand-rolled (rectangle stroke via four
+paint-horizontal/vertical sweeps, arrow via Bresenham + scanline-
+filled triangle, badge via filled disc + 5×7 bitmap-font digit) so
+the dependency footprint stays small. The synthetic and Windows
+platforms share the same code path; only the framebuffer read
+differs.
+
+### Commit pipeline
+
+`request_commit` now carries an `annotations: Vec<Annotation>` field
+in both `RequestCommitIntent` and `CommitRequest`. The IPC layer in
+`src-tauri/src/ipc/commands.rs` flattens the annotations onto the
+frozen crop **after** `flatten_crop` and **before** `publish_clipboard`
+or the cache commit, so the PNG and the clipboard bitmap always
+match the on-screen preview.
+
+### Session cleanup
+
+The frontend calls `annotationStore.reset()` on commit success and on
+full session cancellation. The reset wipes the tool, style, badge
+counter, annotations, draft, and history so a fresh capture session
+starts with no inherited state — matching the spec's "A fresh session
+begins with no annotations or inherited history."
+
+### Acceptance criteria coverage
+
+| Criterion                                                       | Where                                                         |
+| --------------------------------------------------------------- | ------------------------------------------------------------- |
+| Every tool produces a correctly styled exported annotation      | `flatten_annotations` + Rust unit tests                       |
+| Numbered badges increment from 1 within each capture session    | `annotationStore.badgeCounter` + store tests                  |
+| Toolbar changes affect subsequent annotations predictably       | `setColor` / `setStroke` only affect new drafts; store test   |
+| Ctrl+Z / Ctrl+Shift+Z operate on complete user actions          | `commitDraft` pushes pre-mutation snapshot; store tests       |
+| A new action after undo discards the obsolete redo branch       | `pushHistory` clears `future`; store test                     |
+| Export dimensions remain identical to the physical crop         | `flatten_annotations` returns a same-size buffer              |
+| A fresh session begins with no annotations or inherited history | `OverlayApp` calls `annotationStore.reset()` on commit/cancel |

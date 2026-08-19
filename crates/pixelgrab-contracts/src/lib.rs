@@ -11,6 +11,7 @@
 #![deny(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod annotation;
 pub mod cache;
 pub mod capture;
 pub mod coordinate;
@@ -22,6 +23,10 @@ pub mod session;
 pub mod shelf_preferences;
 pub mod shelf_queue;
 
+pub use annotation::{
+    flatten_annotations, paint_annotation, Annotation, AnnotationColor, AnnotationGeometry,
+    AnnotationId, AnnotationStroke, BADGE_RADIUS_PX,
+};
 pub use cache::{CacheEntry, CacheEntryMetadata, CaptureId, LockOwner, ShelfId, ShelfPosition};
 pub use capture::{CaptureFormat, CaptureRequest, CaptureResolution};
 pub use coordinate::{
