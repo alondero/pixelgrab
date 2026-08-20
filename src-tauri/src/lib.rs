@@ -373,10 +373,14 @@ pub fn run() {
             // so a first-run install boots cleanly.
             let prefs_root = crate::preferences::default_preferences_root();
             if let Err(err) = app_state.preferences().set_root(prefs_root.clone()) {
-                log::warn!(
-                    "preferences root {} is unusable: {err}",
-                    prefs_root.display()
-                );
+                // `PlatformError` already carries the preferences root
+                // path in its `Display` payload (the inner
+                // `create_dir_all({path}): {os_err}` from
+                // `preferences::store::PreferencesStore::set_root`), so
+                // appending the path a second time here would log it
+                // twice. See the `set_root_error_display_carries_path`
+                // regression test for the pinned contract.
+                log::warn!("{err}");
             }
             // Wire the hotkey bindings root under the same parent
             // directory as the shelf preferences. The two JSON
@@ -384,10 +388,15 @@ pub fn run() {
             // distinct. A corrupt file falls back to defaults.
             let hotkey_root = crate::preferences::default_preferences_root();
             if let Err(err) = app_state.hotkey_store().set_root(hotkey_root.clone()) {
-                log::warn!(
-                    "hotkey bindings root {} is unusable: {err}",
-                    hotkey_root.display()
-                );
+                // `PlatformError` already carries the hotkey bindings
+                // root path in its `Display` payload (the inner
+                // `create_dir_all({path}): {os_err}` from
+                // `hotkey::store::HotkeyPreferencesStore::set_root`),
+                // so appending the path a second time here would log
+                // it twice. See the
+                // `set_root_error_display_carries_path` regression
+                // test for the pinned contract.
+                log::warn!("{err}");
             }
             let loaded_bindings = app_state.hotkey_store().current();
             app_state.hotkeys().set_bindings(loaded_bindings.clone());
