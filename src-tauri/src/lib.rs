@@ -492,6 +492,7 @@ pub fn run() {
             ipc::get_shelf_snapshot,
             ipc::copy_shelf_card,
             ipc::save_shelf_card_as,
+            ipc::save_capture_as,
             ipc::hover_shelf_card,
             ipc::unhover_shelf_card,
             ipc::tick_shelf_queue,

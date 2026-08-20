@@ -4,6 +4,8 @@
 //   - Ctrl+Z / Ctrl+Shift+Z operate on complete user actions.
 //   - A new action after undo discards the obsolete redo branch.
 //   - A fresh session begins with no annotations or inherited history.
+//   - Text + Blur (tracer-05) participate in the same history semantics
+//     and ship with their own degenerate-draft rules.
 //
 // The store uses Svelte 5 runes; we import it from `store.svelte.ts`
 // after resetting it via `annotationStore.reset()` in `beforeEach`.
@@ -235,5 +237,116 @@ describe("annotationStore", () => {
     annotationStore.beginDraft("arrow", { x: 0, y: 0 });
     annotationStore.commitDraft();
     expect(annotationStore.annotations).toHaveLength(0);
+  });
+
+  // --- Tracer-05: text + blur ----------------------------------------
+
+  it("begins a text draft with an empty payload and resizes via updateDraft", () => {
+    annotationStore.setTool("text");
+    annotationStore.beginDraft("text", { x: 10, y: 10 });
+    expect(annotationStore.draft?.geometry.kind).toBe("text");
+    if (annotationStore.draft?.geometry.kind === "text") {
+      expect(annotationStore.draft.geometry.text).toBe("");
+      expect(annotationStore.draft.geometry.size.width).toBe(0);
+    }
+    annotationStore.updateDraft({ x: 100, y: 50 });
+    if (annotationStore.draft?.geometry.kind === "text") {
+      expect(annotationStore.draft.geometry.size.width).toBe(90);
+      expect(annotationStore.draft.geometry.size.height).toBe(40);
+    }
+  });
+
+  it("commitText pushes the typed text and promotes the draft", () => {
+    annotationStore.setTool("text");
+    annotationStore.beginDraft("text", { x: 10, y: 10 });
+    annotationStore.updateDraft({ x: 100, y: 50 });
+    annotationStore.commitText("hello world");
+    expect(annotationStore.annotations).toHaveLength(1);
+    expect(annotationStore.draft).toBeNull();
+    expect(annotationStore.canUndo).toBe(true);
+    const first = annotationStore.annotations[0];
+    expect(first.geometry.kind).toBe("text");
+    if (first.geometry.kind === "text") {
+      expect(first.geometry.text).toBe("hello world");
+    }
+  });
+
+  it("commitText with empty payload discards the draft without history", () => {
+    annotationStore.setTool("text");
+    // Snapshot the history depth so the test isolates commitText's
+    // effect (setTool itself pushes history on the tool change).
+    const undoBefore = annotationStore.canUndo;
+    annotationStore.beginDraft("text", { x: 10, y: 10 });
+    annotationStore.updateDraft({ x: 100, y: 50 });
+    annotationStore.commitText("");
+    expect(annotationStore.draft).toBeNull();
+    expect(annotationStore.annotations).toHaveLength(0);
+    // commitText on an empty payload must not create a new history
+    // entry beyond what setTool already recorded.
+    expect(annotationStore.canUndo).toBe(undoBefore);
+  });
+
+  it("zero-size text drafts are discarded on commit", () => {
+    annotationStore.setTool("text");
+    annotationStore.beginDraft("text", { x: 0, y: 0 });
+    // No updateDraft — the size is 0×0.
+    annotationStore.commitText("x");
+    expect(annotationStore.annotations).toHaveLength(0);
+  });
+
+  it("commitText is a no-op when the draft is not text", () => {
+    annotationStore.setTool("rectangle");
+    annotationStore.beginDraft("rectangle", { x: 0, y: 0 });
+    annotationStore.updateDraft({ x: 100, y: 100 });
+    annotationStore.commitText("should-not-promote");
+    // Rectangle draft is still there — commitText must not promote
+    // a non-text draft.
+    expect(annotationStore.draft).not.toBeNull();
+    expect(annotationStore.annotations).toHaveLength(0);
+  });
+
+  it("blur draft commits as a Blur geometry", () => {
+    annotationStore.setTool("blur");
+    annotationStore.beginDraft("blur", { x: 10, y: 10 });
+    annotationStore.updateDraft({ x: 100, y: 50 });
+    annotationStore.commitDraft();
+    expect(annotationStore.annotations).toHaveLength(1);
+    expect(annotationStore.annotations[0].geometry.kind).toBe("blur");
+    if (annotationStore.annotations[0].geometry.kind === "blur") {
+      expect(annotationStore.annotations[0].geometry.size.width).toBe(90);
+      expect(annotationStore.annotations[0].geometry.size.height).toBe(40);
+    }
+    expect(annotationStore.canUndo).toBe(true);
+  });
+
+  it("zero-size blur drafts are discarded on commit", () => {
+    annotationStore.setTool("blur");
+    const undoBefore = annotationStore.canUndo;
+    annotationStore.beginDraft("blur", { x: 0, y: 0 });
+    annotationStore.commitDraft();
+    expect(annotationStore.annotations).toHaveLength(0);
+    expect(annotationStore.canUndo).toBe(undoBefore);
+  });
+
+  it("text + blur participate in undo/redo (tracer-05 round trip)", () => {
+    annotationStore.setTool("text");
+    annotationStore.beginDraft("text", { x: 10, y: 10 });
+    annotationStore.updateDraft({ x: 100, y: 50 });
+    annotationStore.commitText("label");
+    expect(annotationStore.annotations).toHaveLength(1);
+
+    annotationStore.setTool("blur");
+    annotationStore.beginDraft("blur", { x: 200, y: 200 });
+    annotationStore.updateDraft({ x: 300, y: 250 });
+    annotationStore.commitDraft();
+    expect(annotationStore.annotations).toHaveLength(2);
+
+    annotationStore.undo();
+    expect(annotationStore.annotations).toHaveLength(1);
+    expect(annotationStore.annotations[0].geometry.kind).toBe("text");
+
+    annotationStore.redo();
+    expect(annotationStore.annotations).toHaveLength(2);
+    expect(annotationStore.annotations[1].geometry.kind).toBe("blur");
   });
 });

@@ -57,10 +57,10 @@ pub use ipc::{
     CaptureResponse, ClearCacheResponse, CommitOutcome, CommitRequest, CommitResponse,
     DismissCacheEntryRequest, DismissCacheEntryResponse, HotkeyBindingsDto,
     HotkeyRegistryStatusDto, IpcError, IpcResponse, OverlaySelection, RequestCaptureIntent,
-    RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SecondaryLaunchIntent,
-    SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot, StartShelfDragIntent,
-    StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
-    UpdateHotkeyBindingsRequest, UpdateShelfPreferencesRequest,
+    RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest,
+    SaveCaptureAsResponse, SecondaryLaunchIntent, SessionSnapshot, ShelfPreferencesDto,
+    ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+    UpdateCachePolicyRequest, UpdateHotkeyBindingsRequest, UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use pin::{

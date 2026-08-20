@@ -582,6 +582,93 @@ preferences store: the disk-io error kind is the category, the
 `io::Error`'s `Display` (which can include the absolute path on
 Windows) is discarded.
 
+## 17. Text, blur, and Save As (tracer-05)
+
+Tracer 05 ships the editable text label, the privacy-safe blur /
+redaction, and the mid-session native Save As. The leak guard is
+the load-bearing piece: every export path (clipboard, cache PNG,
+save-as PNG) routes through `flatten_annotations`, and the blur
+rasterizer samples from the immutable source slice — never from the
+in-flight output buffer — so a path that forgets to flatten loses
+the blur along with the export. See
+[`docs/adr/0008-text-blur-and-save-as.md`](docs/adr/0008-text-blur-and-save-as.md)
+for the canonical design.
+
+### Annotation variants
+
+`AnnotationGeometry` gains two new variants in
+`crates/pixelgrab-contracts/src/annotation.rs`:
+
+- `Text { origin, size, text }` — the user-authored text is carried
+  on the wire; wrapping happens at render time. The stroke preset
+  drives plate padding (Thin=2 px, Medium=4 px, Thick=6 px) and
+  glyph scale (1×, 2×, 3× the 5×7 bitmap). The contrast rule picks
+  the plate colour from the source region's mean luminance.
+- `Blur { origin, size, radius }` — `radius` is the box-blur
+  half-extent. Default 4 (9×9 kernel). The colour / stroke fields
+  are kept on the wire for shape uniformity but ignored by the
+  rasterizer.
+
+### Hand-rolled ASCII rasterizer
+
+The text rasterizer lives in
+`crates/pixelgrab-contracts/src/annotation.rs::ASCII_GLYPHS`: a
+5×7 bitmap for every printable ASCII byte (0x20..=0x7E).
+Characters outside that range render as a space glyph. No font
+crate dependency — the hand-rolled font matches the existing 5×7
+digit table and keeps the rasterizer dependency-free.
+
+### Save As IPC
+
+New command `save_capture_as` in
+`src-tauri/src/ipc/commands.rs`. Mirrors `save_shelf_card_as`:
+`DialogExt`, `add_filter("PNG image", &["png"])`,
+`set_file_name(suggested)`, `spawn_blocking(blocking_save_file)`.
+The chosen file path is normalized to append `.png` when the user
+typed a name without an extension (case-insensitive — closes the
+gap that the dialog filter only restricts the _displayed_ list).
+Cancel returns `Ok(SaveCaptureAsResponse { path: None,
+png_bytes: 0 })`; the chosen path is returned only in the Ok
+variant. Every error path uses categorical kind strings
+(`save_as_invalid_target`, `save_as_write_failed`,
+`save_as_encode_header_failed`, `save_as_encode_stream_failed`,
+`save_as_encode_write_failed`, `save_as_encode_finish_failed`) —
+the `io::Error`'s `Display` impl on Windows can include the
+absolute path that failed, so the raw error string is discarded.
+
+Ctrl+S binds in `KonvaStage.handleKey` to a new `onSaveAs` prop;
+the host (`OverlayApp`) wires it to the IPC.
+
+### Frontend editor + shortcuts
+
+- `AnnotationToolbar` adds two tool buttons (T → text, B → blur).
+- `KonvaStage.handleKey` handles T / B in the same switch as A / R
+  / N / V; Escape cancels the draft and the text overlay together.
+- The text tool opens an HTML `<textarea>` overlay positioned at
+  the text-draft box on pointer-up. Enter commits, Escape cancels,
+  Shift+Enter inserts a newline, IME composition is preserved.
+- Both text and blur participate in the tracer-04 semantic undo /
+  redo (`commitText` pushes the pre-mutation snapshot exactly as
+  `commitDraft` does).
+
+### Leak guard test
+
+`crates/pixelgrab-contracts/src/annotation.rs::blur_leak_guard_removes_source_pixels`
+places a high-contrast secret line under a blur region and asserts
+no pure-secret pixel survives in the output. The companion tests
+`blur_leak_guard_at_multiple_secret_widths` exercise 1-, 2-, and
+4-pixel-wide secrets across four geometries (different source /
+blur sizes + radii) so a regression that happens to satisfy one
+geometry is caught. `blur_samples_from_source_not_in_flight_output`
+paints an arrow at z=0 then a blur at z=1 covering the arrow; the
+arrow's green pixels must not survive — the blur rasterizer reads
+the immutable source, so the arrow was never in `src`.
+`joint_text_and_blur_export_path` exercises the exact flatten
+pipeline used by `save_capture_as`: a blur + a text annotation,
+both visible in the output, the blur region's secret pixels
+redacted.
+
 ## ADRs
 
 - 0007 — Cache bounds + recovery (tracer-13)
+- 0008 — Text, blur, and Save As (tracer-05)

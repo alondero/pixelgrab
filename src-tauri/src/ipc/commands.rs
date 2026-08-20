@@ -13,9 +13,10 @@ use pixelgrab_contracts::{
         CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureResponse, ClearCacheResponse,
         CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse,
         HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse, RequestCaptureIntent,
-        RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SessionSnapshot,
-        ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
-        UpdateCachePolicyRequest, UpdateShelfPreferencesRequest,
+        RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest,
+        SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot, StartShelfDragIntent,
+        StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
+        UpdateShelfPreferencesRequest,
     },
     shelf_queue::{
         CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
@@ -469,6 +470,144 @@ pub async fn save_shelf_card_as(
     }
     let written = bytes.len() as u64;
     Ok(IpcResponse::from_result(Ok(SaveShelfCardAsResponse {
+        path: Some(target_path.to_string_lossy().to_string()),
+        png_bytes: written,
+    })))
+}
+
+/// Save the active capture (crop + annotations) to a user-chosen
+/// location via the native Save As dialog. Mirrors `save_shelf_card_as`
+/// but operates on the **in-progress** session, not a committed shelf
+/// card — this is the Ctrl+S path that lets the user save before
+/// committing.
+///
+/// The flattening pipeline is the same one the commit pipeline uses
+/// (`flatten_crop` → `flatten_annotations`), so blur redaction +
+/// text glyphs + arrows + rectangles + badges all land in the
+/// exported PNG. Categorical kind strings only — never raw paths.
+#[tauri::command]
+pub async fn save_capture_as(
+    app: AppState<'_>,
+    payload: SaveCaptureAsRequest,
+    handle: AppHandle,
+) -> Result<IpcResponse<SaveCaptureAsResponse>, PlatformError> {
+    use tauri_plugin_dialog::DialogExt;
+    // 1. Validate crop + look up the active capture.
+    payload.crop.validate().map_err(|_| {
+        PlatformError::new(PlatformErrorKind::InvalidPayload, "empty save-as bounds")
+    })?;
+    let capture_id = app
+        .session()
+        .last_capture()
+        .map(|c| c.capture_id)
+        .ok_or_else(|| {
+            PlatformError::new(
+                PlatformErrorKind::InvalidSessionState,
+                "no active capture to save",
+            )
+        })?;
+    // 2. Flatten the crop (immutable source) + flatten annotations.
+    //    Blur samples from `src` so the leak guard holds for this
+    //    path as well as the commit path.
+    let (rgba, size) = app.platform().flatten_crop(&capture_id, payload.crop)?;
+    let flat = pixelgrab_contracts::flatten_annotations(&rgba, size, &payload.annotations);
+    // 3. Encode the flattened RGBA as PNG. The encoder is the same
+    //    `png` crate the synthetic platform uses for `write_png`.
+    let mut buf = Vec::with_capacity(flat.len() / 2);
+    {
+        let mut encoder = png::Encoder::new(&mut buf, size.width, size.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = match encoder.write_header() {
+            Ok(w) => w,
+            Err(_e) => {
+                return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                    PlatformErrorKind::Io,
+                    "save_as_encode_header_failed",
+                ))));
+            }
+        };
+        {
+            use std::io::Write;
+            let mut stream = match writer.stream_writer() {
+                Ok(s) => s,
+                Err(_e) => {
+                    return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                        PlatformErrorKind::Io,
+                        "save_as_encode_stream_failed",
+                    ))));
+                }
+            };
+            if stream.write_all(&flat).is_err() {
+                return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                    PlatformErrorKind::Io,
+                    "save_as_encode_write_failed",
+                ))));
+            }
+            if stream.finish().is_err() {
+                return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                    PlatformErrorKind::Io,
+                    "save_as_encode_finish_failed",
+                ))));
+            }
+        }
+    }
+    // 4. Open the native Save As dialog on a worker thread (the
+    //    blocking call must not run on the async runtime).
+    let suggested = if payload.suggested_filename.is_empty() {
+        "capture.png".to_string()
+    } else {
+        payload.suggested_filename
+    };
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .dialog()
+            .file()
+            .add_filter("PNG image", &["png"])
+            .set_file_name(&suggested)
+            .blocking_save_file()
+    })
+    .await
+    .unwrap_or(None);
+    let Some(target) = chosen else {
+        return Ok(IpcResponse::from_result(Ok(SaveCaptureAsResponse {
+            path: None,
+            png_bytes: 0,
+        })));
+    };
+    let target_path = match target.into_path() {
+        Ok(p) => p,
+        Err(_err) => {
+            return Ok(IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::Io,
+                "save_as_invalid_target",
+            ))));
+        }
+    };
+    // Normalize the file extension: append `.png` when the user typed
+    // a name without one. The native dialog filter only restricts the
+    // *displayed* list, not the typed path; this closes the gap so
+    // the chosen path is always a valid PNG file. We match the
+    // extension case-insensitively to avoid `screenshot.PNG` falling
+    // through (the native dialog uses lowercase in its filter).
+    let target_path = match target_path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("png") => target_path,
+        _ => {
+            let mut p = target_path.into_os_string();
+            p.push(".png");
+            std::path::PathBuf::from(p)
+        }
+    };
+    // 5. Write the PNG bytes. Categorical kind on error — never the
+    //    io::Error Display (privacy rule from ADR-0007).
+    if let Err(_err) = std::fs::write(&target_path, &buf) {
+        return Ok(IpcResponse::from_result(Err(PlatformError::new(
+            PlatformErrorKind::Io,
+            "save_as_write_failed",
+        ))));
+    }
+    let written = buf.len() as u64;
+    Ok(IpcResponse::from_result(Ok(SaveCaptureAsResponse {
         path: Some(target_path.to_string_lossy().to_string()),
         png_bytes: written,
     })))

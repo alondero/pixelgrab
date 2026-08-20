@@ -192,6 +192,70 @@ fn annotation_palette_and_stroke_widths_are_pinned() {
     assert_eq!(pixelgrab_contracts::BADGE_RADIUS_PX, 18);
 }
 
+/// Tracer-05: Text + Blur annotations round-trip via JSON so the
+/// TypeScript mirror can decode them.
+#[test]
+fn text_and_blur_annotations_round_trip_via_json() {
+    use pixelgrab_contracts::annotation::{
+        Annotation, AnnotationColor, AnnotationGeometry, AnnotationId, AnnotationStroke,
+    };
+    let text = Annotation::text(
+        AnnotationId(11),
+        pixelgrab_contracts::PhysicalPoint::new(10, 20),
+        PhysicalSize::new(120, 40),
+        "hello\nworld".to_string(),
+        AnnotationColor::Yellow,
+        AnnotationStroke::Medium,
+        3,
+    );
+    let json = serde_json::to_string(&text).expect("serialize text");
+    assert!(json.contains("\"kind\":\"text\""));
+    assert!(json.contains("\"text\":\"hello\\nworld\""));
+    let parsed: Annotation = serde_json::from_str(&json).expect("deserialize text");
+    match parsed.geometry {
+        AnnotationGeometry::Text { origin, size, text } => {
+            assert_eq!(origin, pixelgrab_contracts::PhysicalPoint::new(10, 20));
+            assert_eq!(size, PhysicalSize::new(120, 40));
+            assert_eq!(text, "hello\nworld");
+        }
+        other => panic!("expected Text geometry, got {other:?}"),
+    }
+
+    let blur = Annotation::blur(
+        AnnotationId(12),
+        pixelgrab_contracts::PhysicalPoint::new(5, 5),
+        PhysicalSize::new(40, 40),
+        4,
+        5,
+    );
+    let json = serde_json::to_string(&blur).expect("serialize blur");
+    assert!(json.contains("\"kind\":\"blur\""));
+    assert!(json.contains("\"radius\":4"));
+    let parsed: Annotation = serde_json::from_str(&json).expect("deserialize blur");
+    match parsed.geometry {
+        AnnotationGeometry::Blur { radius, .. } => assert_eq!(radius, 4),
+        other => panic!("expected Blur geometry, got {other:?}"),
+    }
+}
+
+/// Tracer-05: the SaveCaptureAs IPC request carries crop +
+/// annotations + a suggested filename.
+#[test]
+fn save_capture_as_request_round_trips() {
+    use pixelgrab_contracts::ipc::SaveCaptureAsRequest;
+    let req = SaveCaptureAsRequest {
+        crop: PhysicalBounds::from_xywh(0, 0, 200, 100),
+        annotations: vec![],
+        suggested_filename: "capture.png".to_string(),
+    };
+    let json = serde_json::to_string(&req).expect("serialize");
+    assert!(json.contains("\"crop\""));
+    assert!(json.contains("\"suggestedFilename\":\"capture.png\""));
+    let parsed: SaveCaptureAsRequest = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.suggested_filename, "capture.png");
+    assert_eq!(parsed.crop.size, PhysicalSize::new(200, 100));
+}
+
 #[test]
 fn commit_response_round_trips() {
     let response = CommitResponse {

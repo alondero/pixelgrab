@@ -32,6 +32,12 @@ import type {
 /// coincident.
 export const BADGE_RADIUS_PX = 18;
 
+/// Default blur radius (half-extent of the box-blur kernel). The
+/// Rust rasterizer uses `radius = 4` (9×9 kernel) for a strong but
+/// cheap redaction. Mirrored here so the editor's preview and the
+/// flattened PNG agree.
+export const DEFAULT_BLUR_RADIUS = 4;
+
 /// Snapshot of the user-controlled editor state. The history captures
 /// exactly this shape so undo / redo restore every aspect of the
 /// editor that a user can change: the annotation list, the active
@@ -132,6 +138,17 @@ function createAnnotationStore() {
     if (draft.geometry.kind === "rectangle") {
       return draft.geometry.size.width < 4 || draft.geometry.size.height < 4;
     }
+    if (draft.geometry.kind === "text") {
+      // Text without content is degenerate; the box must also have
+      // area so the plate is visible. The overlay commits via
+      // `commitText` which sets the text payload; if the user cancels
+      // without typing, `cancelDraft` discards the in-flight box.
+      if (!draft.geometry.text) return true;
+      return draft.geometry.size.width < 4 || draft.geometry.size.height < 4;
+    }
+    if (draft.geometry.kind === "blur") {
+      return draft.geometry.size.width < 4 || draft.geometry.size.height < 4;
+    }
     return false;
   }
 
@@ -184,17 +201,45 @@ function createAnnotationStore() {
     },
 
     /// Begin a draft annotation for the active tool. Called on
-    /// pointerdown of an arrow, rectangle, or badge. The geometry is
-    /// set to a zero-shape initial value; the pointermove handler
-    /// updates it incrementally.
+    /// pointerdown of an arrow, rectangle, badge, text, or blur.
+    /// The geometry is set to a zero-shape initial value; the
+    /// pointermove handler updates it incrementally.
     beginDraft(kind: AnnotationGeometry["kind"], point: { x: number; y: number }) {
       const id = nextId();
-      const geometry: AnnotationGeometry =
-        kind === "arrow"
-          ? { kind: "arrow", tail: point, tip: point }
-          : kind === "rectangle"
-            ? { kind: "rectangle", origin: point, size: { width: 0, height: 0 } }
-            : { kind: "numbered_badge", center: point, radius: BADGE_RADIUS_PX };
+      let geometry: AnnotationGeometry;
+      switch (kind) {
+        case "arrow":
+          geometry = { kind: "arrow", tail: point, tip: point };
+          break;
+        case "rectangle":
+          geometry = { kind: "rectangle", origin: point, size: { width: 0, height: 0 } };
+          break;
+        case "numbered_badge":
+          geometry = { kind: "numbered_badge", center: point, radius: BADGE_RADIUS_PX };
+          break;
+        case "text":
+          geometry = {
+            kind: "text",
+            origin: point,
+            size: { width: 0, height: 0 },
+            text: "",
+          };
+          break;
+        case "blur":
+          geometry = {
+            kind: "blur",
+            origin: point,
+            size: { width: 0, height: 0 },
+            radius: DEFAULT_BLUR_RADIUS,
+          };
+          break;
+        default:
+          // Exhaustiveness — TypeScript's discriminated union ensures
+          // every variant is handled. Fallback to a rectangle so a
+          // misconfigured tool still produces a visible shape rather
+          // than panicking.
+          geometry = { kind: "rectangle", origin: point, size: { width: 0, height: 0 } };
+      }
       const annotation: Annotation = {
         id,
         geometry,
@@ -227,9 +272,48 @@ function createAnnotationStore() {
         if (point.y < draft.geometry.origin.y) {
           draft.geometry.origin = { x: draft.geometry.origin.x, y: point.y };
         }
+      } else if (draft.geometry.kind === "text") {
+        draft.geometry.size = {
+          width: Math.abs(point.x - draft.geometry.origin.x),
+          height: Math.abs(point.y - draft.geometry.origin.y),
+        };
+        if (point.x < draft.geometry.origin.x) {
+          draft.geometry.origin = { x: point.x, y: draft.geometry.origin.y };
+        }
+        if (point.y < draft.geometry.origin.y) {
+          draft.geometry.origin = { x: draft.geometry.origin.x, y: point.y };
+        }
+      } else if (draft.geometry.kind === "blur") {
+        draft.geometry.size = {
+          width: Math.abs(point.x - draft.geometry.origin.x),
+          height: Math.abs(point.y - draft.geometry.origin.y),
+        };
+        if (point.x < draft.geometry.origin.x) {
+          draft.geometry.origin = { x: point.x, y: draft.geometry.origin.y };
+        }
+        if (point.y < draft.geometry.origin.y) {
+          draft.geometry.origin = { x: draft.geometry.origin.x, y: point.y };
+        }
       } else {
         draft.geometry.center = point;
       }
+    },
+
+    /// Commit the text content of an in-flight text draft. Called by
+    /// the overlay editor when the user presses Enter (no Shift) or
+    /// clicks outside the overlay. Pushes the pre-mutation snapshot
+    /// so the commit is undoable, then promotes the draft.
+    /// An empty text payload is treated as a cancel.
+    commitText(text: string): void {
+      const draft = inner.draft;
+      if (!draft || draft.geometry.kind !== "text") return;
+      draft.geometry.text = text;
+      if (isDraftDegenerate()) {
+        inner.draft = null;
+        return;
+      }
+      pushHistory();
+      promoteDraft();
     },
 
     /// Finalize the draft annotation. Pushes a history entry covering

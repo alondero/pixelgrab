@@ -41,3 +41,5 @@ fixtures/local/
 # Ad-hoc scratch files created by tooling in the repo root
 /.tmp_*/
 *.tmp.diff
+# Scratch diffs created by review sub-agents (code-review skill).
+/_stdio_*.diff
