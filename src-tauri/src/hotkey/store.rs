@@ -486,6 +486,32 @@ mod tests {
         assert!(store.current().paused);
     }
 
+    #[test]
+    fn set_root_error_display_carries_path() {
+        // Regression guard for issue #54: the `set_root` warn log in
+        // `src-tauri/src/lib.rs` relies on this error's `Display`
+        // carrying the hotkey bindings root path, so the setup hook
+        // can log `{err}` without re-injecting the path. If this test
+        // ever fails, the `src-tauri/src/lib.rs` startup log must be
+        // updated to keep the path on the wire.
+        let fs = IsolatedFilesystem::new("hotkey-bad-root").expect("fs");
+        let file_path = fs.root().join("not-a-directory.txt");
+        std::fs::write(&file_path, b"blocks the mkdir").expect("seed");
+        let store = HotkeyPreferencesStore::new();
+        let err = store
+            .set_root(file_path.clone())
+            .expect_err("set_root should fail when the path is a file");
+        let message = err.to_string();
+        assert!(
+            message.contains(file_path.display().to_string().as_str()),
+            "set_root error Display must carry the hotkey bindings root path; got: {message}",
+        );
+        assert!(
+            message.contains("create_dir_all"),
+            "set_root error Display must keep the `create_dir_all` prefix so the log remains self-describing; got: {message}",
+        );
+    }
+
     fn write_to_disk_for_seed(root: &Path, filename: &str, bindings: &HotkeyBindings) {
         let target = root.join(filename);
         let bytes = serde_json::to_vec_pretty(bindings).expect("serialise");
