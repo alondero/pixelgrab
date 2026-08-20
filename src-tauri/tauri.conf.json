@@ -76,11 +76,5 @@
     "shortDescription": "Capture, annotate, and share desktop screenshots",
     "longDescription": "PixelGrab is a local-first Windows desktop capture utility that lets you select, annotate, and share precise visual context from your desktop."
   },
-  "plugins": {
-    "global-shortcut": {},
-    "single-instance": {},
-    "dialog": {},
-    "fs": {},
-    "clipboard-manager": {}
-  }
+  "plugins": {}
 }
