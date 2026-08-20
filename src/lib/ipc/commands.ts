@@ -11,6 +11,8 @@ import type {
   CopyShelfCardResponse,
   DismissCacheEntryRequest,
   DismissCacheEntryResponse,
+  HotkeyBindingsDto,
+  HotkeyRegistryStatusDto,
   HoverShelfCardRequest,
   IpcResponse,
   RequestCaptureIntent,
@@ -29,6 +31,7 @@ import type {
   StartShelfDragResult,
   UnhoverShelfCardRequest,
   UpdateCacheMetadataRequest,
+  UpdateHotkeyBindingsRequest,
   UpdateShelfPreferencesRequest,
 } from "./types";
 
@@ -132,4 +135,29 @@ export async function updateShelfPreferences(
   payload: UpdateShelfPreferencesRequest,
 ): Promise<IpcResponse<ShelfPreferencesDto>> {
   return invoke<IpcResponse<ShelfPreferencesDto>>("update_shelf_preferences", { payload });
+}
+
+// ---------------------------------------------------------------------------
+// Hotkey bindings (tracer 14). The frontend owns the typed wrapper; the
+// Rust core owns the canonical state and re-applies every bulk update.
+// ---------------------------------------------------------------------------
+
+export async function getHotkeyBindings(): Promise<IpcResponse<HotkeyBindingsDto>> {
+  return invoke<IpcResponse<HotkeyBindingsDto>>("get_hotkey_bindings");
+}
+
+export async function updateHotkeyBindings(
+  payload: UpdateHotkeyBindingsRequest,
+): Promise<IpcResponse<HotkeyBindingsDto>> {
+  return invoke<IpcResponse<HotkeyBindingsDto>>("update_hotkey_bindings", { payload });
+}
+
+export async function getHotkeyStatus(): Promise<IpcResponse<HotkeyRegistryStatusDto>> {
+  return invoke<IpcResponse<HotkeyRegistryStatusDto>>("get_hotkey_status");
+}
+
+export async function setHotkeyPaused(
+  paused: boolean,
+): Promise<IpcResponse<HotkeyRegistryStatusDto>> {
+  return invoke<IpcResponse<HotkeyRegistryStatusDto>>("set_hotkey_paused", { paused });
 }

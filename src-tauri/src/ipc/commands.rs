@@ -12,10 +12,11 @@ use pixelgrab_contracts::{
     ipc::{
         CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureResponse, ClearCacheResponse,
         CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse,
-        IpcResponse, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
-        RequestOverlayResult, SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot,
-        ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
-        UpdateCachePolicyRequest, UpdateShelfPreferencesRequest,
+        HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse, RequestCaptureIntent,
+        RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest,
+        SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot, StartShelfDragIntent,
+        StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
+        UpdateShelfPreferencesRequest,
     },
     shelf_queue::{
         CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
@@ -28,6 +29,8 @@ use pixelgrab_contracts::{
 use tauri::{AppHandle, Emitter, State};
 
 use crate::PixelGrabApp;
+
+use super::super::hotkey::{status_to_dto, HotkeyConflict};
 
 type AppState<'a> = State<'a, PixelGrabApp>;
 
@@ -1169,4 +1172,78 @@ fn read_pin_source(view: &PinViewModel) -> PlatformResult<(Vec<u8>, PhysicalSize
     })?;
     let size = view.source.bounds.size;
     Ok((bytes, size))
+}
+
+// ---------------------------------------------------------------------------
+// Tracer 14: hotkey bindings IPC.
+// ---------------------------------------------------------------------------
+
+/// Return the persisted hotkey bindings. Mirrors the
+/// `get_shelf_preferences` flow: load on startup so the settings
+/// UI renders with the user's actual choices, and on every change
+/// to keep the post-update state.
+#[tauri::command]
+pub fn get_hotkey_bindings(app: AppState<'_>) -> IpcResponse<HotkeyBindingsDto> {
+    let bindings = app.hotkeys().current_bindings();
+    IpcResponse::from_result(Ok(bindings.into()))
+}
+
+/// Replace the persisted hotkey bindings. The candidate is
+/// registered with the OS backend first; only on success does the
+/// in-memory copy mutate. A backend rejection is reported as a
+/// typed `PlatformError` so the frontend can show the conflicting
+/// action without leaking OS-internal paths.
+#[tauri::command]
+pub fn update_hotkey_bindings(
+    app: AppState<'_>,
+    payload: pixelgrab_contracts::ipc::UpdateHotkeyBindingsRequest,
+) -> IpcResponse<HotkeyBindingsDto> {
+    let new: pixelgrab_contracts::HotkeyBindings = payload.bindings.into();
+    let outcome = app.hotkeys().apply_replacements(&new);
+    match outcome {
+        Ok(()) => {
+            if let Err(err) = app.hotkey_store().update(app.hotkeys().current_bindings()) {
+                return IpcResponse::from_result(Err(err));
+            }
+            let bindings = app.hotkeys().current_bindings();
+            IpcResponse::from_result(Ok(bindings.into()))
+        }
+        Err(conflict) => IpcResponse::from_result(Err(describe_conflict(&conflict))),
+    }
+}
+
+/// Return the latest registry status payload (paused flag +
+/// registration error). Surfaced to the settings UI as the live
+/// status text.
+#[tauri::command]
+pub fn get_hotkey_status(app: AppState<'_>) -> IpcResponse<HotkeyRegistryStatusDto> {
+    let status = app.hotkeys().status();
+    IpcResponse::from_result(Ok(status_to_dto(&status)))
+}
+
+/// Toggle the paused state. The frontend calls this from the
+/// tray's "Pause Global Hotkeys" entry as well as the settings
+/// toggle so the in-memory state and the persisted file stay in
+/// sync.
+#[tauri::command]
+pub fn set_hotkey_paused(app: AppState<'_>, paused: bool) -> IpcResponse<HotkeyRegistryStatusDto> {
+    if app.hotkeys().set_paused(paused) {
+        if let Err(err) = app.hotkey_store().set_paused(paused) {
+            return IpcResponse::from_result(Err(err));
+        }
+    }
+    let status = app.hotkeys().status();
+    IpcResponse::from_result(Ok(status_to_dto(&status)))
+}
+
+/// Format a `HotkeyConflict` into an IPC error. Used by every
+/// bulk-replace path so the wire shape stays consistent.
+fn describe_conflict(conflict: &HotkeyConflict) -> PlatformError {
+    let action_id = conflict.action.as_id().to_string();
+    let binding = pixelgrab_contracts::display_binding(&conflict.binding);
+    let msg = format!("{} ({})", conflict.reason, binding);
+    PlatformError::new(
+        PlatformErrorKind::InvalidPayload,
+        format!("{msg} [action={action_id}]"),
+    )
 }

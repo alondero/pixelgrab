@@ -505,6 +505,94 @@ pub struct UpdateShelfPreferencesRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Tracer 14: hotkey bindings + status payload, plus the secondary-
+// launch intent that the single-instance plugin re-emits on the
+// resident window when a second copy of the binary is launched.
+// ---------------------------------------------------------------------------
+
+/// Wire shape for the persisted hotkey bindings document. Mirrors
+/// [`crate::hotkey::HotkeyBindings`] exactly so the frontend can
+/// hold an exact replica in its settings store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyBindingsDto {
+    /// Schema version. Bumped when the wire shape changes
+    /// incompatibly.
+    pub schema_version: u32,
+    /// Region-capture shortcut. `None` = unbound.
+    pub region_capture: Option<String>,
+    /// Full-screen capture shortcut. `None` = unbound.
+    pub full_screen_capture: Option<String>,
+    /// Shelf-toggle shortcut. `None` = unbound.
+    pub shelf_toggle: Option<String>,
+    /// Whether the user has paused global shortcuts. Persisted so
+    /// a paused app boots back into the paused state.
+    #[serde(default)]
+    pub paused: bool,
+}
+
+/// Wire shape for the `update_hotkey_bindings` IPC. The frontend
+/// sends the full new bindings body; the Rust core sanitizes and
+/// persists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateHotkeyBindingsRequest {
+    /// New bindings body. Sanitized on receipt so malformed strings
+    /// round-trip to `None`.
+    pub bindings: HotkeyBindingsDto,
+    /// When true, the new bindings are applied to the running
+    /// registry without waiting for the debounced disk write. The
+    /// frontend sets this when the user releases a hotkey-capture
+    /// input.
+    #[serde(default)]
+    pub commit: bool,
+}
+
+/// Wire shape for the registry status returned by
+/// `get_hotkey_status`. Surfaces paused state and the most recent
+/// registration error so the settings UI can render an actionable
+/// message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyRegistryStatusDto {
+    /// Whether global shortcuts are currently registered. False
+    /// when paused OR after a registration failure.
+    pub active: bool,
+    /// Whether the user has paused global shortcuts.
+    pub paused: bool,
+    /// Most recent registration error message. `None` when the
+    /// registry is happy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Conflicting action id when `last_error` is a bind conflict.
+    /// One of `"region_capture"`, `"full_screen_capture"`,
+    /// `"shelf_toggle"`. `None` when no specific action is to blame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_action: Option<String>,
+}
+
+/// Intent that the secondary launch sends to the resident
+/// instance. The Rust core maps each variant onto the same
+/// handlers the tray menu and global shortcuts use, so all entry
+/// points reach the same workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecondaryLaunchIntent {
+    /// Default activation: no specific intent. The resident
+    /// instance just focuses its window.
+    Default,
+    /// Trigger a region capture workflow in the resident instance.
+    CaptureRegion,
+    /// Trigger a full-screen capture workflow in the resident
+    /// instance.
+    CaptureFullScreen,
+    /// Show the shelf history in the resident instance.
+    ShelfHistory,
+    /// Open the settings panel in the resident instance.
+    OpenSettings,
+}
+
+// ---------------------------------------------------------------------------
 // Tracer 13: cache policy, statistics, and clear-cache IPC.
 // ---------------------------------------------------------------------------
 

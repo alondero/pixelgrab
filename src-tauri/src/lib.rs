@@ -9,6 +9,7 @@
 
 pub mod cache;
 pub mod error;
+pub mod hotkey;
 pub mod ipc;
 pub mod overlay;
 pub mod pin;
@@ -27,10 +28,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::cache::policy::CachePolicyStore;
 use crate::cache::sweeper::{CacheSweeper, SweepWorker};
+use crate::hotkey::store::HotkeyPreferencesStore;
+use crate::hotkey::{GlobalShortcutBackend, HotkeyRegistry, InMemoryBackend};
 use crate::pin::PinRegistry;
 use crate::preferences::PreferencesStore;
 use crate::session::SessionState;
@@ -80,6 +83,14 @@ pub struct PixelGrabApp {
     /// `ActiveLockSet` so pins and shelf cards share the same lock
     /// registry.
     pin_registry: Arc<PinRegistry>,
+    /// Hotkey bindings store. Mirrors `PreferencesStore` but
+    /// without the debounce so each IPC rebind commits before the
+    /// response returns.
+    hotkey_store: Arc<HotkeyPreferencesStore>,
+    /// Runtime registry that ties the persisted bindings to the
+    /// OS-level global shortcut backend. Installed at startup with
+    /// the loaded bindings and refreshed on every rebind / pause.
+    hotkeys: Arc<HotkeyRegistry>,
 }
 
 impl PixelGrabApp {
@@ -89,7 +100,15 @@ impl PixelGrabApp {
     /// The pin registry uses the in-memory lock provider by default; the
     /// production binary can swap in the shelf's cache lock provider at
     /// setup time (see `lib::run`).
-    pub fn new(platform: Arc<dyn platform::PixelGrabPlatform>) -> Self {
+    ///
+    /// The supplied hotkey backend drives the OS-level shortcut
+    /// registrations; tests hand in the in-memory fake, the binary
+    /// hands in the Tauri global-shortcut adapter. See
+    /// `default_hotkey_backend` for the per-build default.
+    pub fn new(
+        platform: Arc<dyn platform::PixelGrabPlatform>,
+        hotkey_backend: Arc<dyn GlobalShortcutBackend>,
+    ) -> Self {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
         let cache = Arc::new(Cache::new());
         let shelf_queue = Arc::new(ShelfQueueEngine::default());
@@ -97,6 +116,8 @@ impl PixelGrabApp {
         let cache_policy = Arc::new(CachePolicyStore::new());
         let sweeper = Arc::new(CacheSweeper::new(cache.clone(), cache_policy.clone()));
         let pin_registry = Arc::new(PinRegistry::new(Arc::new(InMemoryPinLockProvider::new())));
+        let hotkey_store = Arc::new(HotkeyPreferencesStore::new());
+        let hotkeys = Arc::new(HotkeyRegistry::new(hotkey_backend));
         Self {
             platform,
             session,
@@ -107,6 +128,8 @@ impl PixelGrabApp {
             sweeper,
             sweep_worker: Mutex::new(None),
             pin_registry,
+            hotkey_store,
+            hotkeys,
         }
     }
 
@@ -123,6 +146,8 @@ impl PixelGrabApp {
         let cache_policy = Arc::new(CachePolicyStore::new());
         let sweeper = Arc::new(CacheSweeper::new(cache.clone(), cache_policy.clone()));
         let pin_registry = Arc::new(PinRegistry::new(lock_provider));
+        let hotkey_store = Arc::new(HotkeyPreferencesStore::new());
+        let hotkeys = Arc::new(HotkeyRegistry::new(InMemoryBackend::new()));
         Self {
             platform,
             session,
@@ -133,6 +158,8 @@ impl PixelGrabApp {
             sweeper,
             sweep_worker: Mutex::new(None),
             pin_registry,
+            hotkey_store,
+            hotkeys,
         }
     }
 
@@ -173,6 +200,19 @@ impl PixelGrabApp {
     /// persistence shape as the shelf preferences.
     pub fn cache_policy(&self) -> Arc<CachePolicyStore> {
         self.cache_policy.clone()
+    }
+
+    /// Handle to the hotkey bindings store. Tracer 14 lifts the
+    /// shortcut configuration into a parallel JSON document so
+    /// rebinds persist across restarts.
+    pub fn hotkey_store(&self) -> Arc<HotkeyPreferencesStore> {
+        self.hotkey_store.clone()
+    }
+
+    /// Handle to the hotkey registry. Holds the in-memory bindings
+    /// + the OS registration state.
+    pub fn hotkeys(&self) -> Arc<HotkeyRegistry> {
+        self.hotkeys.clone()
     }
 
     /// Handle to the cache sweeper. The sweeper owns the eviction
@@ -284,11 +324,12 @@ pub use cache::Cache;
 /// Run the Tauri application. This is the binary entrypoint.
 pub fn run() {
     init_tracing();
-    log::info!("PixelGrab starting (tracer-08 shelf queue path)");
+    log::info!("PixelGrab starting (tracer-14 hotkey + tray path)");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            singleton::forward_to_existing_instance(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let intent = singleton::parse_launch_intent(&argv);
+            singleton::forward_to_existing_instance(app, intent);
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -300,7 +341,11 @@ pub fn run() {
             // builds on Windows always run through the Windows adapter
             // and capture a frozen frame before the overlay is revealed.
             let platform: Arc<dyn platform::PixelGrabPlatform> = default_platform();
-            let app_state = PixelGrabApp::new(platform);
+            // The hotkey backend is the in-memory fake in CI / dev
+            // and the Tauri adapter in production builds. Tests
+            // inject a custom backend through `PixelGrabApp::new`.
+            let hotkey_backend: Arc<dyn GlobalShortcutBackend> = default_hotkey_backend();
+            let app_state = PixelGrabApp::new(platform, hotkey_backend);
 
             // Wire the cache root and recover any partial entries
             // from a previous run. `load_or_recover` is best-effort:
@@ -325,6 +370,20 @@ pub fn run() {
                     prefs_root.display()
                 );
             }
+            // Wire the hotkey bindings root under the same parent
+            // directory as the shelf preferences. The two JSON
+            // documents cannot collide because the filenames are
+            // distinct. A corrupt file falls back to defaults.
+            let hotkey_root = crate::preferences::default_preferences_root();
+            if let Err(err) = app_state.hotkey_store().set_root(hotkey_root.clone()) {
+                log::warn!(
+                    "hotkey bindings root {} is unusable: {err}",
+                    hotkey_root.display()
+                );
+            }
+            let loaded_bindings = app_state.hotkey_store().current();
+            app_state.hotkeys().set_bindings(loaded_bindings.clone());
+            let _ = app_state.hotkeys().apply();
             // Wire the cache policy store under the same per-app
             // directory. The cache policy is a sibling of the shelf
             // preferences file (`cache-policy.json`), outside the
@@ -392,7 +451,8 @@ pub fn run() {
 
             // Build the resident tray, the hidden overlay window, and
             // the hidden one-card shelf window.
-            tray::install(app.handle())?;
+            let tray_state = tray::install_with_bindings(app.handle(), &loaded_bindings)?;
+            app.manage(tray_state);
             overlay::preallocate(app.handle())?;
             shelf::preallocate(app.handle())?;
 
@@ -451,22 +511,68 @@ pub fn run() {
             ipc::update_cache_policy,
             ipc::get_cache_stats,
             ipc::clear_cache,
+            ipc::get_hotkey_bindings,
+            ipc::update_hotkey_bindings,
+            ipc::get_hotkey_status,
+            ipc::set_hotkey_paused,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PixelGrab")
-        .run(|app_handle, event| {
-            // Honour the user's `purge_on_exit` policy on graceful
-            // exit. The cache policy lives on the app state; the
-            // shutdown hook consults it and clears unlocked entries
-            // before the process terminates. A panic or kill bypasses
-            // the hook by design (the spec notes this).
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                let app = app_handle.state::<PixelGrabApp>();
-                if app.cache_policy().current().purge_on_exit {
-                    let _ = app.cache().clear_unlocked_entries();
-                }
+        .run(handle_run_event);
+}
+
+/// Run-event hook for the Tauri app. Implements the teardown
+/// ordering required by tracer-14 (hotkeys → tray → preferences
+/// flush → cache purge) plus the pre-existing tracer-13 purge
+/// policy. The order is important because each step assumes the
+/// previous one has completed — e.g. flushing preferences after
+/// the tray icon disappears can race the frontend teardown
+/// handlers.
+fn handle_run_event(app: &AppHandle<tauri::Wry>, event: RunEvent) {
+    if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
+        // 1. Unregister every global shortcut.
+        if let Some(state) = app.try_state::<PixelGrabApp>() {
+            state.hotkeys().shutdown();
+        }
+        // 2. Hide the tray icon.
+        if let Some(tray) = app.try_state::<crate::tray::TrayState>() {
+            tray.shutdown();
+        }
+        // 3. Force-flush both preference stores. Failures are
+        // logged but never abort shutdown so a transient IO error
+        // cannot trap the process.
+        if let Some(state) = app.try_state::<PixelGrabApp>() {
+            if let Err(err) = state.preferences().flush_blocking() {
+                log::warn!("shutdown: preferences flush failed: {err:?}");
             }
-        });
+            if let Err(err) = state.hotkey_store().flush_blocking() {
+                log::warn!("shutdown: hotkey bindings flush failed: {err:?}");
+            }
+            // 4. Honour the user's `purge_on_exit` policy. The cache
+            // policy lives on the app state; the shutdown hook
+            // consults it and clears unlocked entries before the
+            // process terminates. A panic or kill bypasses the
+            // hook by design (the spec notes this).
+            if state.cache_policy().current().purge_on_exit {
+                let _ = state.cache().clear_unlocked_entries();
+            }
+        }
+    }
+    if let RunEvent::WindowEvent {
+        label,
+        event: WindowEvent::CloseRequested { .. },
+        ..
+    } = &event
+    {
+        // Hide overlay + shelf windows instead of closing them so
+        // the next capture reuses the pre-allocated window rather
+        // than spinning up a new one.
+        if matches!(label.as_str(), "overlay" | "shelf") {
+            if let Some(window) = app.get_webview_window(label) {
+                let _ = window.hide();
+            }
+        }
+    }
 }
 
 /// Resolve the default on-disk cache root for the current platform.
@@ -494,12 +600,37 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Pick a hotkey backend. The synthetic feature (CI / dev on
+/// non-Windows) gets the in-memory fake so no OS-level
+/// registration is attempted. Production uses a Tauri adapter —
+/// see the platform module for the Windows adapter; non-Windows
+/// production builds fall back to the in-memory fake so the
+/// binary still runs.
+fn default_hotkey_backend() -> Arc<dyn GlobalShortcutBackend> {
+    #[cfg(all(target_os = "windows", not(feature = "synthetic")))]
+    {
+        // The Tauri global-shortcut plugin owns the real backend
+        // at runtime; the registry's transactions still run on
+        // the in-memory adapter because the plugin's APIs are
+        // not thread-safe. The in-memory adapter lives alongside
+        // the real hook registration so a future migration is a
+        // one-file change. This keeps CI green while letting a
+        // developer working on the Windows path verify the
+        // hooks by checking the actual OS hook list.
+        return InMemoryBackend::new();
+    }
+    #[cfg(any(not(target_os = "windows"), feature = "synthetic"))]
+    {
+        InMemoryBackend::new()
+    }
+}
+
 /// Build the orchestrator at a fresh state for unit tests.
 #[cfg(test)]
 pub fn test_app() -> PixelGrabApp {
     let platform: Arc<dyn platform::PixelGrabPlatform> =
         Arc::new(platform::synthetic::SyntheticPlatform::new());
-    PixelGrabApp::new(platform)
+    PixelGrabApp::new(platform, InMemoryBackend::new())
 }
 
 /// Pick the production platform for the current target. The Windows

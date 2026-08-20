@@ -10,15 +10,19 @@ import type {
   CommitResponse,
   DragDiagnostics,
   DragRequest,
+  HotkeyBindingsDto,
+  HotkeyRegistryStatusDto,
   IpcResponse,
   PhysicalBounds,
   RequestCaptureIntent,
   RequestCommitIntent,
   RequestOverlayIntent,
+  SecondaryLaunchIntent,
   SessionSnapshot,
   SessionState,
   StartShelfDragIntent,
   StartShelfDragResult,
+  UpdateHotkeyBindingsRequest,
 } from "./types";
 
 describe("IPC type contract", () => {
@@ -366,5 +370,73 @@ describe("IPC type contract", () => {
     const json = JSON.parse(JSON.stringify(resp));
     expect(json.path).toBeUndefined();
     expect(json.pngBytes).toBe(0);
+  });
+});
+
+describe("IPC type contract — hotkey bindings (tracer 14)", () => {
+  it("HotkeyBindingsDto serialises to camelCase", () => {
+    const dto: HotkeyBindingsDto = {
+      schemaVersion: 1,
+      regionCapture: "Ctrl+Shift+S",
+      fullScreenCapture: "Ctrl+Shift+F",
+      shelfToggle: "Ctrl+Shift+L",
+      paused: false,
+    };
+    const json = JSON.parse(JSON.stringify(dto));
+    expect(json.schemaVersion).toBe(1);
+    expect(json.regionCapture).toBe("Ctrl+Shift+S");
+    expect(json.paused).toBe(false);
+  });
+
+  it("HotkeyBindingsDto accepts null bindings", () => {
+    const dto: HotkeyBindingsDto = {
+      schemaVersion: 1,
+      regionCapture: null,
+      fullScreenCapture: null,
+      shelfToggle: null,
+      paused: true,
+    };
+    const json = JSON.parse(JSON.stringify(dto));
+    expect(json.regionCapture).toBeNull();
+    expect(json.paused).toBe(true);
+  });
+
+  it("UpdateHotkeyBindingsRequest matches the Rust wire shape", () => {
+    const payload: UpdateHotkeyBindingsRequest = {
+      bindings: {
+        schemaVersion: 1,
+        regionCapture: "Ctrl+Alt+R",
+        paused: false,
+      },
+    };
+    const json = JSON.parse(JSON.stringify(payload));
+    expect(json.bindings.schemaVersion).toBe(1);
+    expect(json.bindings.regionCapture).toBe("Ctrl+Alt+R");
+  });
+
+  it("HotkeyRegistryStatusDto serialises error fields", () => {
+    const status: HotkeyRegistryStatusDto = {
+      active: false,
+      paused: false,
+      lastError: "registration_failed",
+      conflictingAction: "shelf_toggle",
+    };
+    const json = JSON.parse(JSON.stringify(status));
+    expect(json.active).toBe(false);
+    expect(json.conflictingAction).toBe("shelf_toggle");
+  });
+
+  it("SecondaryLaunchIntent uses tagged kinds on the wire", () => {
+    const intents: SecondaryLaunchIntent[] = [
+      { kind: "default" },
+      { kind: "capture_region" },
+      { kind: "capture_full_screen" },
+      { kind: "shelf_history" },
+      { kind: "open_settings" },
+    ];
+    for (const intent of intents) {
+      const json = JSON.parse(JSON.stringify(intent));
+      expect(json.kind).toBe(intent.kind);
+    }
   });
 });
