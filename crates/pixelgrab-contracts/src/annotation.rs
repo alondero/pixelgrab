@@ -2067,7 +2067,10 @@ mod tests {
     fn blur_leak_guard_at_multiple_secret_widths() {
         // (src_w, src_h, blur_x, blur_y, blur_w, blur_h, blur_radius,
         //  secret_x, secret_width)
-        let cases: [(u32, u32, u32, u32, u32, u32, u32, u32, u32); 4] = [
+        type Case = (
+            u32, u32, u32, u32, u32, u32, u32, u32, u32,
+        );
+        let cases: [Case; 4] = [
             (30, 20, 5, 5, 10, 10, 4, 10, 1),
             (40, 30, 5, 5, 20, 20, 2, 15, 2),
             (60, 40, 10, 10, 30, 30, 6, 25, 4),
@@ -2085,7 +2088,6 @@ mod tests {
             // to `dst` is what we're guarding: the surrounding
             // background is part of the test that the blur region
             // gets replaced.
-            let cx = bx + bw / 2;
             let cy = by + bh / 2;
             let mut src = vec![0u8; (src_w * src_h * 4) as usize];
             for y in 0..src_h {
