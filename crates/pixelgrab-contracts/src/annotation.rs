@@ -428,9 +428,19 @@ fn digit_color_for_luminance(fill: PaintColor) -> PaintColor {
         + 0.7152 * (fill.g as f64 / 255.0)
         + 0.0722 * (fill.b as f64 / 255.0);
     if lum < 0.5 {
-        PaintColor { r: 0xFF, g: 0xFF, b: 0xFF, a: 0xFF }
+        PaintColor {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+            a: 0xFF,
+        }
     } else {
-        PaintColor { r: 0x14, g: 0x14, b: 0x14, a: 0xFF }
+        PaintColor {
+            r: 0x14,
+            g: 0x14,
+            b: 0x14,
+            a: 0xFF,
+        }
     }
 }
 
@@ -454,7 +464,14 @@ fn plot_pixel(rgba: &mut [u8], size: PhysicalSize, x: i32, y: i32, color: PaintC
 
 /// Paint a horizontal segment `[x0, x1)` on row `y`. Coordinates
 /// outside the buffer are clipped.
-fn paint_horizontal(rgba: &mut [u8], size: PhysicalSize, x0: i32, x1: i32, y: i32, color: PaintColor) {
+fn paint_horizontal(
+    rgba: &mut [u8],
+    size: PhysicalSize,
+    x0: i32,
+    x1: i32,
+    y: i32,
+    color: PaintColor,
+) {
     if y < 0 || y as u32 >= size.height {
         return;
     }
@@ -474,7 +491,14 @@ fn paint_horizontal(rgba: &mut [u8], size: PhysicalSize, x0: i32, x1: i32, y: i3
 }
 
 /// Paint a vertical segment `[y0, y1)` on column `x`.
-fn paint_vertical(rgba: &mut [u8], size: PhysicalSize, x: i32, y0: i32, y1: i32, color: PaintColor) {
+fn paint_vertical(
+    rgba: &mut [u8],
+    size: PhysicalSize,
+    x: i32,
+    y0: i32,
+    y1: i32,
+    color: PaintColor,
+) {
     if x < 0 || x as u32 >= size.width {
         return;
     }
@@ -660,13 +684,7 @@ fn paint_digit(
     for (row, bits) in glyph.iter().enumerate() {
         for col in 0..DIGIT_WIDTH {
             if (bits >> (DIGIT_WIDTH - 1 - col)) & 1 == 1 {
-                plot_pixel(
-                    rgba,
-                    size,
-                    origin_x + col,
-                    origin_y + row as i32,
-                    color,
-                );
+                plot_pixel(rgba, size, origin_x + col, origin_y + row as i32, color);
             }
         }
     }
