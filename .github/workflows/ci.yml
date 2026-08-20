@@ -220,3 +220,57 @@ jobs:
             exit 1
           }
           Write-Host "Binary size is reasonable - smoke test passed."
+      - name: Launch smoke test
+        shell: pwsh
+        run: |
+          # Tauri initialises plugins inside `Builder::build()`, which no unit
+          # test reaches - the suite never calls it and never expands
+          # `generate_context!()`. A malformed `tauri.conf.json` therefore
+          # compiles, links, packages and passes every other gate, then aborts
+          # the binary about a second after a user launches it (see issue #44
+          # and src-tauri/tests/tauri_config.rs). Actually starting the process
+          # is the only check that covers that whole class of failure.
+          $binary = "dist-build/pixelgrab.exe"
+          $stderrLog = "smoke-stderr.log"
+          $stdoutLog = "smoke-stdout.log"
+          $proc = Start-Process -FilePath $binary -PassThru `
+            -RedirectStandardError $stderrLog -RedirectStandardOutput $stdoutLog
+          Write-Host "Launched $binary as PID $($proc.Id)."
+          # Poll instead of sleeping flat so a startup panic fails fast rather
+          # than burning the whole window.
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 1
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+          }
+          $proc.Refresh()
+          # Read stderr before stopping the process - a forced kill can lose
+          # whatever has not been flushed.
+          $errText = if (Test-Path $stderrLog) { Get-Content $stderrLog -Raw } else { "" }
+          Write-Host "----- stderr -----"
+          Write-Host $errText
+          Write-Host "------------------"
+          if ($proc.HasExited) {
+            # WaitForExit() flushes the exit code onto the process object;
+            # without it ExitCode can come back empty on an aborted process.
+            $proc.WaitForExit()
+            $code = if ($null -ne $proc.ExitCode) { $proc.ExitCode } else { "unknown" }
+            Write-Error "pixelgrab.exe exited with code $code during startup - it must stay running. See stderr above."
+            exit 1
+          }
+          Stop-Process -Id $proc.Id -Force
+          if ($errText -notmatch "PixelGrab starting") {
+            Write-Error "pixelgrab.exe stayed up but never logged its startup line - startup did not complete."
+            exit 1
+          }
+          Write-Host "Launch smoke test passed - binary survived startup."
+      - name: Upload smoke test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: |
+            smoke-stderr.log
+            smoke-stdout.log
+          if-no-files-found: ignore
+          retention-days: 7

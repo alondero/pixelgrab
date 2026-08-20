@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
 
           expected_name="Protect main - CI must pass"
-          expected_checks=("Frontend (lint, typecheck, test)" "Rust (fmt, clippy, test)")
+          expected_checks=("Frontend (lint, typecheck, test)" "Rust (fmt, clippy, test)" "Packaged-app smoke test")
 
           # The list endpoint returns summary metadata only (no rule bodies).
           # Fetch the summary first to find the ruleset id, then the full
