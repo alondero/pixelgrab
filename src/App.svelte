@@ -1,21 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { session } from "$lib/stores/session.svelte";
   import { requestCapture, requestCancel, getSessionSnapshot } from "$lib/ipc/commands";
-  import type { CaptureDiagnostics, IpcResponse } from "$lib/ipc/types";
+  import type { CaptureDiagnostics, IpcResponse, SecondaryLaunchIntent } from "$lib/ipc/types";
   import SettingsPanel from "$lib/preferences/SettingsPanel.svelte";
+  import HotkeyPanel from "$lib/hotkey/HotkeyPanel.svelte";
   import { createPreferencesStore } from "$lib/preferences/store.svelte";
+  import { createHotkeyStore } from "$lib/hotkey/store.svelte";
 
   let lastCaptureId = $state<string | null>(null);
   let lastCaptureBounds = $state<string | null>(null);
   let diagnostics = $state<CaptureDiagnostics | null>(null);
   let pendingError = $state<string | null>(null);
+  let settingsOpen = $state(false);
   const preferences = createPreferencesStore();
+  const hotkeys = createHotkeyStore();
 
-  async function onCaptureIntent() {
+  async function onCaptureIntent(intent: "region" | "full_screen" = "region") {
     pendingError = null;
-    const response = await requestCapture({ intent: "region" });
+    const response = await requestCapture({ intent });
     if (response.status === "ok") {
       lastCaptureId = response.data.capture.captureId;
       lastCaptureBounds = `${response.data.capture.bounds.size.width}x${response.data.capture.bounds.size.height}`;
@@ -46,30 +50,81 @@
     }
   }
 
+  // Route a SecondaryLaunchIntent through the same handlers the
+  // IPC layer exposes. Tray clicks, global shortcuts, and
+  // secondary launches all land here so the user sees identical
+  // behaviour regardless of entry point.
+  function handleSecondaryIntent(intent: SecondaryLaunchIntent) {
+    switch (intent.kind) {
+      case "capture_region":
+        void onCaptureIntent("region");
+        break;
+      case "capture_full_screen":
+        void onCaptureIntent("full_screen");
+        break;
+      case "shelf_history":
+        // The shelf window is managed by the Rust core; the
+        // frontend just refreshes its snapshot so the user sees
+        // the latest cards.
+        void refreshSnapshot();
+        break;
+      case "open_settings":
+        settingsOpen = true;
+        break;
+      case "default":
+        // No-op: the Rust core has already focused the window.
+        break;
+    }
+  }
+
+  function handlePauseToggle() {
+    void hotkeys.togglePaused();
+  }
+
   onMount(() => {
-    const unlisten = listen("pixelgrab://request-capture", () => {
-      onCaptureIntent();
+    const unlistenCapture = listen("pixelgrab://request-capture", () => {
+      void onCaptureIntent("region");
+    });
+    const unlistenSecondary: Promise<UnlistenFn> = listen(
+      "pixelgrab://secondary-launch",
+      (event) => {
+        handleSecondaryIntent(event.payload as SecondaryLaunchIntent);
+      },
+    );
+    const unlistenPause = listen("pixelgrab://pause-hotkeys-toggled", () => {
+      handlePauseToggle();
     });
     refreshSnapshot();
     void preferences.refresh();
+    void hotkeys.refresh();
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenCapture.then((fn) => fn());
+      unlistenSecondary.then((fn) => fn());
+      unlistenPause.then((fn) => fn());
     };
   });
+
+  function openSettings() {
+    settingsOpen = true;
+  }
 </script>
 
 <main class="app">
   <h1>PixelGrab</h1>
   <p class="muted">
-    Tracer 02 capture pipeline. The tray, shortcut, and overlay wiring drive a real Windows region
-    capture through the xcap-backed adapter; the overlay renders a dim mask, crosshair, and resize
-    handles and honours Ctrl+C commit and staged Escape.
+    Tracer 14 — configurable hotkeys, dynamic tray, and secondary-launch forwarding. The shortcut
+    and tray-menu paths share a single intent handler so the three entry points are always
+    equivalent.
   </p>
 
   <section class="controls">
-    <button type="button" onclick={onCaptureIntent}> Trigger capture </button>
+    <button type="button" onclick={() => onCaptureIntent("region")}> Trigger capture </button>
+    <button type="button" onclick={() => onCaptureIntent("full_screen")}>
+      Capture full screen
+    </button>
     <button type="button" onclick={onCancelIntent}> Cancel </button>
     <button type="button" onclick={refreshSnapshot}>Refresh snapshot</button>
+    <button type="button" onclick={openSettings} data-testid="open-settings"> Settings </button>
   </section>
 
   <section class="status">
@@ -97,7 +152,10 @@
     {/if}
   </section>
 
-  <SettingsPanel store={preferences} />
+  {#if settingsOpen}
+    <SettingsPanel store={preferences} />
+    <HotkeyPanel store={hotkeys} />
+  {/if}
 </main>
 
 <style>
@@ -114,6 +172,7 @@
     margin: 1rem 0;
     display: flex;
     gap: 0.5rem;
+    flex-wrap: wrap;
   }
   .status {
     border-top: 1px solid #ddd;

@@ -230,6 +230,46 @@ export interface UpdateShelfPreferencesRequest {
   commit?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Hotkey bindings (tracer 14). Wire shape must mirror
+// `crates/pixelgrab-contracts/src/hotkey.rs`. Round-trip coverage lives in
+// `src/lib/hotkey/store.test.ts` and the Rust-side contract tests.
+// ---------------------------------------------------------------------------
+
+export interface HotkeyBindingsDto {
+  schemaVersion: number;
+  regionCapture?: string | null;
+  fullScreenCapture?: string | null;
+  shelfToggle?: string | null;
+  paused?: boolean;
+}
+
+export interface UpdateHotkeyBindingsRequest {
+  bindings: HotkeyBindingsDto;
+}
+
+export interface HotkeyRegistryStatusDto {
+  active: boolean;
+  paused: boolean;
+  lastError?: string;
+  conflictingAction?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Secondary-launch intent (tracer 14). Mirrors
+// `pixelgrab_contracts::SecondaryLaunchIntent`. The single-instance
+// plugin emits one of these on the resident process when a secondary
+// process is launched, so the frontend can route through the same
+// workflow as the tray menu and shortcuts.
+// ---------------------------------------------------------------------------
+
+export type SecondaryLaunchIntent =
+  | { kind: "default" }
+  | { kind: "capture_region" }
+  | { kind: "capture_full_screen" }
+  | { kind: "shelf_history" }
+  | { kind: "open_settings" };
+
 export interface RequestCaptureIntent {
   intent: "region" | "full_screen";
 }
