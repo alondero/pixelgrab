@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::annotation::Annotation;
 use crate::cache::{CacheEntryMetadata, LockOwner, ShelfId, ShelfPosition};
 use crate::capture::CaptureResolution;
 use crate::coordinate::PhysicalBounds;
@@ -139,6 +140,10 @@ pub struct RequestOverlayIntent {
 pub struct RequestCommitIntent {
     /// Final physical crop.
     pub crop: PhysicalBounds,
+    /// Final annotation list to flatten onto the frozen framebuffer.
+    /// Empty when the user committed without annotations.
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
     /// Whether to retain the capture on the shelf.
     pub to_shelf: bool,
     /// Whether to copy the flattened PNG to the clipboard.
@@ -155,6 +160,9 @@ pub struct RequestCommitIntent {
 pub struct CommitRequest {
     /// Final physical crop.
     pub crop: PhysicalBounds,
+    /// Final annotation list to flatten onto the frozen framebuffer.
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
     /// Whether to retain the capture on the shelf.
     pub to_shelf: bool,
     /// Whether to copy the flattened PNG to the clipboard.

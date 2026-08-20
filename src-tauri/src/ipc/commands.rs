@@ -284,6 +284,7 @@ pub fn request_commit(
 ) -> IpcResponse<CommitResponse> {
     let commit_request = CommitRequest {
         crop: payload.crop,
+        annotations: payload.annotations,
         to_shelf: payload.to_shelf,
         to_clipboard: payload.to_clipboard,
         save_as: payload.save_as,
@@ -739,6 +740,14 @@ fn commit(
             ),
         ));
     }
+
+    // Tracer 04: flatten the annotations onto the cropped framebuffer
+    // before any downstream consumer (PNG, clipboard, shelf cache)
+    // reads the bytes. `flatten_annotations` is a no-op when the
+    // annotation list is empty, so no early-return is needed. The
+    // flatten is deterministic in (z_order, id) order so a replay
+    // produces a byte-identical PNG.
+    let rgba = pixelgrab_contracts::flatten_annotations(&rgba, size, &request.annotations);
 
     let mut outcome = CommitOutcome {
         capture_id: capture_id.clone(),

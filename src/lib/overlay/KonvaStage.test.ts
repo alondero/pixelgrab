@@ -24,6 +24,8 @@ vi.mock("konva", () => {
     add() {}
     draw() {}
     destroy() {}
+    destroyChildren() {}
+    position(_v?: { x: number; y: number }) {}
   }
   class FakeImage {
     _set = vi.fn();
@@ -57,6 +59,11 @@ vi.mock("konva", () => {
     points(_v?: number[]) {}
     visible(_v?: boolean) {}
   }
+  class FakeGroup {
+    add() {}
+  }
+  class FakeCircle {}
+  class FakeText {}
   return {
     default: {
       Stage: FakeStage,
@@ -64,6 +71,9 @@ vi.mock("konva", () => {
       Image: FakeImage,
       Rect: FakeRect,
       Line: FakeLine,
+      Group: FakeGroup,
+      Circle: FakeCircle,
+      Text: FakeText,
     },
   };
 });
