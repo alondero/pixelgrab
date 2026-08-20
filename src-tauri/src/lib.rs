@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::cache::policy::CachePolicyStore;
+use crate::cache::sweeper::{CacheSweeper, SweepWorker};
 use crate::pin::PinRegistry;
 use crate::preferences::PreferencesStore;
 use crate::session::SessionState;
@@ -60,6 +62,18 @@ pub struct PixelGrabApp {
     /// Tracer 12. The store owns the in-memory state and debounces
     /// disk writes; `flush_blocking` is called during shutdown.
     preferences: Arc<PreferencesStore>,
+    /// Persistent cache policy (max bytes / max entries / max age /
+    /// low-water ratio / sweep interval / purge-on-exit).
+    /// Tracer 13. Same persistence shape as the shelf preferences.
+    cache_policy: Arc<CachePolicyStore>,
+    /// Cache sweeper. Tracer 13. Owns the eviction algorithm and
+    /// the periodic background worker. The startup recovery sweep
+    /// is run on the worker thread so the tray can appear without
+    /// waiting for the debris to be reaped.
+    sweeper: Arc<CacheSweeper>,
+    /// Handle to the periodic background worker. Drop or `stop` to
+    /// terminate the worker thread.
+    sweep_worker: Mutex<Option<SweepWorker>>,
     /// Pin registry. Tracer 11 ships its own per-pin view model and
     /// cache-lock lifecycle; production wiring will replace the
     /// in-memory lock provider with a shim over the cache's
@@ -80,6 +94,8 @@ impl PixelGrabApp {
         let cache = Arc::new(Cache::new());
         let shelf_queue = Arc::new(ShelfQueueEngine::default());
         let preferences = Arc::new(PreferencesStore::new());
+        let cache_policy = Arc::new(CachePolicyStore::new());
+        let sweeper = Arc::new(CacheSweeper::new(cache.clone(), cache_policy.clone()));
         let pin_registry = Arc::new(PinRegistry::new(Arc::new(InMemoryPinLockProvider::new())));
         Self {
             platform,
@@ -87,6 +103,9 @@ impl PixelGrabApp {
             cache,
             shelf_queue,
             preferences,
+            cache_policy,
+            sweeper,
+            sweep_worker: Mutex::new(None),
             pin_registry,
         }
     }
@@ -101,6 +120,8 @@ impl PixelGrabApp {
         let cache = Arc::new(Cache::new());
         let shelf_queue = Arc::new(ShelfQueueEngine::default());
         let preferences = Arc::new(PreferencesStore::new());
+        let cache_policy = Arc::new(CachePolicyStore::new());
+        let sweeper = Arc::new(CacheSweeper::new(cache.clone(), cache_policy.clone()));
         let pin_registry = Arc::new(PinRegistry::new(lock_provider));
         Self {
             platform,
@@ -108,6 +129,9 @@ impl PixelGrabApp {
             cache,
             shelf_queue,
             preferences,
+            cache_policy,
+            sweeper,
+            sweep_worker: Mutex::new(None),
             pin_registry,
         }
     }
@@ -141,6 +165,34 @@ impl PixelGrabApp {
     /// persistence.
     pub fn preferences(&self) -> Arc<PreferencesStore> {
         self.preferences.clone()
+    }
+
+    /// Handle to the cache policy store. Tracer 13 surfaces user
+    /// cache bounds (max bytes / max entries / max age / low-water
+    /// ratio / sweep interval / purge-on-exit) with the same
+    /// persistence shape as the shelf preferences.
+    pub fn cache_policy(&self) -> Arc<CachePolicyStore> {
+        self.cache_policy.clone()
+    }
+
+    /// Handle to the cache sweeper. The sweeper owns the eviction
+    /// algorithm; the periodic worker is attached via
+    /// [`PixelGrabApp::install_sweeper`].
+    pub fn sweeper(&self) -> Arc<CacheSweeper> {
+        self.sweeper.clone()
+    }
+
+    /// Install the periodic background worker. Idempotent: a second
+    /// call replaces the existing worker (the previous worker is
+    /// stopped first). Safe to call after a policy update so the
+    /// new interval takes effect.
+    pub fn install_sweeper(&self) {
+        let mut guard = self.sweep_worker.lock();
+        if let Some(prev) = guard.take() {
+            prev.stop();
+        }
+        let worker = self.sweeper.start_periodic();
+        *guard = Some(worker);
     }
 }
 
@@ -271,6 +323,40 @@ pub fn run() {
                     prefs_root.display()
                 );
             }
+            // Wire the cache policy store under the same per-app
+            // directory. The cache policy is a sibling of the shelf
+            // preferences file (`cache-policy.json`), outside the
+            // cache root so a partial cache reap cannot delete the
+            // user's policy.
+            let policy_root = crate::preferences::default_preferences_root();
+            if let Err(err) = app_state.cache_policy().set_root(policy_root.clone()) {
+                log::warn!(
+                    "cache policy root {} is unusable: {err}",
+                    policy_root.display()
+                );
+            }
+            // Bootstrap the cache policy file from the defaults when
+            // the user has never opened the settings panel. The
+            // loader returns the defaults on a missing file so this
+            // is a no-op for the common path; the explicit write
+            // makes the policy file discoverable on disk for tests.
+            app_state.cache_policy().flush_blocking().ok();
+            // Non-blocking startup recovery: the sweeper runs on its
+            // own thread so the tray can appear without waiting for
+            // debris reaping. The periodic worker is installed
+            // immediately after.
+            let sweeper = app_state.sweeper().clone();
+            let cache_for_sweeper = app_state.cache().clone();
+            let _recovery_handle = tauri::async_runtime::spawn_blocking(move || {
+                if let Err(err) = sweeper.recover_startup() {
+                    log::warn!("cache startup recovery failed: {err}");
+                }
+                // Touch the cache handle so the lifetime is
+                // explicit: the spawned closure owns the cache
+                // reference for as long as the recovery runs.
+                let _ = cache_for_sweeper.stats();
+            });
+            app_state.install_sweeper();
             // Apply the loaded timer config to the queue so cards
             // added immediately after startup honour the persisted
             // lifetime. A zero lifetime (auto-dismiss off) leaves the
@@ -352,6 +438,10 @@ pub fn run() {
             ipc::list_pins,
             ipc::pin_action,
             ipc::notify_pin_display_change,
+            ipc::get_cache_policy,
+            ipc::update_cache_policy,
+            ipc::get_cache_stats,
+            ipc::clear_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");

@@ -568,32 +568,39 @@ impl Cache {
     /// entry directory if no other locks remain. The cached lock guard
     /// is dropped here so the dismissal truly releases the lock.
     pub fn dismiss(&self, shelf_id: &str) -> PlatformResult<super::locks::DismissOutcome> {
-        let mut inner = self.inner.lock();
-        // Release the cache-owned shelf guard first so the lock count
-        // decrements before `try_dismiss` runs.
-        inner.shelf_guards.remove(shelf_id);
-        let outcome = inner.locks.try_dismiss(shelf_id);
-        if outcome.reason == "removed" {
-            if let Some(entry) = inner.entries.get(shelf_id) {
-                let dir = PathBuf::from(&entry.png_path)
-                    .parent()
-                    .map(|p| p.to_path_buf());
-                if let Some(dir) = dir {
-                    drop(inner); // release the cache lock before
-                                 // the recursive delete so a slow
-                                 // disk doesn't block other calls.
-                    let _ = fs::remove_dir_all(&dir);
+        // Decide the directory to remove (if any) BEFORE taking the
+        // lock, so the recursive delete runs lock-free. The cache's
+        // mutex is not re-entrant, so we cannot hold it across the
+        // `fs::remove_dir_all` call and re-acquire afterward — we
+        // must drop it first.
+        let dir_to_remove: Option<PathBuf> = {
+            let inner = self.inner.lock();
+            inner
+                .entries
+                .get(shelf_id)
+                .map(|entry| PathBuf::from(&entry.png_path))
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        };
+        {
+            let mut inner = self.inner.lock();
+            // Release the cache-owned shelf guard first so the lock
+            // count decrements before `try_dismiss` runs.
+            inner.shelf_guards.remove(shelf_id);
+            let outcome = inner.locks.try_dismiss(shelf_id);
+            if outcome.removed {
+                inner.entries.remove(shelf_id);
+            }
+            // `inner` is dropped here so the recursive delete below
+            // doesn't hold the cache lock.
+            drop(inner);
+            if outcome.removed {
+                if let Some(dir) = &dir_to_remove {
+                    let _ = fs::remove_dir_all(dir);
                 }
             }
+            Ok(outcome)
         }
-        // Re-acquire to update the in-memory map.
-        let mut inner = self.inner.lock();
-        if outcome.removed {
-            inner.entries.remove(shelf_id);
-        }
-        Ok(outcome)
     }
-
     /// Snapshot of the current entries.
     pub fn entries(&self) -> Vec<PublicCacheEntry> {
         self.inner.lock().entries.values().cloned().collect()
@@ -602,6 +609,184 @@ impl Cache {
     /// Single-entry lookup by shelf id.
     pub fn entry(&self, shelf_id: &str) -> Option<PublicCacheEntry> {
         self.inner.lock().entries.get(shelf_id).cloned()
+    }
+
+    /// Live snapshot of the cache's usage. Used by the sweeper to
+    /// decide whether pruning is needed and surfaced to the frontend
+    /// via the `get_cache_stats` IPC.
+    ///
+    /// The `locked_count` counts entries that have at least one
+    /// non-`Shelf` lock owner (editor / drag / pin). The sweeper
+    /// skips these so the user's in-progress work is preserved.
+    pub fn stats(&self) -> pixelgrab_contracts::CacheStats {
+        let inner = self.inner.lock();
+        let mut total_bytes: u64 = 0;
+        let mut oldest_created_at_ms: Option<i64> = None;
+        let mut newest_access_at_ms: Option<i64> = None;
+        let mut locked_count: u32 = 0;
+        for entry in inner.entries.values() {
+            total_bytes = total_bytes.saturating_add(entry.size_bytes);
+            oldest_created_at_ms = Some(
+                oldest_created_at_ms
+                    .map_or(entry.created_at_ms, |cur| cur.min(entry.created_at_ms)),
+            );
+            newest_access_at_ms = Some(
+                newest_access_at_ms
+                    .map_or(entry.last_access_at_ms, |cur| {
+                        cur.max(entry.last_access_at_ms)
+                    }),
+            );
+            let owners = inner
+                .locks
+                .owners_of(&entry.shelf_id);
+            if owners.iter().any(|o| *o != pixelgrab_contracts::LockOwner::Shelf) {
+                locked_count = locked_count.saturating_add(1);
+            }
+        }
+        pixelgrab_contracts::CacheStats {
+            total_bytes,
+            entry_count: inner.entries.len() as u32,
+            locked_count,
+            oldest_created_at_ms,
+            newest_access_at_ms,
+        }
+    }
+
+    /// Look up the byte size of an entry from disk. The in-memory
+    /// `size_bytes` is the source of truth for the stats and the
+    /// sweeper, but the recovery sweep uses this to count the bytes
+    /// it is about to reclaim so the `bytes_reclaimed` field is
+    /// accurate even when the in-memory map is out of sync.
+    pub fn entry_size_bytes(&self, shelf_id: &str) -> Option<u64> {
+        self.inner.lock().entries.get(shelf_id).map(|e| e.size_bytes)
+    }
+
+    /// Mark the provided entries as accessed at `now_ms`. Called by
+    /// the shelf queue engine when a card is hovered or shown so the
+    /// sweep's LRU order tracks the user's recent attention rather
+    /// than the wall-clock time the entry was first committed.
+    pub fn touch_entries(&self, shelf_ids: &[String], now_ms: i64) {
+        let mut inner = self.inner.lock();
+        for shelf_id in shelf_ids {
+            if let Some(entry) = inner.entries.get_mut(shelf_id) {
+                entry.last_access_at_ms = now_ms;
+            }
+        }
+    }
+
+    /// Sweep debris left behind by a crash. Variants removed:
+    ///
+    /// - Stale `*.tmp` files inside the cache root (atomic-write
+    ///   leftovers from a commit that crashed mid-write).
+    /// - Directories without a manifest (still owned by
+    ///   `load_or_recover`; this path is a no-op for them).
+    /// - Zero-byte `capture.png` or `metadata.json` files inside
+    ///   entry directories.
+    /// - Empty entry directories (no files at all).
+    ///
+    /// Each category is reported separately so the caller can log a
+    /// useful summary without leaking the cache root. The sweep
+    /// continues past per-file failures so a single permission error
+    /// on one file cannot strand the others.
+    pub fn recover_debris(&self) -> PlatformResult<pixelgrab_contracts::SweepOutcome> {
+        let root = self.inner.lock().root.clone();
+        let Some(root) = root else {
+            return Ok(pixelgrab_contracts::SweepOutcome::default());
+        };
+        let mut outcome = pixelgrab_contracts::SweepOutcome::default();
+        if !root.exists() {
+            return Ok(outcome);
+        }
+        let read_dir = match fs::read_dir(&root) {
+            Ok(d) => d,
+            Err(err) => {
+                return Err(PlatformError::from(CacheError::BadRoot(format!(
+                    "read_dir({}): {err}",
+                    root.display()
+                ))));
+            }
+        };
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_err) => {
+                    outcome.partial_failures = outcome.partial_failures.saturating_add(1);
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.is_file() {
+                // Stale `.tmp` file at the root (atomic-write leftover).
+                if path.extension().and_then(|s| s.to_str()) == Some("tmp") {
+                    if let Ok(meta) = fs::metadata(&path) {
+                        outcome.bytes_reclaimed =
+                            outcome.bytes_reclaimed.saturating_add(meta.len());
+                    }
+                    if fs::remove_file(&path).is_err() {
+                        outcome.partial_failures =
+                            outcome.partial_failures.saturating_add(1);
+                    } else {
+                        outcome.tmp_files_removed =
+                            outcome.tmp_files_removed.saturating_add(1);
+                    }
+                }
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest_path = path.join(file_names::MANIFEST_JSON);
+            if manifest_path.exists() {
+                // Durable entry — scan for zero-byte assets inside.
+                outcome.zero_byte_assets_removed = outcome
+                    .zero_byte_assets_removed
+                    .saturating_add(reap_zero_byte_assets(&path));
+                // Empty entry directory (manifest present but no
+                // assets) is a corruption we can self-heal.
+                outcome.unindexed_dirs_removed = outcome
+                    .unindexed_dirs_removed
+                    .saturating_add(reap_empty_assets(&path));
+                continue;
+            }
+            // Otherwise this is a partial entry — `load_or_recover`
+            // removed it. Leave it here so the startup recovery
+            // owns the reaping path.
+        }
+        Ok(outcome)
+    }
+
+    /// Manually clear every *unlocked* entry. Used by the
+    /// `clear_cache` IPC. Locked entries (shelf + editor / drag /
+    /// pin) are not touched — the sweep outcome records the
+    /// survivors so the UI can explain "X entries kept because they
+    /// are in use".
+    pub fn try_clear(&self) -> pixelgrab_contracts::SweepOutcome {
+        let mut outcome = pixelgrab_contracts::SweepOutcome::default();
+        // Snapshot the ids up front so we don't mutate the map
+        // while iterating.
+        let shelf_ids: Vec<String> = self
+            .inner
+            .lock()
+            .entries
+            .keys()
+            .cloned()
+            .collect();
+        for shelf_id in shelf_ids {
+            let outcome_one = match self.dismiss(&shelf_id) {
+                Ok(o) => o,
+                Err(_err) => {
+                    outcome.partial_failures = outcome.partial_failures.saturating_add(1);
+                    continue;
+                }
+            };
+            if outcome_one.removed {
+                outcome.quota_evicted = outcome.quota_evicted.saturating_add(1);
+                if let Some(bytes) = self.entry_size_bytes(&shelf_id) {
+                    outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(bytes);
+                }
+            }
+        }
+        outcome
     }
 
     /// Resolve the primary monitor id for the given layout. Picks the
@@ -766,6 +951,55 @@ fn encode_png(rgba: &[u8], size: PhysicalSize) -> PlatformResult<Vec<u8>> {
         }
     }
     Ok(buf)
+}
+
+/// Remove zero-byte `capture.png` or `metadata.json` files inside an
+/// entry directory. Stale `*.tmp` siblings are also reaped. Returns
+/// the number of bytes reclaimed. Failures are silently swallowed so
+/// a single permission error does not strand the rest of the sweep.
+fn reap_zero_byte_assets(entry_dir: &Path) -> u32 {
+    let mut removed = 0u32;
+    for name in [file_names::CAPTURE_PNG, file_names::METADATA_JSON] {
+        let path = entry_dir.join(name);
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() == 0 {
+            let _ = fs::remove_file(&path);
+            removed = removed.saturating_add(1);
+        }
+    }
+    // Stale `*.tmp` files inside an entry dir (atomic-write leftover).
+    if let Ok(read_dir) = fs::read_dir(entry_dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().and_then(|s| s.to_str()) == Some("tmp")
+            {
+                let _ = fs::remove_file(&path);
+                removed = removed.saturating_add(1);
+            }
+        }
+    }
+    removed
+}
+
+/// Remove an entry directory that has a manifest but no asset files
+/// (the cache can never repaint anything from such a directory). Used
+/// as a self-heal path for the recovery sweep. Returns 1 when the
+/// directory was removed, 0 otherwise.
+fn reap_empty_assets(entry_dir: &Path) -> u32 {
+    let has_assets = entry_dir.join(file_names::CAPTURE_PNG).exists()
+        || entry_dir.join(file_names::METADATA_JSON).exists();
+    if has_assets {
+        return 0;
+    }
+    if fs::remove_dir_all(entry_dir).is_ok() {
+        1
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
