@@ -11,6 +11,7 @@ pub mod cache;
 pub mod error;
 pub mod ipc;
 pub mod overlay;
+pub mod pin;
 pub mod platform;
 pub mod preferences;
 pub mod session;
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::pin::PinRegistry;
 use crate::preferences::PreferencesStore;
 use crate::session::SessionState;
 use crate::shelf::queue::ShelfQueueEngine;
@@ -41,6 +43,7 @@ pub const SHELF_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Re-exported types for downstream tests and binaries.
 pub use crate::error::PixelGrabError;
+pub use crate::pin::{InMemoryPinLockProvider, PinLockGuard};
 pub use crate::session::{EscapeAction, SessionOrchestrator};
 
 /// Application builder used by both the binary and tests.
@@ -57,23 +60,55 @@ pub struct PixelGrabApp {
     /// Tracer 12. The store owns the in-memory state and debounces
     /// disk writes; `flush_blocking` is called during shutdown.
     preferences: Arc<PreferencesStore>,
+    /// Pin registry. Tracer 11 ships its own per-pin view model and
+    /// cache-lock lifecycle; production wiring will replace the
+    /// in-memory lock provider with a shim over the cache's
+    /// `ActiveLockSet` so pins and shelf cards share the same lock
+    /// registry.
+    pin_registry: Arc<PinRegistry>,
 }
 
 impl PixelGrabApp {
     /// Construct a new builder with the given platform implementation.
     /// The cache root must be set with [`PixelGrabApp::set_cache_root`]
     /// before the cache is used; the Tauri `run` setup hook does this.
+    /// The pin registry uses the in-memory lock provider by default; the
+    /// production binary can swap in the shelf's cache lock provider at
+    /// setup time (see `lib::run`).
     pub fn new(platform: Arc<dyn platform::PixelGrabPlatform>) -> Self {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
         let cache = Arc::new(Cache::new());
         let shelf_queue = Arc::new(ShelfQueueEngine::default());
         let preferences = Arc::new(PreferencesStore::new());
+        let pin_registry = Arc::new(PinRegistry::new(Arc::new(InMemoryPinLockProvider::new())));
         Self {
             platform,
             session,
             cache,
             shelf_queue,
             preferences,
+            pin_registry,
+        }
+    }
+
+    /// Build with a custom pin lock provider. Used by the production
+    /// binary when the shelf's cache lock is wired in.
+    pub fn with_pin_lock_provider(
+        platform: Arc<dyn platform::PixelGrabPlatform>,
+        lock_provider: Arc<dyn pixelgrab_contracts::PinLockProvider>,
+    ) -> Self {
+        let session = Arc::new(SessionOrchestrator::new(platform.clone()));
+        let cache = Arc::new(Cache::new());
+        let shelf_queue = Arc::new(ShelfQueueEngine::default());
+        let preferences = Arc::new(PreferencesStore::new());
+        let pin_registry = Arc::new(PinRegistry::new(lock_provider));
+        Self {
+            platform,
+            session,
+            cache,
+            shelf_queue,
+            preferences,
+            pin_registry,
         }
     }
 
@@ -182,6 +217,11 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
         };
         let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
     }
+
+    /// Handle to the pin registry.
+    pub fn pin_registry(&self) -> Arc<PinRegistry> {
+        self.pin_registry.clone()
+    }
 }
 
 /// Re-export so tests and the IPC layer can name `Cache` directly.
@@ -279,6 +319,12 @@ pub fn run() {
                 ticker_prefs,
                 app.handle().clone(),
             );
+
+            // The frontend subscribes to monitor-change events and
+            // forwards the new work area to the registry via the
+            // `notify_pin_display_change` IPC command. The registry's
+            // `handle_display_change` re-anchors orphan pins without
+            // resetting zoom or opacity.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -299,6 +345,13 @@ pub fn run() {
             ipc::start_shelf_drag,
             ipc::get_shelf_preferences,
             ipc::update_shelf_preferences,
+            ipc::open_pin,
+            ipc::close_pin,
+            ipc::apply_pin_command,
+            ipc::get_pin,
+            ipc::list_pins,
+            ipc::pin_action,
+            ipc::notify_pin_display_change,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixelGrab");
