@@ -85,7 +85,7 @@ pub fn show_queue<R: Runtime>(app: &AppHandle<R>, position: &ShelfPosition) -> t
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShelfCardView {
-    /// Shelf card id (UUID v4).
+    /// Shelf card id (UUID v4) the entry was committed under.
     pub shelf_id: ShelfId,
     /// Capture id (UUID v4) the card represents.
     pub capture_id: String,
@@ -101,9 +101,15 @@ pub struct ShelfCardView {
     pub metadata: pixelgrab_contracts::CacheEntryMetadata,
 }
 
-impl ShelfCardView {
-    /// Build a view from a public `CacheEntry`.
-    pub fn from_entry(entry: &pixelgrab_contracts::CacheEntry) -> Self {
+impl From<&pixelgrab_contracts::CacheEntry> for ShelfCardView {
+    /// Project a durable `CacheEntry` down to the one-card view the
+    /// shelf webview renders. This is a hand-rolled subset projection,
+    /// not field-for-field — the queue engine only needs the fields the
+    /// card displays, so `bitmap_path`, `size`, `last_access_at_ms`,
+    /// and `monitor_id` are deliberately dropped. Centralising the
+    /// projection here means a new field on `CacheEntry` does not bleed
+    /// through into the wire shape unless the projection is updated.
+    fn from(entry: &pixelgrab_contracts::CacheEntry) -> Self {
         Self {
             shelf_id: entry.shelf_id.clone(),
             capture_id: entry.capture_id.clone(),

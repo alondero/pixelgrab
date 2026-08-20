@@ -1106,6 +1106,32 @@ mod tests {
     }
 
     #[test]
+    fn bad_root_display_carries_path() {
+        // Regression guard for issue #52: the `set_cache_root` warn
+        // log relies on `CacheError::BadRoot`'s `Display` carrying the
+        // cache root path, so the setup hook can log `{err}` without
+        // re-injecting the path. If this test ever fails, the
+        // `src-tauri/src/lib.rs` startup log must be updated to keep
+        // the path on the wire.
+        let fs = IsolatedFilesystem::new("cache-bad-root").expect("fs");
+        let file_path = fs.root().join("not-a-directory.txt");
+        std::fs::write(&file_path, b"blocks the mkdir").expect("seed");
+        let cache = Cache::new();
+        let err = cache
+            .set_cache_root(Some(file_path.clone()))
+            .expect_err("set_cache_root should fail when the path is a file");
+        let message = err.to_string();
+        assert!(
+            message.contains(file_path.display().to_string().as_str()),
+            "BadRoot Display must carry the cache root path; got: {message}",
+        );
+        assert!(
+            message.contains("cache root"),
+            "BadRoot Display must keep the `cache root` prefix so the log remains self-describing; got: {message}",
+        );
+    }
+
+    #[test]
     fn commit_publishes_entry_and_keeps_lock() {
         let fs = IsolatedFilesystem::new("cache-commit").expect("fs");
         let cache = Cache::new();

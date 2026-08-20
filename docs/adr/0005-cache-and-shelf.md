@@ -58,6 +58,46 @@ its `manifest.json` exists. A partial entry (assets present, manifest
 absent) is a crashed commit and is reaped by `Cache::load_or_recover`
 on the next startup scan.
 
+### Cache root and startup sequence
+
+The on-disk root is resolved by `default_cache_root()` and wired
+into the cache at `app` setup (`setup` hook in `src-tauri/src/lib.rs`):
+
+- **Windows.** `<%LOCALAPPDATA%>\com.pixelgrab.app\cache` — the
+  per-app directory created by the installer; the cache lives under
+  `cache\` so it can be siblings with the preferences and policy
+  files without collision.
+- **Non-Windows / CI.** Falls back to `<temp>/pixelgrab-cache` so
+  Linux / macOS dev builds and CI runs have a stable, writable home
+  without the `LOCALAPPDATA` environment variable.
+
+The startup sequence is two steps:
+
+1. `Cache::set_cache_root(Some(root))` — creates the directory (or
+   reuses it) and stores the path on the cache. The directory is
+   created up-front so the first commit does not race with the
+   mkdir.
+2. `Cache::load_or_recover()` — scans the root, loads every entry
+   with a `manifest.json`, and reaps partial entries (assets
+   present, manifest absent). The scan is **synchronous but
+   non-blocking in practice**: it is the only blocking step on the
+   tray path, and it is bounded by the cache contents the user
+   actually has.
+
+A third pass runs on a worker thread (`SweepWorker::recover_startup`
+in `cache::sweeper`, introduced in tracer-13) to reap `*.tmp`
+debris, zero-byte assets, and empty entry directories without
+touching valid active captures. The worker thread means the tray
+appears before every byte of legacy debris is processed; the
+periodic worker installed after the splash continues the same
+sweep on a 15-minute cadence.
+
+The startup scan is best-effort: a failed `set_cache_root` or
+`load_or_recover` is logged at `warn` and the app still comes up so
+the user can open a capture (a fresh, empty cache is the natural
+fallback). The error message carries the cache root path so the
+log is actionable without a second look-up.
+
 ### Active locks
 
 Each entry carries a typed set of active locks (`LockOwner::{Shelf,

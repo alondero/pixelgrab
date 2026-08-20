@@ -850,7 +850,7 @@ fn emit_shelf_updated<R: tauri::Runtime>(
     handle: &AppHandle<R>,
     entry: &pixelgrab_contracts::CacheEntry,
 ) {
-    let view = crate::shelf::ShelfCardView::from_entry(entry);
+    let view = crate::shelf::ShelfCardView::from(entry);
     let _ = handle.emit("pixelgrab://shelf-updated", &view);
 }
 
