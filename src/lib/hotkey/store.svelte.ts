@@ -69,9 +69,7 @@ for (const entry of aliasTable.modifiers) {
   ALIAS_TO_CANONICAL.set(entry.canonical.toUpperCase(), entry.canonical);
 }
 
-const RANK_INDEX = new Map<string, number>(
-  aliasTable.rank.map((m, idx) => [m.toUpperCase(), idx]),
-);
+const RANK_INDEX = new Map<string, number>(aliasTable.rank.map((m, idx) => [m.toUpperCase(), idx]));
 
 export function actionBinding(
   bindings: HotkeyBindingsDto,
