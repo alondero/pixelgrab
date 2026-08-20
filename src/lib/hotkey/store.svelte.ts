@@ -14,6 +14,15 @@ import {
 } from "$lib/ipc/commands";
 import type { HotkeyBindingsDto, HotkeyRegistryStatusDto } from "$lib/ipc/types";
 
+// Tracer 14 follow-up (issue #46): modifier aliases are owned by
+// `pixelgrab-contracts` and re-used here so the Svelte
+// canonicaliser cannot drift from the Rust parser. The Rust side
+// `include_str!`'s the same file from
+// `crates/pixelgrab-contracts/data/hotkey_modifiers.json`; the
+// Vite `$contracts` alias maps to the same directory so the JSON
+// import resolves to a single file on disk.
+import modifierAliases from "$contracts/data/hotkey_modifiers.json";
+
 // Default bindings used when the IPC fails to load. Mirrors
 // `HotkeyBindings::defaults()` on the Rust side.
 const DEFAULT_BINDINGS: HotkeyBindingsDto = {
@@ -38,27 +47,29 @@ export const HOTKEY_LABELS: Record<HotkeyAction, string> = {
   shelf_toggle: "Toggle Shelf",
 };
 
-// Canonical keys / modifiers accepted by the Rust parser. Used by
-// the rebind UI to highlight the captured chord against the
-// supported grammar. Entries are stored uppercase so the lookup
-// in `canonicaliseChord` works with both `Ctrl` and `CTRL`
-// event payloads.
-const MODIFIER_KEYS = new Set([
-  "CONTROL",
-  "CTRL",
-  "CTL",
-  "META",
-  "ALT",
-  "OPTION",
-  "OPT",
-  "SHIFT",
-  "SHFT",
-  "COMMANDORCONTROL",
-  "COMMAND",
-  "CMD",
-  "WIN",
-  "SUPER",
-]);
+// Shape of the shared JSON file. `rank` defines the canonical
+// modifier order — must stay in lock-step with the Rust side.
+type ModifierAliasTable = {
+  modifiers: Array<{ canonical: string; aliases: string[] }>;
+  rank: string[];
+};
+
+const aliasTable = modifierAliases as ModifierAliasTable;
+
+// Reverse-lookup map: upper-cased alias → canonical name. Built
+// once at module load; the JSON import is resolved by Vite at
+// parse time so the table is stable for the lifetime of the
+// bundle. Reused on every `canonicaliseChord` call without
+// re-allocating.
+const ALIAS_TO_CANONICAL = new Map<string, string>();
+for (const entry of aliasTable.modifiers) {
+  for (const alias of entry.aliases) {
+    ALIAS_TO_CANONICAL.set(alias.toUpperCase(), entry.canonical);
+  }
+  ALIAS_TO_CANONICAL.set(entry.canonical.toUpperCase(), entry.canonical);
+}
+
+const RANK_INDEX = new Map<string, number>(aliasTable.rank.map((m, idx) => [m.toUpperCase(), idx]));
 
 export function actionBinding(
   bindings: HotkeyBindingsDto,
@@ -103,8 +114,9 @@ export function canonicaliseChord(parts: string[]): string | null {
   let main: string | null = null;
   for (const raw of parts) {
     const token = raw.toUpperCase();
-    if (MODIFIER_KEYS.has(token)) {
-      modifiers.push(normaliseModifier(token));
+    const canonical = ALIAS_TO_CANONICAL.get(token);
+    if (canonical) {
+      modifiers.push(canonical);
     } else if (!main) {
       main = token;
     } else {
@@ -112,11 +124,15 @@ export function canonicaliseChord(parts: string[]): string | null {
     }
   }
   if (!main) return null;
-  // Canonical modifier order — Ctrl, Alt, Shift, Meta.
-  const order = ["CommandOrControl", "Alt", "Shift", "Meta"];
-  const sorted = modifiers.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  // Canonical modifier order — Ctrl, Alt, Shift, Meta (or
+  // whatever the shared JSON's `rank` array says).
+  modifiers.sort(
+    (a, b) =>
+      (RANK_INDEX.get(a.toUpperCase()) ?? Number.MAX_SAFE_INTEGER) -
+      (RANK_INDEX.get(b.toUpperCase()) ?? Number.MAX_SAFE_INTEGER),
+  );
   // Drop duplicate modifiers after normalisation.
-  const unique = sorted.filter((m, idx) => sorted.indexOf(m) === idx);
+  const unique = modifiers.filter((m, idx) => modifiers.indexOf(m) === idx);
   if (unique.length === 0) {
     // Allow function / nav keys without a modifier.
     if (/^F\d+$/.test(main) || /^(TAB|ENTER|ESCAPE|SPACE)$/.test(main)) {
@@ -125,27 +141,6 @@ export function canonicaliseChord(parts: string[]): string | null {
     return null;
   }
   return [...unique, main].join("+");
-}
-
-function normaliseModifier(token: string): string {
-  switch (token) {
-    case "CONTROL":
-    case "CTRL":
-    case "CMD":
-    case "COMMAND":
-      return "CommandOrControl";
-    case "ALT":
-    case "OPTION":
-      return "Alt";
-    case "SHIFT":
-      return "Shift";
-    case "META":
-    case "WIN":
-    case "SUPER":
-      return "Meta";
-    default:
-      return token;
-  }
 }
 
 export function createHotkeyStore() {
