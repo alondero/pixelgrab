@@ -185,11 +185,29 @@ fn debounce_coalesces_rapid_updates() {
         };
         store.update(next, None);
     }
-    // No flush yet; debounce window is 500 ms.
-
-    // Wait past the debounce window.
-    std::thread::sleep(PERSIST_DEBOUNCE + Duration::from_millis(200));
-    let body = std::fs::read_to_string(fs.join(PRIMARY_FILENAME)).expect("read");
+    // No flush yet; debounce window is 500 ms. The earlier version
+    // slept `PERSIST_DEBOUNCE + 200 ms` then read the file
+    // unconditionally — too tight on slow CI runners (cargo build
+    // startup + the debouncer's worker-thread spinup can easily eat
+    // the 200 ms slack), so the read sometimes hit NotFound. Poll for
+    // the file with a generous ceiling (10× the debounce window) so
+    // a healthy box still finishes in ~700 ms while a slow one
+    // doesn't flake.
+    let path = fs.join(PRIMARY_FILENAME);
+    let deadline = std::time::Instant::now() + (PERSIST_DEBOUNCE * 10);
+    let body = loop {
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            break body;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "debounced preferences file never landed at {} after {:?}",
+                path.display(),
+                PERSIST_DEBOUNCE * 10,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
     // The most recent update had lifetime_seconds = 24.
     assert!(body.contains("\"lifetimeSeconds\": 24"));
 }

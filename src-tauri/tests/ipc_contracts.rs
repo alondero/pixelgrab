@@ -297,20 +297,27 @@ fn shelf_card_view_round_trips() {
     // The `ShelfCardView` is the payload of the
     // `pixelgrab://shelf-updated` event. The TypeScript mirror in
     // `src/lib/shelf/types.ts` asserts the same shape; this is the
-    // Rust-side companion.
-    let view = pixelgrab_lib::shelf::ShelfCardView {
-        shelf_id: "shelf-id".to_string(),
+    // Rust-side companion. The view is built via the `From<&CacheEntry>`
+    // impl so this test exercises the canonical conversion path the
+    // IPC layer uses (`emit_shelf_updated` calls `ShelfCardView::from`).
+    let entry = pixelgrab_contracts::CacheEntry {
         capture_id: "capture-id".to_string(),
+        shelf_id: "shelf-id".to_string(),
         png_path: "/cache/capture/capture.png".to_string(),
-        size_bytes: 4096,
-        created_at_ms: 1_700_000_000_000,
+        bitmap_path: None,
         bounds: PhysicalBounds::from_xywh(0, 0, 320, 240),
+        size: PhysicalSize::new(320, 240),
+        size_bytes: 4096,
         metadata: pixelgrab_contracts::CacheEntryMetadata {
             title: "Example".to_string(),
             note: "first commit".to_string(),
             tags: vec!["tracer-07".to_string()],
         },
+        created_at_ms: 1_700_000_000_000,
+        last_access_at_ms: 1_700_000_000_000,
+        monitor_id: "primary".to_string(),
     };
+    let view: pixelgrab_lib::shelf::ShelfCardView = (&entry).into();
     let json = serde_json::to_string(&view).expect("serialize");
     // Field names must be camelCase on the wire.
     assert!(json.contains("\"shelfId\""));
@@ -320,6 +327,12 @@ fn shelf_card_view_round_trips() {
     assert!(json.contains("\"createdAtMs\":1700000000000"));
     assert!(json.contains("\"bounds\""));
     assert!(json.contains("\"metadata\""));
+    // The projection drops `bitmap_path`, `size`, `last_access_at_ms`,
+    // and `monitor_id` — they must NOT appear on the wire so the
+    // frontend contract stays slim.
+    assert!(!json.contains("\"bitmapPath\""));
+    assert!(!json.contains("\"lastAccessAtMs\""));
+    assert!(!json.contains("\"monitorId\""));
     // Round-trip.
     let parsed: pixelgrab_lib::shelf::ShelfCardView =
         serde_json::from_str(&json).expect("deserialize");

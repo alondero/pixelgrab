@@ -361,7 +361,12 @@ pub fn run() {
             // so the user can still open a capture.
             let cache_root = default_cache_root();
             if let Err(err) = app_state.cache().set_cache_root(Some(cache_root.clone())) {
-                log::warn!("cache root {} is unusable: {err}", cache_root.display());
+                // `CacheError::BadRoot` already carries the cache root
+                // path in its `Display` payload, so appending the path
+                // a second time here would log it twice. The cache root
+                // is itself allowed under AGENTS.md §9 (paths outside
+                // the cache root are forbidden, the cache root is not).
+                log::warn!("{err}");
             } else if let Err(err) = app_state.cache().load_or_recover() {
                 log::warn!("cache recovery failed: {err}");
             }
