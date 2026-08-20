@@ -7,6 +7,8 @@ import type {
   CaptureDiagnostics,
   CaptureResponse,
   CommitResponse,
+  HotkeyBindingsDto,
+  HotkeyRegistryStatusDto,
   IpcResponse,
   PhysicalBounds,
   RequestCaptureIntent,
@@ -18,6 +20,7 @@ import type {
   ShelfPreferencesDto,
   StartShelfDragIntent,
   StartShelfDragResult,
+  UpdateHotkeyBindingsRequest,
   UpdateShelfPreferencesRequest,
 } from "./types";
 
@@ -210,10 +213,49 @@ export async function mockStartShelfDrag(
   });
 }
 
-// Tracer 12 mocks: in-memory preferences so the SettingsPanel can
-// render and update without a Tauri runtime. The Rust core is the
-// source of truth in production; here we only need the round-trip
-// to satisfy component tests.
+// Tracer 14 mocks: in-memory hotkey bindings so the HotkeyPanel
+// can render and update without a Tauri runtime. Mirrors the
+// Rust-side defaults so the reset path is exercised end-to-end.
+
+let hotkeyBindings: HotkeyBindingsDto = {
+  schemaVersion: 1,
+  regionCapture: "CommandOrControl+Shift+S",
+  fullScreenCapture: "CommandOrControl+Shift+F",
+  shelfToggle: "CommandOrControl+Shift+L",
+  paused: false,
+};
+let hotkeyStatus: HotkeyRegistryStatusDto = {
+  active: true,
+  paused: false,
+};
+
+export async function mockGetHotkeyBindings(): Promise<IpcResponse<HotkeyBindingsDto>> {
+  return ok({ ...hotkeyBindings });
+}
+
+export async function mockUpdateHotkeyBindings(
+  payload: UpdateHotkeyBindingsRequest,
+): Promise<IpcResponse<HotkeyBindingsDto>> {
+  hotkeyBindings = { ...hotkeyBindings, ...payload.bindings };
+  hotkeyStatus = {
+    ...hotkeyStatus,
+    paused: Boolean(hotkeyBindings.paused),
+    active: !hotkeyBindings.paused,
+  };
+  return ok({ ...hotkeyBindings });
+}
+
+export async function mockGetHotkeyStatus(): Promise<IpcResponse<HotkeyRegistryStatusDto>> {
+  return ok({ ...hotkeyStatus });
+}
+
+export async function mockSetHotkeyPaused(
+  paused: boolean,
+): Promise<IpcResponse<HotkeyRegistryStatusDto>> {
+  hotkeyBindings = { ...hotkeyBindings, paused };
+  hotkeyStatus = { ...hotkeyStatus, paused, active: !paused };
+  return ok({ ...hotkeyStatus });
+}
 
 export async function mockGetShelfPreferences(): Promise<IpcResponse<ShelfPreferencesDto>> {
   return ok({ ...preferences });
@@ -241,6 +283,14 @@ export function __resetMock() {
     visibleCardCount: 4,
     showCountdown: true,
   };
+  hotkeyBindings = {
+    schemaVersion: 1,
+    regionCapture: "CommandOrControl+Shift+S",
+    fullScreenCapture: "CommandOrControl+Shift+F",
+    shelfToggle: "CommandOrControl+Shift+L",
+    paused: false,
+  };
+  hotkeyStatus = { active: true, paused: false };
 }
 
 /**

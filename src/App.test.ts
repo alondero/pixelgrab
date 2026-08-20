@@ -17,6 +17,10 @@ vi.mock("$lib/ipc/commands", async () => {
     getSessionSnapshot: shell.mockGetSessionSnapshot,
     getShelfPreferences: shell.mockGetShelfPreferences,
     updateShelfPreferences: shell.mockUpdateShelfPreferences,
+    getHotkeyBindings: shell.mockGetHotkeyBindings,
+    updateHotkeyBindings: shell.mockUpdateHotkeyBindings,
+    getHotkeyStatus: shell.mockGetHotkeyStatus,
+    setHotkeyPaused: shell.mockSetHotkeyPaused,
   };
 });
 

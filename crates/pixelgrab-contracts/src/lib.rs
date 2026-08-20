@@ -17,6 +17,7 @@ pub mod capture;
 pub mod coordinate;
 pub mod drag;
 pub mod error;
+pub mod hotkey;
 pub mod ipc;
 pub mod monitor;
 pub mod pin;
@@ -45,14 +46,21 @@ pub use drag::{
     DragTargetEffect, DragTargetKind,
 };
 pub use error::{PlatformError, PlatformErrorKind, PlatformResult};
+pub use hotkey::{
+    display_binding, parse_binding, validate_for_storage, HotkeyAction, HotkeyBindings,
+    HotkeyRegistryStatus, SanitizeReport, BACKUP_FILENAME as HOTKEY_BACKUP_FILENAME,
+    HOTKEY_SETTINGS_SCHEMA_VERSION, MAX_BINDING_LEN, PRIMARY_FILENAME as HOTKEY_PRIMARY_FILENAME,
+    SUPPORTED_KEYS,
+};
 pub use ipc::{
     CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureDiagnostics, CaptureIntent,
     CaptureResponse, ClearCacheResponse, CommitOutcome, CommitRequest, CommitResponse,
-    DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError, IpcResponse, OverlaySelection,
-    RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult,
+    DismissCacheEntryRequest, DismissCacheEntryResponse, HotkeyBindingsDto,
+    HotkeyRegistryStatusDto, IpcError, IpcResponse, OverlaySelection, RequestCaptureIntent,
+    RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SecondaryLaunchIntent,
     SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot, StartShelfDragIntent,
     StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
-    UpdateShelfPreferencesRequest,
+    UpdateHotkeyBindingsRequest, UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use pin::{

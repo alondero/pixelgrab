@@ -12,7 +12,7 @@ use pixelgrab_lib::singleton::SINGLE_INSTANCE_EVENT;
 /// frontend. A drift would break the singleton forwarding end-to-end.
 #[test]
 fn event_channel_constant_matches_frontend() {
-    assert_eq!(SINGLE_INSTANCE_EVENT, "pixelgrab://single-instance");
+    assert_eq!(SINGLE_INSTANCE_EVENT, "pixelgrab://secondary-launch");
 }
 
 /// The forward function is publicly accessible from the library crate. This
@@ -21,9 +21,13 @@ fn event_channel_constant_matches_frontend() {
 #[test]
 fn forward_function_is_publicly_exported() {
     // The function symbol must exist in the public API. If this stops
-    // compiling, a refactor has hidden the wiring.
+    // compiling, a refactor has hidden the wiring. Tracer 14
+    // threaded the secondary-launch intent through the signature so
+    // the type pin keeps the hook closure aligned.
     fn _check() {
-        let _f: for<'r> fn(&'r tauri::AppHandle<tauri::Wry>) -> () =
-            pixelgrab_lib::singleton::forward_to_existing_instance;
+        let _f: for<'r> fn(
+            &'r tauri::AppHandle<tauri::Wry>,
+            pixelgrab_contracts::SecondaryLaunchIntent,
+        ) -> () = pixelgrab_lib::singleton::forward_to_existing_instance;
     }
 }
