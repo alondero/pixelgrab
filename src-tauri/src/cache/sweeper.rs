@@ -208,9 +208,11 @@ impl CacheSweeper {
     }
 
     /// Evict every unlocked entry whose `last_access_at_ms` is older
-    /// than `policy.max_age_ms`. Locked entries (editor / drag / pin)
-    /// are kept. Bytes reclaimed are summed from the cached
-    /// `size_bytes` so the outcome reflects the actual disk outcome.
+    /// than `policy.max_age_ms`. Locked entries (editor / drag / pin
+    /// owners) are kept. Bytes reclaimed reflect the actual on-disk
+    /// size at the moment of dismissal — the spec requires the
+    /// outcome to report what was really reclaimed, not the cached
+    /// `size_bytes` which can drift from disk.
     fn evict_expired(&self, policy: &CachePolicy, now_ms: i64) -> SweepOutcome {
         let mut outcome = SweepOutcome::default();
         let candidates = self.cache.entries();
@@ -219,18 +221,16 @@ impl CacheSweeper {
             if delta < policy.max_age_ms {
                 continue;
             }
-            let owners = self.cache.locks().owners_of(&entry.shelf_id);
-            if owners
-                .iter()
-                .any(|o| *o != pixelgrab_contracts::LockOwner::Shelf)
-            {
+            if self.cache.is_protected_from_sweeper(&entry.shelf_id) {
                 continue;
             }
+            let on_disk = self.cache.entry_on_disk_size(&entry.shelf_id);
             match self.cache.dismiss(&entry.shelf_id) {
                 Ok(o) if o.removed => {
                     outcome.expired_evicted = outcome.expired_evicted.saturating_add(1);
-                    outcome.bytes_reclaimed =
-                        outcome.bytes_reclaimed.saturating_add(entry.size_bytes);
+                    if let Some(bytes) = on_disk {
+                        outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(bytes);
+                    }
                 }
                 Ok(_) => {
                     // Locked by something we didn't catch (e.g. a
@@ -247,10 +247,14 @@ impl CacheSweeper {
     /// Evict the oldest unlocked entries until total bytes and
     /// entry count are both at or below the low-water targets.
     /// Entries are sorted by `last_access_at_ms` ascending — pure
-    /// LRU. The function continues past per-entry failures so one
+    /// LRU. The candidate list is snapshotted once at the top of
+    /// the loop so the per-iteration cost is O(n) instead of O(n²).
+    /// The function continues past per-entry failures so one
     /// permission error cannot strand the rest.
     fn evict_for_quota(&self, policy: &CachePolicy, _now_ms: i64) -> SweepOutcome {
         let mut outcome = SweepOutcome::default();
+        let candidates = self.cache.entries();
+        let mut evicted_ids: Vec<String> = Vec::with_capacity(candidates.len());
         loop {
             let snapshot = Snapshot {
                 stats: self.cache.stats(),
@@ -259,35 +263,27 @@ impl CacheSweeper {
             if snapshot.within_low_water() {
                 break;
             }
-            // Pick the oldest unlocked entry.
-            let candidates = self.cache.entries();
-            let mut pick: Option<pixelgrab_contracts::CacheEntry> = None;
-            for entry in candidates {
-                let owners = self.cache.locks().owners_of(&entry.shelf_id);
-                if owners
-                    .iter()
-                    .any(|o| *o != pixelgrab_contracts::LockOwner::Shelf)
-                {
-                    continue;
-                }
-                match &pick {
-                    None => pick = Some(entry),
-                    Some(cur) if entry.last_access_at_ms < cur.last_access_at_ms => {
-                        pick = Some(entry);
-                    }
-                    _ => {}
-                }
-            }
+            // Pick the oldest entry that is not yet evicted and is
+            // not protected by a non-default lock owner.
+            let pick = candidates
+                .iter()
+                .filter(|e| !evicted_ids.contains(&e.shelf_id))
+                .filter(|e| !self.cache.is_protected_from_sweeper(&e.shelf_id))
+                .min_by_key(|e| e.last_access_at_ms);
             let Some(target) = pick else {
-                // Every remaining entry is locked — give up to
-                // avoid an infinite loop.
+                // Every remaining entry is locked — break to avoid
+                // an infinite loop.
                 break;
             };
-            match self.cache.dismiss(&target.shelf_id) {
+            let on_disk = self.cache.entry_on_disk_size(&target.shelf_id);
+            let target_id = target.shelf_id.clone();
+            match self.cache.dismiss(&target_id) {
                 Ok(o) if o.removed => {
                     outcome.quota_evicted = outcome.quota_evicted.saturating_add(1);
-                    outcome.bytes_reclaimed =
-                        outcome.bytes_reclaimed.saturating_add(target.size_bytes);
+                    if let Some(bytes) = on_disk {
+                        outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(bytes);
+                    }
+                    evicted_ids.push(target_id);
                 }
                 Ok(_) => {
                     // Race with another lock holder — break so we
@@ -316,8 +312,9 @@ impl MergeOutcome for SweepOutcome {
         self.expired_evicted = self.expired_evicted.saturating_add(other.expired_evicted);
         self.quota_evicted = self.quota_evicted.saturating_add(other.quota_evicted);
         self.bytes_reclaimed = self.bytes_reclaimed.saturating_add(other.bytes_reclaimed);
-        self.tmp_files_removed =
-            self.tmp_files_removed.saturating_add(other.tmp_files_removed);
+        self.tmp_files_removed = self
+            .tmp_files_removed
+            .saturating_add(other.tmp_files_removed);
         self.zero_byte_assets_removed = self
             .zero_byte_assets_removed
             .saturating_add(other.zero_byte_assets_removed);
@@ -360,7 +357,9 @@ mod tests {
     use super::*;
 
     use pixelgrab_contracts::{
-        cache::CacheEntryMetadata, coordinate::{PhysicalBounds, PhysicalSize}, LockOwner,
+        cache::CacheEntryMetadata,
+        coordinate::{PhysicalBounds, PhysicalSize},
+        LockOwner,
     };
     use pixelgrab_test_support::{clock::ControllableClock, fs::IsolatedFilesystem};
 
@@ -445,11 +444,7 @@ mod tests {
         };
         policy_store.update(tight);
         policy_store.flush_blocking().ok();
-        let sweeper = CacheSweeper::with_clock(
-            Arc::new(cache),
-            policy_store.clone(),
-            clock,
-        );
+        let sweeper = CacheSweeper::with_clock(Arc::new(cache), policy_store.clone(), clock);
         let outcome = sweeper.sweep_once();
         // Both entries are older than 60_000 ms (touched at 5_000,
         // well in the past).
@@ -510,7 +505,9 @@ mod tests {
         let c1 = cache.commit(request(4, 4)).expect("commit 1");
         let _c2 = cache.commit(request(4, 4)).expect("commit 2");
         // Acquire a Pin lock on c1 — pin owner should protect it.
-        let pin_guard = cache.locks().acquire(c1.entry.shelf_id.clone(), LockOwner::Pin);
+        let pin_guard = cache
+            .locks()
+            .acquire(c1.entry.shelf_id.clone(), LockOwner::Pin);
         let sweeper = CacheSweeper::with_clock(
             Arc::new(cache.clone()),
             policy_store.clone(),
@@ -575,7 +572,9 @@ mod tests {
         let c1 = cache.commit(request(4, 4)).expect("commit 1");
         let _c2 = cache.commit(request(4, 4)).expect("commit 2");
         // Pin c1 so it is protected.
-        let guard = cache.locks().acquire(c1.entry.shelf_id.clone(), LockOwner::Pin);
+        let guard = cache
+            .locks()
+            .acquire(c1.entry.shelf_id.clone(), LockOwner::Pin);
         let sweeper = CacheSweeper::with_clock(
             Arc::new(cache.clone()),
             policy_store.clone(),
@@ -648,6 +647,29 @@ mod tests {
     }
 
     #[test]
+    fn recover_debris_reaps_manifest_less_directories() {
+        let fs = IsolatedFilesystem::new("sweeper-unindexed").expect("fs");
+        let cache = Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        // Drop a manifest-less directory with leftover assets from
+        // a crashed commit. The recovery must remove it and report
+        // the sum of the on-disk bytes.
+        let partial_id = "11111111-1111-1111-1111-111111111111";
+        let partial_dir = fs.root().join(partial_id);
+        std::fs::create_dir_all(&partial_dir).expect("mkdir");
+        std::fs::write(partial_dir.join("capture.png"), b"partial-png").expect("png");
+        std::fs::write(partial_dir.join("metadata.json"), b"{}").expect("meta");
+        let outcome = cache.recover_debris().expect("recover");
+        assert_eq!(outcome.unindexed_dirs_removed, 1);
+        assert!(!partial_dir.exists());
+        // The on-disk size of the reaped files is reported in
+        // `bytes_reclaimed` (11 + 2 = 13).
+        assert!(outcome.bytes_reclaimed >= 13);
+    }
+
+    #[test]
     fn try_clear_skips_locked_entries() {
         let fs = IsolatedFilesystem::new("sweeper-clear").expect("fs");
         let cache = Cache::new();
@@ -656,8 +678,10 @@ mod tests {
             .expect("set root");
         let c1 = cache.commit(request(4, 4)).expect("commit 1");
         let _c2 = cache.commit(request(4, 4)).expect("commit 2");
-        let guard = cache.locks().acquire(c1.entry.shelf_id.clone(), LockOwner::Editor);
-        let outcome = cache.try_clear();
+        let guard = cache
+            .locks()
+            .acquire(c1.entry.shelf_id.clone(), LockOwner::Editor);
+        let outcome = cache.clear_unlocked_entries();
         assert_eq!(outcome.quota_evicted, 1);
         let remaining: Vec<_> = cache.entries().into_iter().map(|e| e.shelf_id).collect();
         assert!(remaining.contains(&c1.entry.shelf_id));
@@ -675,10 +699,7 @@ mod tests {
         let c2 = cache.commit(request(4, 4)).expect("commit 2");
         let stats = cache.stats();
         assert_eq!(stats.entry_count, 2);
-        assert_eq!(
-            stats.total_bytes,
-            c1.entry.size_bytes + c2.entry.size_bytes
-        );
+        assert_eq!(stats.total_bytes, c1.entry.size_bytes + c2.entry.size_bytes);
         assert_eq!(stats.locked_count, 0);
         assert!(stats.oldest_created_at_ms.is_some());
         assert!(stats.newest_access_at_ms.is_some());

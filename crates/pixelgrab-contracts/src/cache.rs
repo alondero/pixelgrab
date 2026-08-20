@@ -383,8 +383,7 @@ pub struct SweepOutcome {
 impl SweepOutcome {
     /// Total entries the sweep removed across all eviction paths.
     pub fn total_evicted(&self) -> u32 {
-        self.expired_evicted
-            .saturating_add(self.quota_evicted)
+        self.expired_evicted.saturating_add(self.quota_evicted)
     }
 }
 

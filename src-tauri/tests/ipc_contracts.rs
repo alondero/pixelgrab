@@ -332,7 +332,9 @@ fn drag_format_labels_are_stable() {
     assert_eq!(DragFormat::RegisteredPng.as_label(), "registered_png");
     assert_eq!(DragFormat::DibV5.as_label(), "dib_v5");
     assert_eq!(DragFormat::UnicodeText.as_label(), "unicode_text");
-=======
+}
+
+#[test]
 fn pin_view_model_carries_camel_case_fields() {
     let view = PinViewModel {
         id: pixelgrab_contracts::PinId::new("p-1"),

@@ -670,17 +670,15 @@ pub fn update_shelf_preferences(
 /// startup so the settings UI can render the user's choices, and on
 /// every change to mirror the post-update state.
 #[tauri::command]
-pub fn get_cache_policy(
-    app: AppState<'_>,
-) -> IpcResponse<CachePolicyDto> {
+pub fn get_cache_policy(app: AppState<'_>) -> IpcResponse<CachePolicyDto> {
     IpcResponse::from_result(Ok(app.cache_policy().current().into()))
 }
 
 /// Replace the persisted cache policy. The Rust core sanitizes the
-/// payload, updates the in-memory state immediately, and (when
-/// `commit = true`) re-applies the new sweep interval to the
-/// running periodic worker. `commit = false` is the "live preview"
-/// path used while the user drags a slider.
+/// payload, updates the in-memory state immediately, and schedules
+/// a debounced disk write. The sweeper reads the policy via the store
+/// on every tick so a new policy takes effect on the next sweep
+/// without restarting the worker thread.
 #[tauri::command]
 pub fn update_cache_policy(
     app: AppState<'_>,
@@ -689,14 +687,6 @@ pub fn update_cache_policy(
     let policy: pixelgrab_contracts::CachePolicy = payload.policy.into();
     let sanitized = policy.sanitize();
     app.cache_policy().update(sanitized.clone());
-    if payload.commit {
-        if let Err(_err) = app.cache_policy().flush_blocking() {
-            log::warn!("update_cache_policy: flush_blocking failed");
-        }
-        // The sweeper reads the policy via the store on every tick
-        // so a new policy takes effect on the next sweep without
-        // restarting the worker thread.
-    }
     IpcResponse::from_result(Ok(sanitized.into()))
 }
 
@@ -716,7 +706,7 @@ pub fn get_cache_stats(app: AppState<'_>) -> IpcResponse<CacheStatsResponse> {
 /// feedback.
 #[tauri::command]
 pub fn clear_cache(app: AppState<'_>) -> IpcResponse<ClearCacheResponse> {
-    let outcome = app.cache().try_clear();
+    let outcome = app.cache().clear_unlocked_entries();
     IpcResponse::from_result(Ok(ClearCacheResponse { outcome }))
 }
 

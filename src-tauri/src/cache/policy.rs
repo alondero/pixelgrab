@@ -146,14 +146,6 @@ impl CachePolicyStore {
         Ok(())
     }
 
-    /// Cancel any pending debounced write **and** revert the
-    /// in-memory state to the most recently persisted snapshot.
-    pub fn cancel_pending(&self) {
-        self.inner.debouncer.cancel();
-        let last = self.inner.last_persisted.lock().clone();
-        *self.inner.current.lock() = last;
-    }
-
     /// Test-only: simulate that the debounce window elapsed by
     /// running the pending callback synchronously.
     pub fn drain_pending_for_test(&self) -> bool {
@@ -203,10 +195,7 @@ fn try_load(path: &Path) -> Option<CachePolicy> {
 /// preferences writer: temp + fsync + rename, with the previous
 /// primary rotated into the `.bak` slot so an interrupted write still
 /// has a known-good fallback.
-pub(crate) fn write_to_disk(
-    root: &Path,
-    policy: &CachePolicy,
-) -> Result<(), PlatformError> {
+pub(crate) fn write_to_disk(root: &Path, policy: &CachePolicy) -> Result<(), PlatformError> {
     let primary = root.join(PRIMARY_FILENAME);
     let backup = root.join(BACKUP_FILENAME);
     let tmp = root.join(format!("{PRIMARY_FILENAME}.tmp"));
@@ -222,41 +211,30 @@ pub(crate) fn write_to_disk(
         if backup.exists() {
             let _ = fs::remove_file(&backup);
         }
-        fs::rename(&primary, &backup).map_err(|err| {
-            PlatformError::new(
-                PlatformErrorKind::Io,
-                format!("rotate primary to backup: {err}"),
-            )
+        fs::rename(&primary, &backup).map_err(|_err| {
+            // Privacy: never interpolate the path into the error
+            // string — the IPC payload is the wire shape (AGENTS.md §9).
+            PlatformError::new(PlatformErrorKind::Io, "rotate primary to backup")
         })?;
     }
 
-    let mut file = fs::File::create(&tmp).map_err(|err| {
-        PlatformError::new(
-            PlatformErrorKind::Io,
-            format!("create tmp {}: {err}", tmp.display()),
-        )
-    })?;
-    file.write_all(&bytes).map_err(|err| {
+    let mut file = fs::File::create(&tmp)
+        .map_err(|_err| PlatformError::new(PlatformErrorKind::Io, "create policy tmp"))?;
+    file.write_all(&bytes).map_err(|_err| {
         let _ = fs::remove_file(&tmp);
-        PlatformError::new(
-            PlatformErrorKind::Io,
-            format!("write tmp {}: {err}", tmp.display()),
-        )
+        PlatformError::new(PlatformErrorKind::Io, "write policy tmp")
     })?;
-    file.sync_all().map_err(|err| {
+    file.sync_all().map_err(|_err| {
         let _ = fs::remove_file(&tmp);
-        PlatformError::new(
-            PlatformErrorKind::Io,
-            format!("fsync tmp {}: {err}", tmp.display()),
-        )
+        PlatformError::new(PlatformErrorKind::Io, "fsync policy tmp")
     })?;
     drop(file);
 
-    if let Err(err) = fs::rename(&tmp, &primary) {
+    if let Err(_err) = fs::rename(&tmp, &primary) {
         let _ = fs::remove_file(&tmp);
         return Err(PlatformError::new(
             PlatformErrorKind::Io,
-            format!("rename tmp into primary: {err}"),
+            "rename policy tmp into primary",
         ));
     }
 
@@ -386,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_pending_discards_in_flight_update() {
+    fn flush_after_update_persists_new_value() {
         let fs = IsolatedFilesystem::new("cache-policy-cancel").expect("fs");
         let store = CachePolicyStore::new();
         store.set_root(fs.root().to_path_buf()).expect("set root");
@@ -397,14 +375,12 @@ mod tests {
             ..CachePolicy::default()
         };
         store.update(next);
-        store.cancel_pending();
         store.flush_blocking().expect("flush");
 
         let primary = std::fs::read_to_string(fs.join(PRIMARY_FILENAME)).expect("primary");
-        assert!(primary.contains(&format!(
-            "\"maxBytes\": {}",
-            pixelgrab_contracts::DEFAULT_MAX_BYTES
-        )));
+        // The flush_blocking after update persisted the new
+        // value — the "cancel" path is no longer exposed.
+        assert!(primary.contains(&format!("\"maxBytes\": {}", 7 * 1024 * 1024)));
     }
 
     #[test]

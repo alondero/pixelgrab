@@ -566,11 +566,6 @@ pub struct UpdateCachePolicyRequest {
     /// New policy. Sanitized on receipt so out-of-range numbers are
     /// clamped and unknown fields fall back to the default.
     pub policy: CachePolicyDto,
-    /// When true, the new policy is applied to the running sweeper
-    /// without waiting for the debounced disk write. The frontend
-    /// sets this when the user releases a slider.
-    #[serde(default)]
-    pub commit: bool,
 }
 
 /// Wire shape for the `get_cache_stats` IPC response. The struct

@@ -194,6 +194,13 @@ impl PixelGrabApp {
         let worker = self.sweeper.start_periodic();
         *guard = Some(worker);
     }
+
+    /// Handle to the pin registry. Tracer 11 ships the in-memory
+    /// lock provider; production wiring swaps in the shelf's cache
+    /// lock provider at setup time.
+    pub fn pin_registry(&self) -> Arc<PinRegistry> {
+        self.pin_registry.clone()
+    }
 }
 
 /// Spawn the background shelf ticker. The thread wakes every
@@ -269,11 +276,6 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
         };
         let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
     }
-
-    /// Handle to the pin registry.
-    pub fn pin_registry(&self) -> Arc<PinRegistry> {
-        self.pin_registry.clone()
-    }
 }
 
 /// Re-export so tests and the IPC layer can name `Cache` directly.
@@ -329,11 +331,11 @@ pub fn run() {
             // cache root so a partial cache reap cannot delete the
             // user's policy.
             let policy_root = crate::preferences::default_preferences_root();
-            if let Err(err) = app_state.cache_policy().set_root(policy_root.clone()) {
-                log::warn!(
-                    "cache policy root {} is unusable: {err}",
-                    policy_root.display()
-                );
+            if let Err(_err) = app_state.cache_policy().set_root(policy_root.clone()) {
+                // Privacy: AGENTS.md §9 forbids logging paths outside
+                // the cache root. The cache policy root is the parent
+                // per-app dir, so we log a categorical kind instead.
+                log::warn!("cache policy root is unusable");
             }
             // Bootstrap the cache policy file from the defaults when
             // the user has never opened the settings panel. The
@@ -411,6 +413,12 @@ pub fn run() {
             // `notify_pin_display_change` IPC command. The registry's
             // `handle_display_change` re-anchors orphan pins without
             // resetting zoom or opacity.
+            // Honour the user's `purge_on_exit` policy on graceful
+            // exit. The cache policy lives on the app state; the
+            // shutdown hook (`.run` closure below) consults it and
+            // clears unlocked entries before the process terminates.
+            // A panic or kill bypasses the hook by design (the spec
+            // notes this).
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -443,8 +451,21 @@ pub fn run() {
             ipc::get_cache_stats,
             ipc::clear_cache,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running PixelGrab");
+        .build(tauri::generate_context!())
+        .expect("error while building PixelGrab")
+        .run(|app_handle, event| {
+            // Honour the user's `purge_on_exit` policy on graceful
+            // exit. The cache policy lives on the app state; the
+            // shutdown hook consults it and clears unlocked entries
+            // before the process terminates. A panic or kill bypasses
+            // the hook by design (the spec notes this).
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let app = app_handle.state::<PixelGrabApp>();
+                if app.cache_policy().current().purge_on_exit {
+                    let _ = app.cache().clear_unlocked_entries();
+                }
+            }
+        });
 }
 
 /// Resolve the default on-disk cache root for the current platform.

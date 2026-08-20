@@ -51,8 +51,8 @@ use pixelgrab_contracts::{
     cache::{CacheEntryMetadata, ShelfPosition},
     coordinate::{PhysicalBounds, PhysicalSize},
     monitor::MonitorLayout,
-    CacheEntry as PublicCacheEntry, CaptureId, PlatformError, PlatformErrorKind, PlatformResult,
-    ShelfId,
+    CacheEntry as PublicCacheEntry, CaptureId, LockOwner, PlatformError, PlatformErrorKind,
+    PlatformResult, ShelfId,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -630,16 +630,12 @@ impl Cache {
                 oldest_created_at_ms
                     .map_or(entry.created_at_ms, |cur| cur.min(entry.created_at_ms)),
             );
-            newest_access_at_ms = Some(
-                newest_access_at_ms
-                    .map_or(entry.last_access_at_ms, |cur| {
-                        cur.max(entry.last_access_at_ms)
-                    }),
-            );
-            let owners = inner
-                .locks
-                .owners_of(&entry.shelf_id);
-            if owners.iter().any(|o| *o != pixelgrab_contracts::LockOwner::Shelf) {
+            newest_access_at_ms =
+                Some(newest_access_at_ms.map_or(entry.last_access_at_ms, |cur| {
+                    cur.max(entry.last_access_at_ms)
+                }));
+            let owners = inner.locks.owners_of(&entry.shelf_id);
+            if owners.iter().any(|o| *o != LockOwner::Shelf) {
                 locked_count = locked_count.saturating_add(1);
             }
         }
@@ -658,7 +654,41 @@ impl Cache {
     /// it is about to reclaim so the `bytes_reclaimed` field is
     /// accurate even when the in-memory map is out of sync.
     pub fn entry_size_bytes(&self, shelf_id: &str) -> Option<u64> {
-        self.inner.lock().entries.get(shelf_id).map(|e| e.size_bytes)
+        self.inner
+            .lock()
+            .entries
+            .get(shelf_id)
+            .map(|e| e.size_bytes)
+    }
+
+    /// Read the on-disk size of an entry's PNG file. The sweeper
+    /// uses this so `bytes_reclaimed` reflects the actual disk
+    /// outcome at the moment of eviction, not the cached `size_bytes`
+    /// which can drift from disk if a write was interrupted.
+    pub fn entry_on_disk_size(&self, shelf_id: &str) -> Option<u64> {
+        let inner = self.inner.lock();
+        let entry = inner.entries.get(shelf_id)?;
+        let path = std::path::PathBuf::from(&entry.png_path);
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            return None;
+        }
+        Some(size)
+    }
+
+    /// True when the entry is protected from the periodic sweeper
+    /// and the manual clear. An entry is protected when it has any
+    /// non-`Shelf` lock owner (editor / drag / pin). The default
+    /// `Shelf` lock is the marker every commit acquires; it does
+    /// NOT protect — otherwise no entry would ever be evictable.
+    /// The spec's "active shelf" wording maps to the shelf queue
+    /// engine's visible-set (the renderer pins a card via the
+    /// `Shelf` lock for the duration of its visibility); the
+    /// sweeper's intent is the underlying cache survival, which
+    /// is governed by the explicit non-default owners.
+    pub fn is_protected_from_sweeper(&self, shelf_id: &str) -> bool {
+        let owners = self.inner.lock().locks.owners_of(shelf_id);
+        owners.iter().any(|o| *o != LockOwner::Shelf)
     }
 
     /// Mark the provided entries as accessed at `now_ms`. Called by
@@ -678,11 +708,13 @@ impl Cache {
     ///
     /// - Stale `*.tmp` files inside the cache root (atomic-write
     ///   leftovers from a commit that crashed mid-write).
-    /// - Directories without a manifest (still owned by
-    ///   `load_or_recover`; this path is a no-op for them).
+    /// - Directories without a manifest (incomplete unindexed groups
+    ///   from a crashed commit; the spec lists these alongside the
+    ///   zero-byte assets and dangling temps).
     /// - Zero-byte `capture.png` or `metadata.json` files inside
     ///   entry directories.
-    /// - Empty entry directories (no files at all).
+    /// - Empty entry directories (no files at all) — including
+    ///   manifest-present-but-no-assets corruption.
     ///
     /// Each category is reported separately so the caller can log a
     /// useful summary without leaking the cache root. The sweep
@@ -699,11 +731,13 @@ impl Cache {
         }
         let read_dir = match fs::read_dir(&root) {
             Ok(d) => d,
-            Err(err) => {
-                return Err(PlatformError::from(CacheError::BadRoot(format!(
-                    "read_dir({}): {err}",
-                    root.display()
-                ))));
+            Err(_err) => {
+                // Privacy: never interpolate the path into the error
+                // string (AGENTS.md §9). The cache root is allowed in
+                // stable categorical kinds only.
+                return Err(PlatformError::from(CacheError::BadRoot(
+                    "read_dir failed".to_string(),
+                )));
             }
         };
         for entry in read_dir {
@@ -718,16 +752,14 @@ impl Cache {
             if path.is_file() {
                 // Stale `.tmp` file at the root (atomic-write leftover).
                 if path.extension().and_then(|s| s.to_str()) == Some("tmp") {
-                    if let Ok(meta) = fs::metadata(&path) {
-                        outcome.bytes_reclaimed =
-                            outcome.bytes_reclaimed.saturating_add(meta.len());
-                    }
-                    if fs::remove_file(&path).is_err() {
-                        outcome.partial_failures =
-                            outcome.partial_failures.saturating_add(1);
-                    } else {
-                        outcome.tmp_files_removed =
-                            outcome.tmp_files_removed.saturating_add(1);
+                    match remove_file_with_size(&path) {
+                        Ok(bytes) => {
+                            outcome.tmp_files_removed = outcome.tmp_files_removed.saturating_add(1);
+                            outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(bytes);
+                        }
+                        Err(_err) => {
+                            outcome.partial_failures = outcome.partial_failures.saturating_add(1);
+                        }
                     }
                 }
                 continue;
@@ -748,30 +780,45 @@ impl Cache {
                     .saturating_add(reap_empty_assets(&path));
                 continue;
             }
-            // Otherwise this is a partial entry — `load_or_recover`
-            // removed it. Leave it here so the startup recovery
-            // owns the reaping path.
+            // Manifest-less directory: per the spec, identify and
+            // remove incomplete unindexed groups. Compute the bytes
+            // before the recursive delete so the outcome reflects the
+            // actual disk outcome even after the remove.
+            match remove_dir_with_size(&path) {
+                Ok(bytes) => {
+                    outcome.unindexed_dirs_removed =
+                        outcome.unindexed_dirs_removed.saturating_add(1);
+                    outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(bytes);
+                }
+                Err(_err) => {
+                    outcome.partial_failures = outcome.partial_failures.saturating_add(1);
+                }
+            }
         }
         Ok(outcome)
     }
 
     /// Manually clear every *unlocked* entry. Used by the
-    /// `clear_cache` IPC. Locked entries (shelf + editor / drag /
-    /// pin) are not touched — the sweep outcome records the
-    /// survivors so the UI can explain "X entries kept because they
-    /// are in use".
-    pub fn try_clear(&self) -> pixelgrab_contracts::SweepOutcome {
+    /// `clear_cache` IPC. Locked entries (editor / drag / pin
+    /// owners) are not touched — the sweep outcome records the
+    /// survivors so the UI can explain "X entries kept because
+    /// they are in use". The default `Shelf` lock is the marker
+    /// every commit acquires and does NOT protect — manual clear
+    /// is meant to evict everything the user is not actively
+    /// editing.
+    ///
+    /// `bytes_reclaimed` is computed from the on-disk PNG size at
+    /// the moment of dismissal, not the cached `size_bytes`, so
+    /// the UI can show accurate "reclaimed N bytes" feedback.
+    pub fn clear_unlocked_entries(&self) -> pixelgrab_contracts::SweepOutcome {
         let mut outcome = pixelgrab_contracts::SweepOutcome::default();
-        // Snapshot the ids up front so we don't mutate the map
-        // while iterating.
-        let shelf_ids: Vec<String> = self
-            .inner
-            .lock()
-            .entries
-            .keys()
-            .cloned()
-            .collect();
+        let shelf_ids: Vec<String> = self.inner.lock().entries.keys().cloned().collect();
         for shelf_id in shelf_ids {
+            if self.is_protected_from_sweeper(&shelf_id) {
+                // Locked by a non-default owner — keep it.
+                continue;
+            }
+            let on_disk = self.entry_on_disk_size(&shelf_id);
             let outcome_one = match self.dismiss(&shelf_id) {
                 Ok(o) => o,
                 Err(_err) => {
@@ -781,7 +828,7 @@ impl Cache {
             };
             if outcome_one.removed {
                 outcome.quota_evicted = outcome.quota_evicted.saturating_add(1);
-                if let Some(bytes) = self.entry_size_bytes(&shelf_id) {
+                if let Some(bytes) = on_disk {
                     outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(bytes);
                 }
             }
@@ -974,9 +1021,7 @@ fn reap_zero_byte_assets(entry_dir: &Path) -> u32 {
     if let Ok(read_dir) = fs::read_dir(entry_dir) {
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.is_file()
-                && path.extension().and_then(|s| s.to_str()) == Some("tmp")
-            {
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("tmp") {
                 let _ = fs::remove_file(&path);
                 removed = removed.saturating_add(1);
             }
@@ -1000,6 +1045,43 @@ fn reap_empty_assets(entry_dir: &Path) -> u32 {
     } else {
         0
     }
+}
+
+/// Remove a file and return its size in bytes. Returns `Err` when
+/// the file cannot be stat'd or removed. The size is what the
+/// `SweepOutcome::bytes_reclaimed` field reports — the spec requires
+/// reclaimed bytes to reflect the actual disk outcome.
+fn remove_file_with_size(path: &Path) -> std::io::Result<u64> {
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    fs::remove_file(path)?;
+    Ok(size)
+}
+
+/// Recursively remove a directory and return the cumulative on-disk
+/// size of every file removed. Used by the recovery sweep when
+/// reaping manifest-less entry directories and by the eviction
+/// paths so `bytes_reclaimed` reflects what was actually deleted.
+fn remove_dir_with_size(path: &Path) -> std::io::Result<u64> {
+    let mut total: u64 = 0;
+    if path.is_file() {
+        total = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        fs::remove_file(path)?;
+        return Ok(total);
+    }
+    if !path.is_dir() {
+        return Ok(0);
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if child.is_dir() {
+            total = total.saturating_add(remove_dir_with_size(&child)?);
+        } else {
+            total = total.saturating_add(remove_file_with_size(&child).unwrap_or(0));
+        }
+    }
+    fs::remove_dir(path)?;
+    Ok(total)
 }
 
 #[cfg(test)]
