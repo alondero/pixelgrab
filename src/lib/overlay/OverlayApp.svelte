@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { mockGetSessionSnapshot } from "$lib/ipc/shell.svelte";
-  import { requestCommit, requestCancel, saveCaptureAs } from "$lib/ipc/commands";
+  import {
+    getSessionSnapshot,
+    requestCommit,
+    requestCancel,
+    saveCaptureAs,
+  } from "$lib/ipc/commands";
   import KonvaStage from "./KonvaStage.svelte";
   import AnnotationToolbar from "$lib/annotation/AnnotationToolbar.svelte";
   import { annotationStore } from "$lib/annotation/store.svelte";
@@ -20,7 +24,7 @@
   const STAGE_HEIGHT = 1080;
 
   onMount(async () => {
-    const response = await mockGetSessionSnapshot();
+    const response = await getSessionSnapshot();
     if (response.status === "ok" && response.data.lastCapture) {
       capture = response.data.lastCapture;
       lastDiagnosticsId = response.data.lastCapture.captureId;

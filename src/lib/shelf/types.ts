@@ -35,3 +35,14 @@ export interface ShelfCardView {
   bounds: import("$lib/ipc/types").PhysicalBounds;
   metadata: import("$lib/ipc/types").CacheEntryMetadata;
 }
+
+// Wire payload for the `pixelgrab://shelf-cleared` event. Mirrors
+// `crate::shelf::ShelfClearedEvent` in
+// `src-tauri/src/shelf/mod.rs`; the pair tests in
+// `src/lib/ipc/types.test.ts` and
+// `src-tauri/tests/ipc_contracts.rs` keep the two sides in sync so
+// `shelf_id` ↔ `shelfId` drift is caught at CI time.
+export interface ShelfClearedEvent {
+  /** Shelf id of the entry that was fully removed. */
+  shelfId: string;
+}

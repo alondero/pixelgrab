@@ -115,3 +115,16 @@ impl ShelfCardView {
         }
     }
 }
+
+/// Wire payload for the `pixelgrab://shelf-cleared` event. Emitted
+/// by `dismiss_cache_entry` once the cache has fully removed the
+/// entry (so a listener that does not track the queue snapshot still
+/// learns about the removal). The [`ShelfId`] is the same id the
+/// `ShelfCardView` carried, so a frontend listener can correlate
+/// the cleared event with the queue snapshot that follows it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfClearedEvent {
+    /// Shelf id of the entry that was fully removed.
+    pub shelf_id: ShelfId,
+}

@@ -329,6 +329,26 @@ fn shelf_card_view_round_trips() {
 }
 
 #[test]
+fn shelf_cleared_event_round_trips() {
+    // The `ShelfClearedEvent` is the payload of the
+    // `pixelgrab://shelf-cleared` event. The TypeScript mirror in
+    // `src/lib/shelf/types.ts` asserts the same shape; this is the
+    // Rust-side companion. Without this test a `shelf_id` ↔
+    // `shelfId` rename would slip past CI silently because both
+    // sides declare the field inline.
+    let event = pixelgrab_lib::shelf::ShelfClearedEvent {
+        shelf_id: "shelf-id".to_string(),
+    };
+    let json = serde_json::to_string(&event).expect("serialize");
+    // Field names must be camelCase on the wire.
+    assert!(json.contains("\"shelfId\":\"shelf-id\""));
+    // Round-trip.
+    let parsed: pixelgrab_lib::shelf::ShelfClearedEvent =
+        serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.shelf_id, event.shelf_id);
+}
+
+#[test]
 fn start_shelf_drag_intent_serialises_camel_case() {
     let req = DragRequest {
         capture_id: "capture-1".into(),

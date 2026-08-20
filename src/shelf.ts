@@ -18,6 +18,7 @@ import {
   unhoverShelfCard,
 } from "./lib/ipc/commands";
 import type { ShelfQueueSnapshot } from "./lib/ipc/types";
+import type { ShelfClearedEvent } from "./lib/shelf/types";
 import { createFeedbackStore } from "./lib/shelf/feedback.svelte";
 
 const target = document.getElementById("shelf");
@@ -85,7 +86,15 @@ listen<ShelfQueueSnapshot>("pixelgrab://shelf-queue-updated", (event) => {
 // When the backend signals that the shelf is empty (e.g. after a
 // dismissal) the card is hidden, not destroyed — Tauri's webview is
 // cheap to keep alive.
-listen<{ shelfId: string }>("pixelgrab://shelf-cleared", () => {
+listen<ShelfClearedEvent>("pixelgrab://shelf-cleared", (event) => {
+  // The payload carries the cleared `shelfId` so future listeners
+  // (analytics, focused per-card teardown) can correlate against the
+  // queue snapshot that follows. This listener only needs the bare
+  // trigger — the queue snapshot is the authoritative state — so
+  // the field is intentionally unused here but kept in the typed
+  // event to bind the wire shape (see `ShelfClearedEvent` in
+  // `$lib/shelf/types` and the contract pair tests).
+  void event.payload.shelfId;
   // A cleared event is followed (or preceded) by a queue snapshot
   // update. Drop the local copy so the queue UI hides itself; the
   // authoritative state comes from the next snapshot.
