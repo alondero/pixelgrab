@@ -19,6 +19,7 @@ pub mod drag;
 pub mod error;
 pub mod ipc;
 pub mod monitor;
+pub mod pin;
 pub mod session;
 pub mod shelf_preferences;
 pub mod shelf_queue;
@@ -47,6 +48,11 @@ pub use ipc::{
     UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
+pub use pin::{
+    clamp_opacity, clamp_zoom, cursor_centered_zoom, limits as pin_limits, reanchor, scaled,
+    OpenPinRequest, PinAction, PinActionOutcome, PinCommand, PinId, PinLifecycle, PinLockProvider,
+    PinSource, PinTransform, PinViewModel,
+};
 pub use session::{SessionState, SessionTransition};
 pub use shelf_preferences::{
     placement_for, ShelfCorner, ShelfPreferences, ShelfTimerConfigLike, MAX_LIFETIME_SECONDS,

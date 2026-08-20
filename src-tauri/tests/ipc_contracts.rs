@@ -11,6 +11,7 @@ use pixelgrab_contracts::ipc::{
     RequestCommitIntent, RequestOverlayIntent, SessionSnapshot, StartShelfDragIntent,
     StartShelfDragResult,
 };
+use pixelgrab_contracts::pin::{OpenPinRequest, PinCommand, PinSource, PinTransform, PinViewModel};
 use pixelgrab_contracts::session::SessionState;
 
 #[test]
@@ -331,4 +332,59 @@ fn drag_format_labels_are_stable() {
     assert_eq!(DragFormat::RegisteredPng.as_label(), "registered_png");
     assert_eq!(DragFormat::DibV5.as_label(), "dib_v5");
     assert_eq!(DragFormat::UnicodeText.as_label(), "unicode_text");
+=======
+fn pin_view_model_carries_camel_case_fields() {
+    let view = PinViewModel {
+        id: pixelgrab_contracts::PinId::new("p-1"),
+        transform: PinTransform {
+            position: pixelgrab_contracts::PhysicalPoint::new(0, 0),
+            window_size: PhysicalSize::new(200, 100),
+            source_size: PhysicalSize::new(200, 100),
+            zoom: 1.0,
+            opacity: 0.8,
+        },
+        source: PinSource {
+            capture_id: "c-1".to_string(),
+            png_path: Some("/cache/c-1.png".to_string()),
+            bounds: PhysicalBounds::from_xywh(0, 0, 200, 100),
+        },
+    };
+    let json = serde_json::to_string(&view).expect("serialize");
+    assert!(json.contains("\"windowSize\""));
+    assert!(json.contains("\"sourceSize\""));
+    assert!(json.contains("\"captureId\""));
+    assert!(json.contains("\"pngPath\""));
+    let parsed: PinViewModel = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.id.as_str(), "p-1");
+    assert_eq!(parsed.transform.zoom, 1.0);
+}
+
+#[test]
+fn pin_command_carries_tag() {
+    let cmd = PinCommand::Drag { dx: 10, dy: 20 };
+    let json = serde_json::to_string(&cmd).expect("serialize");
+    assert!(json.contains("\"kind\":\"drag\""));
+    assert!(json.contains("\"dx\":10"));
+    assert!(json.contains("\"dy\":20"));
+}
+
+#[test]
+fn pin_open_request_serialises_round_trip() {
+    let req = OpenPinRequest {
+        capture_id: "c-1".to_string(),
+        png_path: "/cache/c-1.png".to_string(),
+        bounds: PhysicalBounds::from_xywh(0, 0, 200, 100),
+        initial_position: Some(pixelgrab_contracts::PhysicalPoint::new(40, 40)),
+    };
+    let json = serde_json::to_string(&req).expect("serialize");
+    assert!(json.contains("\"captureId\""));
+    assert!(json.contains("\"pngPath\""));
+    assert!(json.contains("\"initialPosition\""));
+    let parsed: OpenPinRequest = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.capture_id, "c-1");
+    assert_eq!(parsed.png_path, "/cache/c-1.png");
+    assert_eq!(
+        parsed.initial_position,
+        Some(pixelgrab_contracts::PhysicalPoint::new(40, 40))
+    );
 }

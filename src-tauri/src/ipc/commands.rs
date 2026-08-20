@@ -8,6 +8,7 @@ use std::time::Instant;
 use pixelgrab_contracts::{
     cache::CacheEntryMetadata,
     capture::{CaptureFormat, CaptureRequest},
+    coordinate::{PhysicalBounds, PhysicalSize},
     ipc::{
         CancelOutcome, CaptureResponse, CommitRequest, CommitResponse, DismissCacheEntryRequest,
         DismissCacheEntryResponse, IpcResponse, RequestCaptureIntent, RequestCommitIntent,
@@ -19,8 +20,9 @@ use pixelgrab_contracts::{
         CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
         SaveShelfCardAsResponse, ShelfQueueSnapshot,
     },
-    CaptureDiagnostics, MonitorDescriptor, MonitorLayout, PlatformError, PlatformErrorKind,
-    ShelfId, ShelfPreferences,
+    CaptureDiagnostics, MonitorDescriptor, MonitorLayout, OpenPinRequest, PinAction,
+    PinActionOutcome, PinCommand, PinId, PinViewModel, PlatformError, PlatformErrorKind,
+    PlatformResult, ShelfId, ShelfPreferences,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -849,4 +851,139 @@ fn monitor_id_for(capture: &pixelgrab_contracts::capture::CaptureResolution) -> 
         CaptureFormat::SingleMonitor => "single-monitor".into(),
         CaptureFormat::PhysicalRegion => "physical-region".into(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pin commands
+// ---------------------------------------------------------------------------
+
+/// Open a new pin from the supplied capture metadata. The registry acquires
+/// a cache lock; the returned view model is the initial state.
+#[tauri::command]
+pub fn open_pin(app: AppState<'_>, request: OpenPinRequest) -> IpcResponse<PinViewModel> {
+    IpcResponse::from_result(app.pin_registry().open(request))
+}
+
+/// Close a pin. Releases the cache lock; the native window is destroyed by
+/// the frontend on receipt of the close event.
+#[tauri::command]
+pub fn close_pin(app: AppState<'_>, pin_id: PinId) -> IpcResponse<()> {
+    IpcResponse::from_result(app.pin_registry().close(&pin_id))
+}
+
+/// Apply a drag/zoom/opacity/reset/anchor command to a pin.
+#[tauri::command]
+pub fn apply_pin_command(
+    app: AppState<'_>,
+    pin_id: PinId,
+    command: PinCommand,
+) -> IpcResponse<PinViewModel> {
+    IpcResponse::from_result(app.pin_registry().apply(&pin_id, command))
+}
+
+/// Read the view model for one pin.
+#[tauri::command]
+pub fn get_pin(app: AppState<'_>, pin_id: PinId) -> IpcResponse<PinViewModel> {
+    IpcResponse::from_result(app.pin_registry().view(&pin_id))
+}
+
+/// List all open pins.
+#[tauri::command]
+pub fn list_pins(app: AppState<'_>) -> IpcResponse<Vec<PinViewModel>> {
+    IpcResponse::from_result(Ok(app.pin_registry().list()))
+}
+
+/// Apply a context-menu action to a pin. Copy / SaveAs / Reset / Close.
+#[tauri::command]
+pub fn pin_action(
+    app: AppState<'_>,
+    pin_id: PinId,
+    action: PinAction,
+) -> IpcResponse<PinActionOutcome> {
+    IpcResponse::from_result(perform_pin_action(&app, &pin_id, action))
+}
+
+/// Notify the registry that the monitor layout has changed. The registry
+/// re-anchors any orphan pin into the new work area without resetting
+/// zoom or opacity.
+#[tauri::command]
+pub fn notify_pin_display_change(app: AppState<'_>, work_area: PhysicalBounds) -> IpcResponse<()> {
+    app.pin_registry().handle_display_change(work_area);
+    IpcResponse::from_result(Ok(()))
+}
+
+/// Implementation of a pin action. The Copy / SaveAs path reads the PNG
+/// from disk (the single source of truth established by the tracer-02
+/// commit pipeline) and routes through the same platform contract the
+/// commit pipeline uses — so the pin source pixels are guaranteed to
+/// match the shelf's source pixels.
+fn perform_pin_action(
+    app: &PixelGrabApp,
+    pin_id: &PinId,
+    action: PinAction,
+) -> PlatformResult<PinActionOutcome> {
+    let view = app.pin_registry().view(pin_id)?;
+    let outcome = match action {
+        PinAction::Copy => {
+            let (bytes, size) = read_pin_source(&view)?;
+            // The clipboard adapter converts the source PNG bytes into a
+            // bitmap-compatible representation. The synthetic adapter is
+            // a no-op so CI never touches a real clipboard; the Windows
+            // adapter publishes the same bitmap the commit pipeline uses.
+            app.platform()
+                .publish_clipboard(&view.source.capture_id, &bytes, size)?;
+            PinActionOutcome {
+                pin_id: pin_id.clone(),
+                action,
+                bytes: Some(bytes.len() as u64),
+                png_path: view.source.png_path.clone(),
+            }
+        }
+        PinAction::SaveAs => {
+            let (bytes, _) = read_pin_source(&view)?;
+            PinActionOutcome {
+                pin_id: pin_id.clone(),
+                action,
+                bytes: Some(bytes.len() as u64),
+                png_path: view.source.png_path.clone(),
+            }
+        }
+        PinAction::Reset => {
+            app.pin_registry().apply(pin_id, PinCommand::Reset)?;
+            PinActionOutcome {
+                pin_id: pin_id.clone(),
+                action,
+                bytes: None,
+                png_path: view.source.png_path.clone(),
+            }
+        }
+        PinAction::Close => {
+            app.pin_registry().close(pin_id)?;
+            PinActionOutcome {
+                pin_id: pin_id.clone(),
+                action,
+                bytes: None,
+                png_path: None,
+            }
+        }
+    };
+    Ok(outcome)
+}
+
+/// Read the pin source PNG. Returns the raw bytes and the source size.
+/// The cache lock guarantees the file is still on disk; the PNG path
+/// stored on the view model is the single source of truth established by
+/// the tracer-02 commit pipeline.
+fn read_pin_source(view: &PinViewModel) -> PlatformResult<(Vec<u8>, PhysicalSize)> {
+    let path = view.source.png_path.as_ref().ok_or_else(|| {
+        PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "pin source has no png_path",
+        )
+    })?;
+    let bytes = std::fs::read(path).map_err(|err| {
+        PlatformError::new(PlatformErrorKind::Io, format!("read pin source: {err}"))
+    })?;
+    let size = view.source.bounds.size;
+    Ok((bytes, size))
 }
