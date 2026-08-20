@@ -48,6 +48,57 @@ describe("AnnotationToolbar", () => {
     expect(annotationStore.stroke).toBe("thick");
   });
 
+  it("with a single selection, the toolbar reflects the selected annotation's colour", () => {
+    annotationStore.setTool("rectangle");
+    annotationStore.beginDraft("rectangle", { x: 0, y: 0 });
+    annotationStore.updateDraft({ x: 50, y: 50 });
+    annotationStore.commitDraft();
+    annotationStore.setColor("blue");
+    annotationStore.beginDraft("rectangle", { x: 100, y: 100 });
+    annotationStore.updateDraft({ x: 150, y: 150 });
+    annotationStore.commitDraft();
+    const ids = annotationStore.annotations.map((a) => a.id);
+    // Select the second rectangle (which is blue).
+    annotationStore.selectOnly(ids[1]);
+    const { getByTestId } = render(AnnotationToolbar, { visible: true });
+    const blue = getByTestId("color-blue");
+    expect(blue.getAttribute("data-active")).toBe("active");
+    expect(getByTestId("color-state").getAttribute("data-state")).toBe("selected");
+  });
+
+  it("mixed selection reports the heterogeneous state on the swatch group", () => {
+    annotationStore.setTool("rectangle");
+    annotationStore.beginDraft("rectangle", { x: 0, y: 0 });
+    annotationStore.updateDraft({ x: 50, y: 50 });
+    annotationStore.commitDraft();
+    annotationStore.setColor("green");
+    annotationStore.beginDraft("rectangle", { x: 100, y: 100 });
+    annotationStore.updateDraft({ x: 150, y: 150 });
+    annotationStore.commitDraft();
+    annotationStore.selectAll();
+    const { getByTestId } = render(AnnotationToolbar, { visible: true });
+    expect(getByTestId("color-state").getAttribute("data-state")).toBe("mixed");
+    // The swatches carry the indeterminate marker so the styling
+    // layer can dashed-border the active swatch.
+    expect(getByTestId("color-red").getAttribute("data-active")).toBe("mixed");
+  });
+
+  it("clicking a colour swatch with a selection updates every selected annotation", () => {
+    annotationStore.setTool("rectangle");
+    annotationStore.beginDraft("rectangle", { x: 0, y: 0 });
+    annotationStore.updateDraft({ x: 50, y: 50 });
+    annotationStore.commitDraft();
+    annotationStore.beginDraft("rectangle", { x: 100, y: 100 });
+    annotationStore.updateDraft({ x: 150, y: 150 });
+    annotationStore.commitDraft();
+    annotationStore.selectAll();
+    const { getByTestId } = render(AnnotationToolbar, { visible: true });
+    getByTestId("color-yellow").click();
+    for (const a of annotationStore.annotations) {
+      expect(a.color).toBe("yellow");
+    }
+  });
+
   it("undo/redo buttons start disabled and enable after a committed action", async () => {
     const { getByTestId } = render(AnnotationToolbar, { visible: true });
     expect((getByTestId("undo") as HTMLButtonElement).disabled).toBe(true);
