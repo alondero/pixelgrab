@@ -1,0 +1,116 @@
+name: Branch protection guard
+
+# The ruleset that protects main is configured on GitHub.com (not in code),
+# so it is one settings-page click away from being silently disabled. This
+# workflow makes any tampering with the ruleset a CI-visible event: if the
+# named ruleset is missing, weakened, or unenforced, the next push to main
+# fails a specific check with a message naming exactly what is wrong.
+#
+# See .github/rulesets/protect-main.json for the source of truth and
+# issue #35 for the original incident (a red PR merged and broke main).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly check at Monday 06:00 UTC. Catches silent deletion of the
+    # ruleset even on a quiet repo with no recent merges to main.
+    - cron: "0 6 * * 1"
+
+# Skip fork pull requests: GITHUB_TOKEN on forks has read-only scope and
+# cannot call the rulesets API. The push trigger still catches any rule
+# weakening after the PR merges.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  assert-ruleset:
+    name: Verify main branch protection ruleset
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Fetch and verify rulesets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          expected_name="Protect main - CI must pass"
+          expected_checks=("Frontend (lint, typecheck, test)" "Rust (fmt, clippy, test)")
+
+          # The list endpoint returns summary metadata only (no rule bodies).
+          # Fetch the summary first to find the ruleset id, then the full
+          # ruleset by id so we can inspect its rules.
+          summary=$(gh api "repos/${{ github.repository }}/rulesets")
+
+          echo "All repository rulesets:"
+          echo "$summary" | jq -r '.[] | "  - \(.id): \(.name) (\(.enforcement))"'
+
+          ruleset_id=$(echo "$summary" | jq --arg name "$expected_name" -r '.[] | select(.name == $name) | .id // empty')
+
+          if [ -z "$ruleset_id" ]; then
+            echo "::error title=Ruleset missing::Required ruleset '$expected_name' is not configured on this repository."
+            exit 1
+          fi
+
+          ruleset=$(gh api "repos/${{ github.repository }}/rulesets/$ruleset_id")
+
+          enforcement=$(echo "$ruleset" | jq -r '.enforcement')
+          if [ "$enforcement" != "active" ]; then
+            echo "::error title=Ruleset not enforced::Ruleset '$expected_name' enforcement is '$enforcement' (expected 'active')."
+            exit 1
+          fi
+
+          # Pull-request rule (blocks direct pushes to main).
+          pr_rule=$(echo "$ruleset" | jq -r '.rules[] | select(.type == "pull_request") | .type')
+          if [ -z "$pr_rule" ]; then
+            echo "::error title=PR rule missing::Ruleset '$expected_name' is missing the 'pull_request' rule."
+            exit 1
+          fi
+
+          # Non-fast-forward rule (blocks force pushes).
+          ff_rule=$(echo "$ruleset" | jq -r '.rules[] | select(.type == "non_fast_forward") | .type')
+          if [ -z "$ff_rule" ]; then
+            echo "::error title=Force-push rule missing::Ruleset '$expected_name' is missing the 'non_fast_forward' rule."
+            exit 1
+          fi
+
+          # Required status checks rule.
+          checks_rule=$(echo "$ruleset" | jq -r '.rules[] | select(.type == "required_status_checks")')
+          if [ -z "$checks_rule" ]; then
+            echo "::error title=Status checks missing::Ruleset '$expected_name' is missing the 'required_status_checks' rule."
+            exit 1
+          fi
+
+          strict=$(echo "$checks_rule" | jq -r '.parameters.strict_required_status_checks_policy')
+          if [ "$strict" != "true" ]; then
+            echo "::error title=Up-to-date policy missing::Ruleset '$expected_name' strict_required_status_checks_policy is '$strict' (expected 'true' so PRs must be up to date with main before merge)."
+            exit 1
+          fi
+
+          actual_checks=$(echo "$checks_rule" | jq -r '.parameters.required_status_checks[]?.context')
+          echo "Required status checks in ruleset:"
+          echo "$actual_checks" | sed 's/^/  - /'
+
+          missing=()
+          for expected in "${expected_checks[@]}"; do
+            if ! echo "$actual_checks" | grep -Fxq "$expected"; then
+              missing+=("$expected")
+            fi
+          done
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error title=Status check missing::Ruleset '$expected_name' is missing required status checks:"
+            for m in "${missing[@]}"; do
+              echo "  - $m"
+            done
+            exit 1
+          fi
+
+          echo "OK: Ruleset '$expected_name' (id $ruleset_id) is correctly configured."

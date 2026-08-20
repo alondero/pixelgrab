@@ -48,6 +48,30 @@ pnpm licenses:check
 The CI pipeline runs the same gates plus a production build. A PR that
 fails CI will not be merged.
 
+## Branch protection on `main`
+
+`main` is protected by the `Protect main - CI must pass` ruleset
+(defined in `.github/rulesets/protect-main.json`). The ruleset enforces:
+
+- **Required status checks** — `Frontend (lint, typecheck, test)` and
+  `Rust (fmt, clippy, test)` must both pass. The `Build (production)`
+  and `Packaged-app smoke test` jobs are intentionally **not** required:
+  the CI graph is `install -> {rust, frontend} -> build -> e2e`, so a
+  frontend failure leaves `build` and `e2e` skipped (not failed), which
+  would deadlock the merge button.
+- **Strict up-to-date branches** — the PR must be rebased onto the
+  latest `main` before merge. Pushes that fall behind are blocked.
+- **Pull request required** — direct pushes to `main` are blocked; every
+  change goes through a PR.
+- **No force pushes** — `non_fast_forward` rule blocks history rewrites
+  on `main`.
+
+The `.github/workflows/branch-protection-guard.yml` workflow runs on
+every push to `main` and weekly, and fails CI if the ruleset is missing,
+unenforced, or weakened. If a future change needs to alter the rules,
+edit `.github/rulesets/protect-main.json`, apply it via the GitHub API,
+and confirm the guard still passes.
+
 ## Tracer workflow
 
 PixelGrab is delivered through "tracer" issues. Each tracer is a self-contained
