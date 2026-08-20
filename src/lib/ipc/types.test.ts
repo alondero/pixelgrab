@@ -303,4 +303,68 @@ describe("IPC type contract", () => {
     expect(json.commit).toBe(true);
     expect(json.preferences.corner).toBe("bottom_right");
   });
+
+  // --- Tracer-05: text + blur + Save As wire shapes ------------------
+
+  it("AnnotationGeometry text variant carries text payload", () => {
+    const geom: import("./types").AnnotationGeometry = {
+      kind: "text",
+      origin: { x: 10, y: 20 },
+      size: { width: 120, height: 40 },
+      text: "hello\nworld",
+    };
+    const json = JSON.parse(JSON.stringify(geom));
+    expect(json.kind).toBe("text");
+    expect(json.text).toBe("hello\nworld");
+    expect(json.size.width).toBe(120);
+  });
+
+  it("AnnotationGeometry blur variant carries radius payload", () => {
+    const geom: import("./types").AnnotationGeometry = {
+      kind: "blur",
+      origin: { x: 5, y: 5 },
+      size: { width: 40, height: 40 },
+      radius: 4,
+    };
+    const json = JSON.parse(JSON.stringify(geom));
+    expect(json.kind).toBe("blur");
+    expect(json.radius).toBe(4);
+  });
+
+  it("AnnotationTool includes text and blur", () => {
+    // Type-level + runtime check: the union is wired through to the
+    // wire shape. A future contributor who drops a tool will see a
+    // compile error here.
+    const tools: Array<import("./types").AnnotationTool> = [
+      "select",
+      "arrow",
+      "rectangle",
+      "numbered_badge",
+      "text",
+      "blur",
+    ];
+    expect(tools).toContain("text");
+    expect(tools).toContain("blur");
+  });
+
+  it("SaveCaptureAsRequest carries crop + annotations + suggested filename", () => {
+    const req: import("./types").SaveCaptureAsRequest = {
+      crop: { origin: { x: 0, y: 0 }, size: { width: 200, height: 100 } },
+      annotations: [],
+      suggestedFilename: "capture.png",
+    };
+    const json = JSON.parse(JSON.stringify(req));
+    expect(json.suggestedFilename).toBe("capture.png");
+    expect(json.crop.size.width).toBe(200);
+    expect(json.annotations).toEqual([]);
+  });
+
+  it("SaveCaptureAsResponse omits path when cancelled", () => {
+    const resp: import("./types").SaveCaptureAsResponse = {
+      pngBytes: 0,
+    };
+    const json = JSON.parse(JSON.stringify(resp));
+    expect(json.path).toBeUndefined();
+    expect(json.pngBytes).toBe(0);
+  });
 });

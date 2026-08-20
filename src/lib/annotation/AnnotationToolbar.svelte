@@ -18,6 +18,8 @@
     { id: "arrow", label: "Arrow", key: "A", glyph: "↗" },
     { id: "rectangle", label: "Rectangle", key: "R", glyph: "▭" },
     { id: "numbered_badge", label: "Badge", key: "N", glyph: "1" },
+    { id: "text", label: "Text", key: "T", glyph: "T" },
+    { id: "blur", label: "Blur", key: "B", glyph: "▒" },
   ];
 
   type ColorDef = { id: AnnotationColor; label: string; swatch: string };

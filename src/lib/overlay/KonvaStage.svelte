@@ -27,10 +27,19 @@
     onSelectionChange: (bounds: PhysicalBounds | null) => void;
     onCommit?: () => void;
     onCancel?: () => void;
+    onSaveAs?: () => void;
   }
 
-  let { assetUrl, bounds, stageWidth, stageHeight, onSelectionChange, onCommit, onCancel }: Props =
-    $props();
+  let {
+    assetUrl,
+    bounds,
+    stageWidth,
+    stageHeight,
+    onSelectionChange,
+    onCommit,
+    onCancel,
+    onSaveAs,
+  }: Props = $props();
 
   let container: HTMLDivElement;
   let stage: Konva.Stage | null = null;
@@ -58,6 +67,13 @@
   // take over the pointer until the user cancels or commits.
   let drawingDraft = $state(false);
   let draftStart: PhysicalPoint | null = null;
+  // Text editor overlay visibility. Set true at the end of a text
+  // draft drag; reset when the overlay commits or cancels.
+  let textEditing = $state(false);
+  // IME composition flag. When `true`, the editor is mid-CJK or
+  // candidate selection; Enter / Escape are suppressed so the IME's
+  // own confirmation Enter does not commit prematurely.
+  let isComposing = $state(false);
 
   type HandlePosition = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
@@ -412,39 +428,102 @@
     }
     // Numbered badge: a filled circle plus a centred digit drawn as a
     // Group so the digit text overlays the fill.
-    const { center, radius } = annotation.geometry;
-    const group = new Konva.Group({ listening: false, opacity });
-    group.add(
-      new Konva.Circle({
-        x: center.x,
-        y: center.y,
-        radius,
-        fill: color,
-        stroke: "#1a1a1a",
-        strokeWidth: Math.max(1, strokeWidth / 2),
-        listening: false,
-      }),
-    );
-    if (annotation.number !== undefined) {
-      const digits = String(annotation.number);
+    if (annotation.geometry.kind === "numbered_badge") {
+      const { center, radius } = annotation.geometry;
+      const group = new Konva.Group({ listening: false, opacity });
       group.add(
-        new Konva.Text({
-          x: center.x - radius,
-          y: center.y - radius * 0.4,
-          width: radius * 2,
-          text: digits,
-          fontSize: radius * 0.9,
-          fontStyle: "bold",
-          align: "center",
-          // Mirror the Rust rasterizer's luminance rule: dark text on
-          // light fills, light text on dark fills. White badges must
-          // not paint an invisible "1".
-          fill: digitFillForColor(color),
+        new Konva.Circle({
+          x: center.x,
+          y: center.y,
+          radius,
+          fill: color,
+          stroke: "#1a1a1a",
+          strokeWidth: Math.max(1, strokeWidth / 2),
           listening: false,
         }),
       );
+      if (annotation.number !== undefined) {
+        const digits = String(annotation.number);
+        group.add(
+          new Konva.Text({
+            x: center.x - radius,
+            y: center.y - radius * 0.4,
+            width: radius * 2,
+            text: digits,
+            fontSize: radius * 0.9,
+            fontStyle: "bold",
+            align: "center",
+            // Mirror the Rust rasterizer's luminance rule: dark text on
+            // light fills, light text on dark fills. White badges must
+            // not paint an invisible "1".
+            fill: digitFillForColor(color),
+            listening: false,
+          }),
+        );
+      }
+      return group;
     }
-    return group;
+    // Text: a translucent plate preview plus the user-typed content.
+    // The preview can't sample source pixels, so we use a neutral
+    // mid-tone plate; the rust-side plate picks the real colour at
+    // flatten time via the source-luminance rule.
+    if (annotation.geometry.kind === "text") {
+      const { origin, size, text } = annotation.geometry;
+      const group = new Konva.Group({ listening: false, opacity });
+      group.add(
+        new Konva.Rect({
+          x: origin.x,
+          y: origin.y,
+          width: Math.max(size.width, 4),
+          height: Math.max(size.height, 4),
+          fill: "rgba(255, 255, 255, 0.85)",
+          stroke: "#4f46e5",
+          strokeWidth: 1,
+          dash: [4, 3],
+          listening: false,
+        }),
+      );
+      if (text) {
+        group.add(
+          new Konva.Text({
+            x: origin.x + 4,
+            y: origin.y + 4,
+            width: Math.max(size.width - 8, 0),
+            height: Math.max(size.height - 8, 0),
+            text,
+            fontSize: 14,
+            fontFamily: "system-ui, sans-serif",
+            fill: "#141414",
+            listening: false,
+          }),
+        );
+      }
+      return group;
+    }
+    // Blur: a translucent dark rectangle so the user sees the
+    // redaction zone. The real blur is sampled from the source at
+    // flatten time.
+    if (annotation.geometry.kind === "blur") {
+      const { origin, size } = annotation.geometry;
+      const group = new Konva.Group({ listening: false, opacity });
+      group.add(
+        new Konva.Rect({
+          x: origin.x,
+          y: origin.y,
+          width: Math.max(size.width, 4),
+          height: Math.max(size.height, 4),
+          fill: "rgba(0, 0, 0, 0.4)",
+          stroke: "#4f46e5",
+          strokeWidth: 1,
+          dash: [4, 3],
+          listening: false,
+        }),
+      );
+      return group;
+    }
+    // Exhaustiveness: the discriminated union is exhaustive so this
+    // line is unreachable, but TypeScript needs a fallthrough return.
+    return new Konva.Group({ listening: false });
   }
 
   /// Compute the badge digit colour that contrasts with the badge
@@ -488,13 +567,25 @@
     annotationLayer.draw();
   }
 
+  // Svelte action: focus the bound element on mount. Used by the
+  // text-editor textarea so the keyboard lands on the editor
+  // immediately after a drag-to-size commit. Avoids the
+  // `a11y-autofocus` lint that the raw `autofocus` attribute
+  // triggers.
+  function focusOnMount(node: HTMLTextAreaElement) {
+    node.focus();
+    return {};
+  }
+
   // ---- Pointer / keyboard handlers ---------------------------------
 
   function isDrawingTool(): boolean {
     return (
       annotationStore.tool === "arrow" ||
       annotationStore.tool === "rectangle" ||
-      annotationStore.tool === "numbered_badge"
+      annotationStore.tool === "numbered_badge" ||
+      annotationStore.tool === "text" ||
+      annotationStore.tool === "blur"
     );
   }
 
@@ -506,13 +597,12 @@
     if (!local) return;
     drawingDraft = true;
     draftStart = local;
-    const kind =
-      annotationStore.tool === "arrow"
-        ? "arrow"
-        : annotationStore.tool === "rectangle"
-          ? "rectangle"
-          : "numbered_badge";
-    annotationStore.beginDraft(kind, local);
+    // `isDrawingTool` guarantees the tool is one of the drawable
+    // kinds (excludes "select"); narrow the union here so the call
+    // to `beginDraft` keeps its strict signature.
+    const tool = annotationStore.tool;
+    if (tool === "select") return;
+    annotationStore.beginDraft(tool, local);
     rerenderAnnotations();
   }
 
@@ -530,7 +620,10 @@
     drawingDraft = false;
     draftStart = null;
     // For badges we always commit (a single click is a valid badge).
-    // For arrows and rectangles, only commit if the shape has area.
+    // For arrows, rectangles, and blur we commit if the shape has
+    // area. For text the draft stays open until the overlay commits
+    // (Enter) or cancels (Escape) — so the user can drag a box, see
+    // the editor appear, type a label, and confirm.
     const draft = annotationStore.draft;
     if (!draft) return;
     if (draft.geometry.kind === "arrow") {
@@ -547,15 +640,33 @@
         rerenderAnnotations();
         return;
       }
+    } else if (draft.geometry.kind === "blur") {
+      if (draft.geometry.size.width < 4 || draft.geometry.size.height < 4) {
+        annotationStore.cancelDraft();
+        rerenderAnnotations();
+        return;
+      }
+    } else if (draft.geometry.kind === "text") {
+      if (draft.geometry.size.width < 4 || draft.geometry.size.height < 4) {
+        annotationStore.cancelDraft();
+        rerenderAnnotations();
+        return;
+      }
+      // The overlay editor opens via the `textEditing` reactive flag
+      // (see below); do NOT commit yet.
+      textEditing = true;
+      rerenderAnnotations();
+      return;
     }
     annotationStore.commitDraft();
     rerenderAnnotations();
   }
 
   function handleKey(event: KeyboardEvent) {
-    // Annotation shortcuts: A/R/N/V switch tools; Ctrl+Z / Ctrl+Shift+Z
-    // operate on history. Escape staged: first clears the draft, then
-    // cancels the session via `onCancel`.
+    // Annotation shortcuts: A/R/N/V/T/B switch tools; Ctrl+Z /
+    // Ctrl+Shift+Z operate on history; Ctrl+S triggers native Save
+    // As for the active session. Escape staged: first clears the
+    // draft (and the text overlay), then cancels the session.
     const key = event.key.toLowerCase();
     if (event.ctrlKey || event.metaKey) {
       if (key === "z" && !event.shiftKey) {
@@ -568,6 +679,13 @@
         event.preventDefault();
         annotationStore.redo();
         rerenderAnnotations();
+        return;
+      }
+      if (key === "s") {
+        // Tracer-05: native Save As for the in-flight session. The
+        // host (OverlayApp) wires this to the `save_capture_as` IPC.
+        event.preventDefault();
+        onSaveAs?.();
         return;
       }
     }
@@ -589,14 +707,23 @@
           event.preventDefault();
           annotationStore.setTool("select");
           return;
+        case "t":
+          event.preventDefault();
+          annotationStore.setTool("text");
+          return;
+        case "b":
+          event.preventDefault();
+          annotationStore.setTool("blur");
+          return;
       }
     }
     if (event.key === "Escape") {
-      // First Escape: drop any in-flight draft. Second Escape: clear
-      // the crop. Final Escape: cancel the session.
-      if (annotationStore.draft) {
+      // First Escape: drop any in-flight draft and close the text
+      // editor. Second Escape: cancel the session.
+      if (annotationStore.draft || textEditing) {
         event.preventDefault();
         annotationStore.cancelDraft();
+        textEditing = false;
         rerenderAnnotations();
         return;
       }
@@ -817,10 +944,71 @@
   style:height="{stageHeight}px"
 ></div>
 
+{#if textEditing && annotationStore.draft && annotationStore.draft.geometry.kind === "text" && cropCssRect()}
+  {@const crop = cropCssRect()!}
+  {@const draftText = annotationStore.draft.geometry}
+  {@const scaleX = stageWidth / bounds.size.width}
+  {@const scaleY = stageHeight / bounds.size.height}
+  {@const left = draftText.origin.x * scaleX + crop.x}
+  {@const top = draftText.origin.y * scaleY + crop.y}
+  {@const width = draftText.size.width * scaleX}
+  {@const height = draftText.size.height * scaleY}
+  <textarea
+    class="text-editor"
+    data-testid="text-editor"
+    use:focusOnMount
+    style:left="{left}px"
+    style:top="{top}px"
+    style:width="{Math.max(width, 80)}px"
+    style:height="{Math.max(height, 24)}px"
+    onkeydown={(event) => {
+      // Suppress Enter while an IME composition is in flight — the
+      // browser emits Enter to confirm the IME candidate list, and
+      // we must not commit prematurely.
+      if (event.key === "Enter" && !event.shiftKey && !isComposing) {
+        event.preventDefault();
+        const target = event.currentTarget as HTMLTextAreaElement;
+        annotationStore.commitText(target.value);
+        textEditing = false;
+        rerenderAnnotations();
+      } else if (event.key === "Escape" && !isComposing) {
+        event.preventDefault();
+        annotationStore.cancelDraft();
+        textEditing = false;
+        rerenderAnnotations();
+      }
+    }}
+    oncompositionstart={() => {
+      isComposing = true;
+    }}
+    oncompositionend={() => {
+      isComposing = false;
+    }}
+  ></textarea>
+{/if}
+
 <style>
   .stage-container {
     position: relative;
     width: 100%;
     height: 100%;
+  }
+  .text-editor {
+    position: absolute;
+    z-index: 10;
+    background: rgba(255, 255, 255, 0.95);
+    color: #141414;
+    border: 1px solid #4f46e5;
+    border-radius: 2px;
+    padding: 4px;
+    font-family: system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.2;
+    resize: none;
+    outline: none;
+    box-sizing: border-box;
+    /* Block canvas pointer events so clicks inside the textarea
+       don't fall through to the Konva stage. */
+    pointer-events: auto;
   }
 </style>

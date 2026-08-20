@@ -585,3 +585,42 @@ pub struct ClearCacheResponse {
     /// Outcome of the manual clear pass.
     pub outcome: SweepOutcome,
 }
+
+// ---------------------------------------------------------------------------
+// Tracer 05: native Save As IPC (Ctrl+S).
+// ---------------------------------------------------------------------------
+
+/// Wire shape for the `save_capture_as` IPC. The frontend assembles
+/// the request from the active crop + annotation list + a suggested
+/// filename. The Rust core flattens the crop + annotations, opens
+/// the native Save As dialog, and writes the PNG to the user-chosen
+/// path. Categorical kind strings only — never raw file paths (see
+/// AGENTS.md §9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCaptureAsRequest {
+    /// Final physical crop.
+    pub crop: PhysicalBounds,
+    /// Annotations to flatten onto the frozen crop before encoding.
+    /// Empty list yields the bare framebuffer (no text / blur / arrows).
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
+    /// Default filename suggested in the dialog (e.g. `capture.png`).
+    pub suggested_filename: String,
+}
+
+/// Wire shape for the `save_capture_as` IPC response. Mirrors the
+/// `SaveShelfCardAsResponse` so the frontend can share the feedback
+/// surface. `path` is `None` when the user cancelled the dialog;
+/// `png_bytes` is `0` in that case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCaptureAsResponse {
+    /// Absolute path the user chose. `None` when the dialog was
+    /// cancelled. Set only in the success variant — categorical
+    /// error kinds never expose the path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Number of PNG bytes written. Zero on cancel.
+    pub png_bytes: u64,
+}

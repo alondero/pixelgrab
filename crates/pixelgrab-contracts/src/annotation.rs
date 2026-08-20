@@ -27,7 +27,7 @@ pub struct AnnotationId(pub u64);
 /// The annotation geometry. Discriminated by [`AnnotationKind`]. Every
 /// coordinate is in physical pixels relative to the active crop's
 /// top-left corner.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnnotationGeometry {
     /// Arrow: a stroked line from `tail` to `tip` plus a filled
@@ -52,6 +52,33 @@ pub enum AnnotationGeometry {
         /// Centre of the badge.
         center: PhysicalPoint,
         /// Radius in physical pixels (typically `BADGE_RADIUS_PX`).
+        radius: u32,
+    },
+    /// Text label inside a draggable box. The rasterizer wraps the
+    /// text to fit within the box's width and paints a solid plate
+    /// (auto-derived from the source region's mean luminance) so the
+    /// glyph colour always reads cleanly.
+    Text {
+        /// Top-left of the text box, in physical pixels.
+        origin: PhysicalPoint,
+        /// Box extent. Wrapping happens at render time.
+        size: PhysicalSize,
+        /// User-authored text. Embedded `\n` is honoured; word-wrap
+        /// happens at render time.
+        text: String,
+    },
+    /// Blur/redaction. Rasterizer samples the **immutable source
+    /// framebuffer** (not the in-flight output buffer) so the
+    /// redaction cannot be defeated by reordering the z-order or
+    /// rerunning the flatten pipeline without blur.
+    Blur {
+        /// Top-left of the blur region.
+        origin: PhysicalPoint,
+        /// Blur region extent.
+        size: PhysicalSize,
+        /// Half-extent of the box-blur kernel. The kernel covers
+        /// `[x-radius, x+radius] × [y-radius, y+radius]`. A radius of
+        /// 4 yields a 9×9 neighbourhood average.
         radius: u32,
     },
 }
@@ -225,6 +252,50 @@ impl Annotation {
             number: Some(number),
         }
     }
+
+    /// Convenience constructor for a text annotation.
+    pub fn text(
+        id: AnnotationId,
+        origin: PhysicalPoint,
+        size: PhysicalSize,
+        text: String,
+        color: AnnotationColor,
+        stroke: AnnotationStroke,
+        z_order: i32,
+    ) -> Self {
+        Self {
+            id,
+            geometry: AnnotationGeometry::Text { origin, size, text },
+            color,
+            stroke,
+            z_order,
+            number: None,
+        }
+    }
+
+    /// Convenience constructor for a blur/redaction annotation.
+    pub fn blur(
+        id: AnnotationId,
+        origin: PhysicalPoint,
+        size: PhysicalSize,
+        radius: u32,
+        z_order: i32,
+    ) -> Self {
+        // Color + stroke are ignored by the blur rasterizer but kept
+        // on the wire for shape uniformity with the other variants.
+        Self {
+            id,
+            geometry: AnnotationGeometry::Blur {
+                origin,
+                size,
+                radius,
+            },
+            color: AnnotationColor::White,
+            stroke: AnnotationStroke::Medium,
+            z_order,
+            number: None,
+        }
+    }
 }
 
 // Re-export the physical types from the coordinate module so this file
@@ -240,6 +311,14 @@ pub use crate::coordinate::{PhysicalPoint, PhysicalSize};
 /// in that order. Two annotations sharing `z_order` and `id` paint the
 /// same pixels every time, so the export PNG and the clipboard bitmap
 /// stay byte-identical across rebakes.
+///
+/// Source vs. destination: the input slice is the *immutable* source
+/// framebuffer (the frozen crop pixels). The output buffer is a fresh
+/// copy of the source; paint operations read from `src` (e.g. blur
+/// samples the original source, text samples source for plate
+/// contrast) and write to `dst`. This split is what makes the blur
+/// leak guard structural: a pipeline that forgets to flatten loses
+/// the blur along with the export.
 pub fn flatten_annotations(rgba: &[u8], size: PhysicalSize, annotations: &[Annotation]) -> Vec<u8> {
     assert_eq!(
         rgba.len(),
@@ -250,24 +329,31 @@ pub fn flatten_annotations(rgba: &[u8], size: PhysicalSize, annotations: &[Annot
     sorted.sort_by_key(|a| (a.z_order, a.id.0));
     let mut out = rgba.to_vec();
     for annotation in sorted {
-        paint_annotation(&mut out, size, annotation);
+        paint_annotation(rgba, &mut out, size, annotation);
     }
     out
 }
 
-/// Paint a single annotation. Internal helper; public for tests.
-pub fn paint_annotation(rgba: &mut [u8], size: PhysicalSize, annotation: &Annotation) {
+/// Paint a single annotation. The `src` slice is the immutable source
+/// framebuffer; the `dst` slice is the running output buffer (already
+/// a copy of `src`). Blur and Text read from `src`; arrow / rectangle /
+/// badge write through to `dst` only.
+///
+/// The `src` and `dst` arguments may alias (e.g. a test that paints
+/// directly without going through `flatten_annotations`); the arrow,
+/// rectangle, and badge variants are agnostic to this.
+pub fn paint_annotation(src: &[u8], dst: &mut [u8], size: PhysicalSize, annotation: &Annotation) {
     let color = annotation.color.paint();
     match annotation.geometry {
         AnnotationGeometry::Arrow { tail, tip } => {
-            paint_arrow(rgba, size, tail, tip, annotation.stroke.width_px(), color);
+            paint_arrow(dst, size, tail, tip, annotation.stroke.width_px(), color);
         }
         AnnotationGeometry::Rectangle {
             origin,
             size: rect_size,
         } => {
             paint_rectangle(
-                rgba,
+                dst,
                 size,
                 origin,
                 rect_size,
@@ -278,7 +364,7 @@ pub fn paint_annotation(rgba: &mut [u8], size: PhysicalSize, annotation: &Annota
         AnnotationGeometry::NumberedBadge { center, radius } => {
             let number = annotation.number.unwrap_or(0);
             paint_badge(
-                rgba,
+                dst,
                 size,
                 center,
                 radius,
@@ -286,6 +372,29 @@ pub fn paint_annotation(rgba: &mut [u8], size: PhysicalSize, annotation: &Annota
                 color,
                 number,
             );
+        }
+        AnnotationGeometry::Text {
+            origin,
+            size: box_size,
+            ref text,
+        } => {
+            paint_text(
+                src,
+                dst,
+                size,
+                origin,
+                box_size,
+                text,
+                color,
+                annotation.stroke,
+            );
+        }
+        AnnotationGeometry::Blur {
+            origin,
+            size: blur_size,
+            radius,
+        } => {
+            paint_blur(src, dst, size, origin, blur_size, radius);
         }
     }
 }
@@ -441,6 +550,22 @@ fn digit_color_for_luminance(fill: PaintColor) -> PaintColor {
             b: 0x14,
             a: 0xFF,
         }
+    }
+}
+
+/// Blend the user's chosen colour into the contrast-determined glyph
+/// base. The user-colour weight (60 %) is large enough to read as the
+/// chosen hue but small enough that the contrast base still wins on
+/// legibility. Used by `paint_text` so the 5-colour palette is
+/// visible in the export without compromising readability.
+fn tint_glyph(base: PaintColor, user: PaintColor) -> PaintColor {
+    const USER_WEIGHT: f64 = 0.6;
+    const BASE_WEIGHT: f64 = 1.0 - USER_WEIGHT;
+    PaintColor {
+        r: ((base.r as f64) * BASE_WEIGHT + (user.r as f64) * USER_WEIGHT) as u8,
+        g: ((base.g as f64) * BASE_WEIGHT + (user.g as f64) * USER_WEIGHT) as u8,
+        b: ((base.b as f64) * BASE_WEIGHT + (user.b as f64) * USER_WEIGHT) as u8,
+        a: 0xFF,
     }
 }
 
@@ -690,6 +815,750 @@ fn paint_digit(
     }
 }
 
+// --- ASCII bitmap font (tracer-05) -----------------------------------
+//
+// Each glyph is encoded as a 7-row × 5-column bitmap, mirroring the
+// digit font above. Index 0 = `0x20` (space); index 94 = `0x7E` (`~`).
+// Bit 4 is the leftmost pixel and bit 0 is the rightmost; `1` paints.
+// Characters outside 0x20..=0x7E render as a single blank glyph (space)
+// so an out-of-range input never panics. The hand-rolled font matches
+// the existing dependency-free rasterizer philosophy; adopting a real
+// font crate would inflate the workspace footprint for a single label
+// feature.
+
+const ASCII_FIRST: u8 = 0x20;
+const ASCII_LAST: u8 = 0x7E;
+const ASCII_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
+
+const ASCII_GLYPHS: [[u8; DIGIT_HEIGHT as usize]; ASCII_COUNT] = [
+    // 0x20 ' ' — space
+    [0, 0, 0, 0, 0, 0, 0],
+    // 0x21 '!'
+    [
+        0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100, 0b00000,
+    ],
+    // 0x22 '"'
+    [
+        0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000,
+    ],
+    // 0x23 '#'
+    [
+        0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010,
+    ],
+    // 0x24 '$'
+    [
+        0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100,
+    ],
+    // 0x25 '%'
+    [
+        0b11000, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b00011,
+    ],
+    // 0x26 '&'
+    [
+        0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101,
+    ],
+    // 0x27 '\''
+    [
+        0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000,
+    ],
+    // 0x28 '('
+    [
+        0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
+    ],
+    // 0x29 ')'
+    [
+        0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
+    ],
+    // 0x2A '*'
+    [
+        0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000,
+    ],
+    // 0x2B '+'
+    [
+        0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000,
+    ],
+    // 0x2C ','
+    [
+        0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000,
+    ],
+    // 0x2D '-'
+    [
+        0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+    ],
+    // 0x2E '.'
+    [
+        0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00000,
+    ],
+    // 0x2F '/'
+    [
+        0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000,
+    ],
+    // 0x30 '0'
+    [
+        0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+    ],
+    // 0x31 '1'
+    [
+        0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+    ],
+    // 0x32 '2'
+    [
+        0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+    ],
+    // 0x33 '3'
+    [
+        0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+    ],
+    // 0x34 '4'
+    [
+        0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+    ],
+    // 0x35 '5'
+    [
+        0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+    ],
+    // 0x36 '6'
+    [
+        0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+    ],
+    // 0x37 '7'
+    [
+        0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+    ],
+    // 0x38 '8'
+    [
+        0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+    ],
+    // 0x39 '9'
+    [
+        0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+    ],
+    // 0x3A ':'
+    [
+        0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b00000,
+    ],
+    // 0x3B ';'
+    [
+        0b00000, 0b00100, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000,
+    ],
+    // 0x3C '<'
+    [
+        0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010,
+    ],
+    // 0x3D '='
+    [
+        0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000,
+    ],
+    // 0x3E '>'
+    [
+        0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000,
+    ],
+    // 0x3F '?'
+    [
+        0b01110, 0b10001, 0b00001, 0b00110, 0b00100, 0b00000, 0b00100,
+    ],
+    // 0x40 '@'
+    [
+        0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01111,
+    ],
+    // 0x41 'A'
+    [
+        0b00100, 0b01010, 0b01010, 0b10001, 0b11111, 0b10001, 0b10001,
+    ],
+    // 0x42 'B'
+    [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+    ],
+    // 0x43 'C'
+    [
+        0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+    ],
+    // 0x44 'D'
+    [
+        0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+    ],
+    // 0x45 'E'
+    [
+        0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+    ],
+    // 0x46 'F'
+    [
+        0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+    ],
+    // 0x47 'G'
+    [
+        0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+    ],
+    // 0x48 'H'
+    [
+        0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+    ],
+    // 0x49 'I'
+    [
+        0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+    ],
+    // 0x4A 'J'
+    [
+        0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+    ],
+    // 0x4B 'K'
+    [
+        0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+    ],
+    // 0x4C 'L'
+    [
+        0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+    ],
+    // 0x4D 'M'
+    [
+        0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+    ],
+    // 0x4E 'N'
+    [
+        0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001,
+    ],
+    // 0x4F 'O'
+    [
+        0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+    ],
+    // 0x50 'P'
+    [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+    ],
+    // 0x51 'Q'
+    [
+        0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+    ],
+    // 0x52 'R'
+    [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+    ],
+    // 0x53 'S'
+    [
+        0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+    ],
+    // 0x54 'T'
+    [
+        0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+    ],
+    // 0x55 'U'
+    [
+        0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+    ],
+    // 0x56 'V'
+    [
+        0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+    ],
+    // 0x57 'W'
+    [
+        0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+    ],
+    // 0x58 'X'
+    [
+        0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+    ],
+    // 0x59 'Y'
+    [
+        0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100,
+    ],
+    // 0x5A 'Z'
+    [
+        0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+    ],
+    // 0x5B '['
+    [
+        0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110,
+    ],
+    // 0x5C '\'
+    [
+        0b10000, 0b10000, 0b01000, 0b00100, 0b00010, 0b00001, 0b00001,
+    ],
+    // 0x5D ']'
+    [
+        0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110,
+    ],
+    // 0x5E '^'
+    [
+        0b00100, 0b01010, 0b10001, 0b00000, 0b00000, 0b00000, 0b00000,
+    ],
+    // 0x5F '_'
+    [
+        0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111,
+    ],
+    // 0x60 '`'
+    [
+        0b01000, 0b00100, 0b00010, 0b00000, 0b00000, 0b00000, 0b00000,
+    ],
+    // 0x61 'a'
+    [
+        0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111,
+    ],
+    // 0x62 'b'
+    [
+        0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110,
+    ],
+    // 0x63 'c'
+    [
+        0b00000, 0b00000, 0b01110, 0b10000, 0b10000, 0b10001, 0b01110,
+    ],
+    // 0x64 'd'
+    [
+        0b00001, 0b00001, 0b01111, 0b10001, 0b10001, 0b10001, 0b01111,
+    ],
+    // 0x65 'e'
+    [
+        0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110,
+    ],
+    // 0x66 'f'
+    [
+        0b00110, 0b01001, 0b01000, 0b11110, 0b01000, 0b01000, 0b01000,
+    ],
+    // 0x67 'g'
+    [
+        0b00000, 0b01111, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110,
+    ],
+    // 0x68 'h'
+    [
+        0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001,
+    ],
+    // 0x69 'i'
+    [
+        0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110,
+    ],
+    // 0x6A 'j'
+    [
+        0b00010, 0b00000, 0b00110, 0b00010, 0b00010, 0b10010, 0b01100,
+    ],
+    // 0x6B 'k'
+    [
+        0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010,
+    ],
+    // 0x6C 'l'
+    [
+        0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+    ],
+    // 0x6D 'm'
+    [
+        0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101,
+    ],
+    // 0x6E 'n'
+    [
+        0b00000, 0b00000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001,
+    ],
+    // 0x6F 'o'
+    [
+        0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110,
+    ],
+    // 0x70 'p'
+    [
+        0b00000, 0b00000, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000,
+    ],
+    // 0x71 'q'
+    [
+        0b00000, 0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b00001,
+    ],
+    // 0x72 'r'
+    [
+        0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000,
+    ],
+    // 0x73 's'
+    [
+        0b00000, 0b00000, 0b01110, 0b10000, 0b01110, 0b00001, 0b11110,
+    ],
+    // 0x74 't'
+    [
+        0b01000, 0b01000, 0b11110, 0b01000, 0b01000, 0b01001, 0b00110,
+    ],
+    // 0x75 'u'
+    [
+        0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101,
+    ],
+    // 0x76 'v'
+    [
+        0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+    ],
+    // 0x77 'w'
+    [
+        0b00000, 0b00000, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010,
+    ],
+    // 0x78 'x'
+    [
+        0b00000, 0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001,
+    ],
+    // 0x79 'y'
+    [
+        0b00000, 0b00000, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110,
+    ],
+    // 0x7A 'z'
+    [
+        0b00000, 0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111,
+    ],
+    // 0x7B '{'
+    [
+        0b00110, 0b00100, 0b00100, 0b01000, 0b00100, 0b00100, 0b00110,
+    ],
+    // 0x7C '|'
+    [
+        0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+    ],
+    // 0x7D '}'
+    [
+        0b01100, 0b00100, 0b00100, 0b00010, 0b00100, 0b00100, 0b01100,
+    ],
+    // 0x7E '~'
+    [
+        0b01001, 0b10101, 0b10010, 0b00000, 0b00000, 0b00000, 0b00000,
+    ],
+];
+
+/// Look up the bitmap for a printable ASCII byte. Bytes outside
+/// 0x20..=0x7E map to the space glyph so unsupported characters
+/// render as a visible gap rather than panicking.
+fn ascii_glyph(byte: u8) -> [u8; DIGIT_HEIGHT as usize] {
+    if !(ASCII_FIRST..=ASCII_LAST).contains(&byte) {
+        return ASCII_GLYPHS[0]; // space
+    }
+    ASCII_GLYPHS[(byte - ASCII_FIRST) as usize]
+}
+
+/// Resolve a single glyph bitmap at `(cx, cy)` with the given colour.
+/// Mirrors `paint_digit`'s structure so the digit / text code paths
+/// share a single pixel-stamping convention.
+fn paint_glyph(rgba: &mut [u8], size: PhysicalSize, cx: i32, cy: i32, byte: u8, color: PaintColor) {
+    let glyph = ascii_glyph(byte);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..DIGIT_WIDTH {
+            if (bits >> (DIGIT_WIDTH - 1 - col)) & 1 == 1 {
+                plot_pixel(rgba, size, cx + col, cy + row as i32, color);
+            }
+        }
+    }
+}
+
+/// Stroke-driven text geometry. The preset drives both the plate
+/// padding (in pixels around the glyphs) and the glyph scale (each
+/// 5×7 glyph rendered at `scale` × scale). The values are pinned so
+/// the rasterizer output is deterministic regardless of the host's
+/// font rendering.
+fn text_padding(stroke: AnnotationStroke) -> u32 {
+    match stroke {
+        AnnotationStroke::Thin => 2,
+        AnnotationStroke::Medium => 4,
+        AnnotationStroke::Thick => 6,
+    }
+}
+
+fn text_scale(stroke: AnnotationStroke) -> u32 {
+    match stroke {
+        AnnotationStroke::Thin => 1,
+        AnnotationStroke::Medium => 2,
+        AnnotationStroke::Thick => 3,
+    }
+}
+
+/// Compute the mean Rec. 709 luminance of the `src` pixels inside the
+/// plate rectangle (clipped to the buffer). Returns `None` when the
+/// rectangle contains no in-bounds pixels. Used by `paint_text` to
+/// pick a contrasting plate colour.
+fn plate_source_luminance(
+    src: &[u8],
+    size: PhysicalSize,
+    origin: PhysicalPoint,
+    box_size: PhysicalSize,
+) -> Option<f64> {
+    let x0 = origin.x.max(0);
+    let y0 = origin.y.max(0);
+    let x1 = (origin.x + box_size.width as i32).min(size.width as i32);
+    let y1 = (origin.y + box_size.height as i32).min(size.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let mut sum = 0.0_f64;
+    let mut count = 0_u64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = ((y as u32 * size.width + x as u32) as usize) * 4;
+            let r = src[idx] as f64 / 255.0;
+            let g = src[idx + 1] as f64 / 255.0;
+            let b = src[idx + 2] as f64 / 255.0;
+            sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum / count as f64)
+    }
+}
+
+/// Wrap a string into lines that each fit within `max_width` physical
+/// pixels given a `cell_width` (the rendered width of one glyph cell
+/// at the active stroke scale). Breaks on word boundaries; falls back
+/// to hard-break for words that exceed a single line.
+fn wrap_text(text: &str, cell_width: u32, max_width: u32) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    // Pre-split on explicit newlines so a user-entered Enter keeps
+    // its meaning; then wrap each resulting paragraph independently.
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in paragraph.split(' ') {
+            if current.is_empty() {
+                current.push_str(word);
+                continue;
+            }
+            let candidate_len = current.len() + 1 + word.len(); // space + word
+                                                                // Each ASCII char is one cell; wider Unicode glyphs would
+                                                                // round-trip via the missing-glyph path so we don't need
+                                                                // to weight them. Length in chars is the width in cells.
+            if (candidate_len as u32) * cell_width <= max_width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                // Word too long for the box: hard-break at cell width.
+                if (word.len() as u32) * cell_width > max_width {
+                    let mut chunk = String::new();
+                    for ch in word.chars() {
+                        if (chunk.len() as u32 + 1) * cell_width > max_width && !chunk.is_empty() {
+                            lines.push(std::mem::take(&mut chunk));
+                        }
+                        chunk.push(ch);
+                    }
+                    current.push_str(&chunk);
+                } else {
+                    current.push_str(word);
+                }
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Paint the text annotation. Steps:
+///   1. Derive plate padding and glyph scale from the stroke preset.
+///   2. Word-wrap the text so each line fits inside the plate width.
+///   3. Sample the source pixels under the plate; compute mean
+///      luminance. Bright source → white plate + dark glyph; dark
+///      source → black plate + bright glyph.
+///   4. Paint the plate as a solid rectangle on `dst`.
+///   5. Paint each glyph cell from the ASCII bitmap font.
+fn paint_text(
+    src: &[u8],
+    dst: &mut [u8],
+    size: PhysicalSize,
+    origin: PhysicalPoint,
+    box_size: PhysicalSize,
+    text: &str,
+    color: PaintColor,
+    stroke: AnnotationStroke,
+) {
+    let padding = text_padding(stroke);
+    let scale = text_scale(stroke);
+    let cell_w = (DIGIT_WIDTH + 1) * scale as i32; // 5 glyph + 1 px spacing
+    let cell_h = (DIGIT_HEIGHT + 1) * scale as i32; // 7 glyph + 1 px row spacing
+    let plate_x0 = origin.x;
+    let plate_y0 = origin.y;
+    let plate_w = box_size.width as i32;
+    let plate_h = box_size.height as i32;
+    let inner_w = (plate_w - 2 * padding as i32).max(0);
+    let inner_h = (plate_h - 2 * padding as i32).max(0);
+    if inner_w <= 0 || inner_h <= 0 {
+        return;
+    }
+    // Step 3: source luminance + plate / glyph colour.
+    let luminance = plate_source_luminance(
+        src,
+        size,
+        origin,
+        PhysicalSize::new(plate_w.max(0) as u32, plate_h.max(0) as u32),
+    )
+    .unwrap_or(0.5);
+    // The plate is the contrast-determined base (white over a bright
+    // source, near-black over a dark source). The glyph colour blends
+    // the contrast-determined base with the user's chosen
+    // `AnnotationColor` so the palette choice is visible in the
+    // export while the contrast rule still keeps the text legible.
+    // The user-colour weight (60 %) is large enough to read as the
+    // chosen hue but small enough that the contrast base still wins
+    // on legibility.
+    let (plate, base_glyph) = if luminance >= 0.5 {
+        (
+            PaintColor {
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF,
+                a: 0xFF,
+            },
+            PaintColor {
+                r: 0x14,
+                g: 0x14,
+                b: 0x14,
+                a: 0xFF,
+            },
+        )
+    } else {
+        (
+            PaintColor {
+                r: 0x14,
+                g: 0x14,
+                b: 0x14,
+                a: 0xFF,
+            },
+            PaintColor {
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF,
+                a: 0xFF,
+            },
+        )
+    };
+    let glyph_color = tint_glyph(base_glyph, color);
+    // Step 4: solid plate.
+    paint_filled_rect(
+        dst,
+        size,
+        PhysicalPoint::new(plate_x0, plate_y0),
+        PhysicalSize::new(plate_w.max(0) as u32, plate_h.max(0) as u32),
+        plate,
+    );
+    // Step 5: wrap + render glyphs.
+    let lines = wrap_text(text, cell_w as u32, inner_w as u32);
+    let mut cursor_y = plate_y0 + padding as i32;
+    for line in lines {
+        if cursor_y + DIGIT_HEIGHT * scale as i32 > plate_y0 + plate_h {
+            break;
+        }
+        let mut cursor_x = plate_x0 + padding as i32;
+        for byte in line.bytes() {
+            if cursor_x + DIGIT_WIDTH * scale as i32 > plate_x0 + plate_w {
+                break;
+            }
+            if scale == 1 {
+                paint_glyph(dst, size, cursor_x, cursor_y, byte, glyph_color);
+            } else {
+                // Multi-scale render: stamp the glyph at each pixel
+                // of the scale × scale block to keep the rasterizer
+                // dependency-free.
+                let glyph = ascii_glyph(byte);
+                for (row, bits) in glyph.iter().enumerate() {
+                    for col in 0..DIGIT_WIDTH {
+                        if (bits >> (DIGIT_WIDTH - 1 - col)) & 1 == 1 {
+                            for sy in 0..scale as i32 {
+                                for sx in 0..scale as i32 {
+                                    plot_pixel(
+                                        dst,
+                                        size,
+                                        cursor_x + col * scale as i32 + sx,
+                                        cursor_y + row as i32 * scale as i32 + sy,
+                                        glyph_color,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cursor_x += cell_w;
+        }
+        cursor_y += cell_h;
+    }
+}
+
+/// Paint a solid filled rectangle on `dst`, clipped to the buffer.
+/// Used by `paint_text` for the plate.
+fn paint_filled_rect(
+    rgba: &mut [u8],
+    size: PhysicalSize,
+    origin: PhysicalPoint,
+    rect_size: PhysicalSize,
+    color: PaintColor,
+) {
+    let x0 = origin.x.max(0) as u32;
+    let y0 = origin.y.max(0) as u32;
+    let x1 = (origin.x + rect_size.width as i32)
+        .min(size.width as i32)
+        .max(0) as u32;
+    let y1 = (origin.y + rect_size.height as i32)
+        .min(size.height as i32)
+        .max(0) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    for y in y0..y1 {
+        paint_horizontal(rgba, size, x0 as i32, x1 as i32, y as i32, color);
+    }
+}
+
+/// Box-blur rasterizer. Samples the **immutable source** slice so
+/// the redaction cannot be defeated by reordering z-order or
+/// rerunning the flatten pipeline without blur.
+///
+/// For each output pixel inside the blur region, average the R, G, B
+/// channels over the `[x - radius, x + radius] × [y - radius, y + radius]`
+/// neighbourhood of the source. The neighbourhood is clamped to the
+/// buffer bounds so a blur region that extends past the edge averages
+/// only the in-bounds pixels (no wrap-around). Alpha is forced to
+/// `0xFF` so the output is opaque after the flatten.
+fn paint_blur(
+    src: &[u8],
+    dst: &mut [u8],
+    size: PhysicalSize,
+    origin: PhysicalPoint,
+    blur_size: PhysicalSize,
+    radius: u32,
+) {
+    let x0 = origin.x.max(0);
+    let y0 = origin.y.max(0);
+    let x1 = (origin.x + blur_size.width as i32).min(size.width as i32);
+    let y1 = (origin.y + blur_size.height as i32).min(size.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let radius = radius as i32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let mut sum_r = 0_u32;
+            let mut sum_g = 0_u32;
+            let mut sum_b = 0_u32;
+            let mut count = 0_u32;
+            let ny0 = (y - radius).max(0);
+            let ny1 = (y + radius + 1).min(size.height as i32);
+            let nx0 = (x - radius).max(0);
+            let nx1 = (x + radius + 1).min(size.width as i32);
+            for ny in ny0..ny1 {
+                for nx in nx0..nx1 {
+                    let idx = ((ny as u32 * size.width + nx as u32) as usize) * 4;
+                    sum_r += src[idx] as u32;
+                    sum_g += src[idx + 1] as u32;
+                    sum_b += src[idx + 2] as u32;
+                    count += 1;
+                }
+            }
+            let dst_idx = ((y as u32 * size.width + x as u32) as usize) * 4;
+            dst[dst_idx] = (sum_r / count) as u8;
+            dst[dst_idx + 1] = (sum_g / count) as u8;
+            dst[dst_idx + 2] = (sum_b / count) as u8;
+            dst[dst_idx + 3] = 0xFF;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,7 +1659,8 @@ mod tests {
     #[test]
     fn rectangle_paints_stroke_around_bounds() {
         let size = PhysicalSize::new(20, 20);
-        let mut rgba = empty_rgba(20, 20);
+        let src = empty_rgba(20, 20);
+        let mut rgba = src.clone();
         let ann = Annotation::rectangle(
             AnnotationId(1),
             PhysicalPoint::new(2, 3),
@@ -799,7 +1669,7 @@ mod tests {
             AnnotationStroke::Thin,
             0,
         );
-        paint_annotation(&mut rgba, size, &ann);
+        paint_annotation(&src, &mut rgba, size, &ann);
         // Top-left corner (2,3) should be red; interior (4,4) should
         // remain transparent because tracer-04 ships unfilled rectangles.
         let (r, g, b, a) = pixel_at(&rgba, 20, 2, 3);
@@ -811,7 +1681,8 @@ mod tests {
     #[test]
     fn arrow_paints_line_and_head() {
         let size = PhysicalSize::new(30, 30);
-        let mut rgba = empty_rgba(30, 30);
+        let src = empty_rgba(30, 30);
+        let mut rgba = src.clone();
         let ann = Annotation::arrow(
             AnnotationId(1),
             PhysicalPoint::new(2, 2),
@@ -820,7 +1691,7 @@ mod tests {
             AnnotationStroke::Medium,
             0,
         );
-        paint_annotation(&mut rgba, size, &ann);
+        paint_annotation(&src, &mut rgba, size, &ann);
         // A pixel mid-line should be painted (line passes through (10, 10)).
         let (_, g, _, _) = pixel_at(&rgba, 30, 10, 10);
         assert!(g > 0, "mid-line must be painted green");
@@ -832,7 +1703,8 @@ mod tests {
     #[test]
     fn badge_paints_filled_circle_with_digit() {
         let size = PhysicalSize::new(60, 60);
-        let mut rgba = empty_rgba(60, 60);
+        let src = empty_rgba(60, 60);
+        let mut rgba = src.clone();
         let ann = Annotation::numbered_badge(
             AnnotationId(1),
             PhysicalPoint::new(30, 30),
@@ -842,7 +1714,7 @@ mod tests {
             AnnotationStroke::Thin,
             0,
         );
-        paint_annotation(&mut rgba, size, &ann);
+        paint_annotation(&src, &mut rgba, size, &ann);
         // The centre pixel must be non-zero because both the fill and
         // the digit paint at the centre column.
         let (_, _, b, _) = pixel_at(&rgba, 60, 30, 30);
@@ -868,5 +1740,505 @@ mod tests {
         rgba[10] = 0x77;
         let out = flatten_annotations(&rgba, size, &[]);
         assert_eq!(out, rgba);
+    }
+
+    // --- Tracer-05 text + blur tests --------------------------------
+
+    /// Build an RGBA buffer where the interior of the `text_box` is
+    /// uniformly bright (white) and the rest is uniformly dark
+    /// (black). Used by the plate-contrast tests so the source
+    /// luminance is unambiguous.
+    fn two_tone_rgba(w: u32, h: u32, box_origin: PhysicalPoint, box_size: PhysicalSize) -> Vec<u8> {
+        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) as usize) * 4;
+                rgba[idx + 3] = 0xFF; // alpha opaque
+                if x >= box_origin.x as u32
+                    && x < (box_origin.x + box_size.width as i32) as u32
+                    && y >= box_origin.y as u32
+                    && y < (box_origin.y + box_size.height as i32) as u32
+                {
+                    rgba[idx] = 0xFF;
+                    rgba[idx + 1] = 0xFF;
+                    rgba[idx + 2] = 0xFF;
+                }
+            }
+        }
+        rgba
+    }
+
+    /// Box covering the entire buffer — used to verify contrast rules
+    /// without region-clipping ambiguity.
+    fn full_box(w: u32, h: u32) -> (PhysicalPoint, PhysicalSize) {
+        (PhysicalPoint::new(0, 0), PhysicalSize::new(w, h))
+    }
+
+    /// Bright source (white pixels under the text box) yields a white
+    /// plate + dark glyph.
+    #[test]
+    fn plate_contrast_bright_source_picks_dark_glyph() {
+        let size = PhysicalSize::new(40, 20);
+        let (origin, box_size) = full_box(40, 20);
+        let src = two_tone_rgba(40, 20, origin, box_size);
+        let mut rgba = src.clone();
+        let ann = Annotation::text(
+            AnnotationId(1),
+            origin,
+            box_size,
+            "hi".to_string(),
+            AnnotationColor::Red,
+            AnnotationStroke::Thin,
+            0,
+        );
+        paint_annotation(&src, &mut rgba, size, &ann);
+        // Plate must be near-white inside the box (sampled outside the
+        // glyph stroke — pick the very top-left corner where the text
+        // never paints).
+        let (r, g, b, _) = pixel_at(&rgba, 40, 0, 0);
+        assert_eq!((r, g, b), (0xFF, 0xFF, 0xFF), "bright source → white plate");
+    }
+
+    /// Dark source (black pixels under the text box) yields a black
+    /// plate + bright glyph.
+    #[test]
+    fn plate_contrast_dark_source_picks_light_glyph() {
+        let size = PhysicalSize::new(40, 20);
+        let (origin, box_size) = full_box(40, 20);
+        // Build a fully black source.
+        let mut src = vec![0u8; (40 * 20 * 4) as usize];
+        for chunk in src.chunks_exact_mut(4) {
+            chunk[3] = 0xFF;
+        }
+        let mut rgba = src.clone();
+        let ann = Annotation::text(
+            AnnotationId(1),
+            origin,
+            box_size,
+            "hi".to_string(),
+            AnnotationColor::Yellow,
+            AnnotationStroke::Thin,
+            0,
+        );
+        paint_annotation(&src, &mut rgba, size, &ann);
+        // Plate must be the dark background colour.
+        let (r, g, b, _) = pixel_at(&rgba, 40, 0, 0);
+        assert_eq!((r, g, b), (0x14, 0x14, 0x14), "dark source → dark plate");
+    }
+
+    /// Multi-word text wraps within the configured box width. We use a
+    /// generous box and assert that the second line's glyph row is
+    /// painted at a Y below the first line's glyph row.
+    #[test]
+    fn text_wraps_within_width() {
+        let size = PhysicalSize::new(60, 40);
+        let (origin, box_size) = full_box(60, 40);
+        let src = two_tone_rgba(60, 40, origin, box_size);
+        let mut rgba = src.clone();
+        // Thin stroke ⇒ 5x7 glyph, 6 px cell width. A 30 px inner
+        // width holds 5 cells; "hello world" must wrap onto two
+        // lines.
+        let ann = Annotation::text(
+            AnnotationId(1),
+            origin,
+            box_size,
+            "hello world".to_string(),
+            AnnotationColor::Red,
+            AnnotationStroke::Thin,
+            0,
+        );
+        paint_annotation(&src, &mut rgba, size, &ann);
+        // Find any non-plate pixel on the first line (y ≈ padding+0..7)
+        // and any on the second line (y ≈ padding+8..15). The glyph
+        // is contrast-determined (base + 60% user-colour tint), so
+        // we accept any pixel that differs from the white plate.
+        let mut found_first = false;
+        let mut found_second = false;
+        for y in 0..40u32 {
+            for x in 0..60u32 {
+                let (r, g, b, _) = pixel_at(&rgba, 60, x, y);
+                // Anything that isn't the white plate is either a
+                // glyph pixel or a tinted boundary pixel.
+                if r != 0xFF || g != 0xFF || b != 0xFF {
+                    if y < 10 {
+                        found_first = true;
+                    } else if (10..20).contains(&y) {
+                        found_second = true;
+                    }
+                }
+            }
+        }
+        assert!(found_first, "first-line glyph must paint");
+        assert!(found_second, "wrapped second-line glyph must paint");
+    }
+
+    /// Blur averages the source pixels inside the blur region. The
+    /// leak-guard invariant: a high-contrast secret line under the
+    /// blur must NOT survive in pure form. The pattern is a single
+    /// column of magenta pixels (a thin secret) over a uniform dark
+    /// background; the 9×9 blur kernel samples mostly gray plus one
+    /// column of magenta, so the output cannot contain pure magenta.
+    #[test]
+    fn blur_leak_guard_removes_source_pixels() {
+        let w = 30u32;
+        let h = 20u32;
+        let size = PhysicalSize::new(w, h);
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) as usize) * 4;
+                src[idx + 3] = 0xFF;
+                if x == 10 && (5..15).contains(&y) {
+                    // Single-column "secret" — only one pixel wide.
+                    src[idx] = 0xFF;
+                    src[idx + 1] = 0x00;
+                    src[idx + 2] = 0xFF;
+                } else {
+                    src[idx] = 0x40;
+                    src[idx + 1] = 0x40;
+                    src[idx + 2] = 0x40;
+                }
+            }
+        }
+        let mut rgba = src.clone();
+        let ann = Annotation::blur(
+            AnnotationId(1),
+            PhysicalPoint::new(5, 5),
+            PhysicalSize::new(10, 10),
+            4, // 9×9 kernel
+            0,
+        );
+        paint_annotation(&src, &mut rgba, size, &ann);
+        // No pixel in the blur region may be the pure-secret magenta.
+        // The blur kernel's mean of (1 magenta + 80 gray) / 81 ≈ gray,
+        // so the output's R channel stays near 0x40.
+        for y in 5..15 {
+            for x in 5..15 {
+                let (r, g, b, _) = pixel_at(&rgba, w, x, y);
+                assert!(
+                    !(r == 0xFF && g == 0x00 && b == 0xFF),
+                    "secret pixel at ({x},{y}) must not leak through blur"
+                );
+            }
+        }
+    }
+
+    /// Blur region that extends past the source right edge averages
+    /// only the in-bounds pixels — no wrap-around, no panic.
+    #[test]
+    fn blur_bounds_clip_to_source() {
+        let w = 20u32;
+        let h = 10u32;
+        let size = PhysicalSize::new(w, h);
+        // All bright source for an unambiguous mean.
+        let src = vec![0xFFu8; (w * h * 4) as usize];
+        let mut rgba = src.clone();
+        // Blur extends to x=30 (past the right edge).
+        let ann = Annotation::blur(
+            AnnotationId(1),
+            PhysicalPoint::new(15, 0),
+            PhysicalSize::new(15, 10),
+            1,
+            0,
+        );
+        paint_annotation(&src, &mut rgba, size, &ann);
+        // The right-edge pixels (x=19) must average bright source +
+        // out-of-bounds (clipped). They should be bright (R=0xFF)
+        // because every in-bounds sample is bright.
+        let (r, _, _, _) = pixel_at(&rgba, w, 19, 5);
+        assert_eq!(r, 0xFF, "clipped average of bright pixels must be bright");
+    }
+
+    /// Blur samples from the immutable source, not from the in-flight
+    /// output buffer. If the blur rasterizer were rewired to read
+    /// from `dst`, an earlier arrow painted under the blur region
+    /// would survive in the output — the leak guard. This test
+    /// inverts the invariant: paint an arrow at z=0, a blur at z=1,
+    /// and assert the arrow does NOT survive inside the blur region.
+    #[test]
+    fn blur_samples_from_source_not_in_flight_output() {
+        let w = 30u32;
+        let h = 20u32;
+        let size = PhysicalSize::new(w, h);
+        let src = vec![0u8; (w * h * 4) as usize];
+        let annotations = vec![
+            // An arrow at z=0 that lies *under* the blur region.
+            Annotation::arrow(
+                AnnotationId(1),
+                PhysicalPoint::new(2, 10),
+                PhysicalPoint::new(28, 10),
+                AnnotationColor::Green,
+                AnnotationStroke::Medium,
+                0,
+            ),
+            // A blur at z=1 covering the arrow.
+            Annotation::blur(
+                AnnotationId(2),
+                PhysicalPoint::new(0, 0),
+                PhysicalSize::new(w, h),
+                2,
+                1,
+            ),
+        ];
+        let out = flatten_annotations(&src, size, &annotations);
+        // No green pixel (the arrow colour) may survive inside the
+        // blur region. The arrow's green is at the centre column; the
+        // blur region covers the entire buffer.
+        for y in 0..h {
+            for x in 0..w {
+                let (_r, g, _b, _) = pixel_at(&out, w, x, y);
+                assert_eq!(
+                    g, 0,
+                    "arrow green must not survive blur; leaked at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// Identical inputs produce identical outputs across two runs for
+    /// text + blur (the determinism invariant).
+    #[test]
+    fn flatten_is_deterministic_for_text_and_blur() {
+        let size = PhysicalSize::new(40, 20);
+        let (origin, box_size) = full_box(40, 20);
+        let src = two_tone_rgba(40, 20, origin, box_size);
+        let annotations = vec![
+            Annotation::text(
+                AnnotationId(1),
+                PhysicalPoint::new(2, 2),
+                PhysicalSize::new(30, 14),
+                "label".to_string(),
+                AnnotationColor::Red,
+                AnnotationStroke::Thin,
+                0,
+            ),
+            Annotation::blur(
+                AnnotationId(2),
+                PhysicalPoint::new(0, 0),
+                PhysicalSize::new(40, 20),
+                2,
+                1,
+            ),
+        ];
+        let first = flatten_annotations(&src, size, &annotations);
+        let second = flatten_annotations(&src, size, &annotations);
+        assert_eq!(first, second, "text + blur flatten must be deterministic");
+    }
+
+    /// The text + blur geometry variants round-trip via JSON so the
+    /// TypeScript mirror can decode them. Companion to the IPC
+    /// contract tests in `src-tauri/tests/ipc_contracts.rs`.
+    #[test]
+    fn text_and_blur_round_trip_via_json() {
+        let text = Annotation::text(
+            AnnotationId(7),
+            PhysicalPoint::new(10, 20),
+            PhysicalSize::new(120, 40),
+            "hello\nworld".to_string(),
+            AnnotationColor::Yellow,
+            AnnotationStroke::Medium,
+            3,
+        );
+        let json = serde_json::to_string(&text).expect("serialize text");
+        assert!(json.contains("\"kind\":\"text\""));
+        assert!(json.contains("\"text\":\"hello\\nworld\""));
+        let parsed: Annotation = serde_json::from_str(&json).expect("deserialize text");
+        assert_eq!(parsed, text);
+
+        let blur = Annotation::blur(
+            AnnotationId(8),
+            PhysicalPoint::new(5, 5),
+            PhysicalSize::new(40, 40),
+            4,
+            5,
+        );
+        let json = serde_json::to_string(&blur).expect("serialize blur");
+        assert!(json.contains("\"kind\":\"blur\""));
+        assert!(json.contains("\"radius\":4"));
+        let parsed: Annotation = serde_json::from_str(&json).expect("deserialize blur");
+        assert_eq!(parsed, blur);
+    }
+
+    /// Adversarial multi-size leak guard. Spec validation asks for
+    /// secrets at several sizes; this exercises 1-, 2-, and 4-pixel
+    /// wide secret columns under blur regions of varying radius so
+    /// a regression that happens to satisfy one geometry is caught.
+    #[test]
+    fn blur_leak_guard_at_multiple_secret_widths() {
+        // (src_w, src_h, blur_x, blur_y, blur_w, blur_h, blur_radius,
+        //  secret_x, secret_width)
+        let cases: [(u32, u32, u32, u32, u32, u32, u32, u32, u32); 4] = [
+            (30, 20, 5, 5, 10, 10, 4, 10, 1),
+            (40, 30, 5, 5, 20, 20, 2, 15, 2),
+            (60, 40, 10, 10, 30, 30, 6, 25, 4),
+            (80, 60, 0, 0, 70, 50, 3, 35, 2),
+        ];
+        for (src_w, src_h, bx, by, bw, bh, radius, secret_x, secret_w) in cases {
+            let size = PhysicalSize::new(src_w, src_h);
+            // Source: dark gray background with a high-contrast
+            // magenta block spanning the blur region. We pick the
+            // blur centre as the secret so the average stays magenta
+            // — every test pixel must show a non-magenta average
+            // *because* the blur replaces the source in `dst`, never
+            // because the surrounding gray dilutes a thin line.
+            // The blur rasterizer sampling from `src` and writing
+            // to `dst` is what we're guarding: the surrounding
+            // background is part of the test that the blur region
+            // gets replaced.
+            let cx = bx + bw / 2;
+            let cy = by + bh / 2;
+            let mut src = vec![0u8; (src_w * src_h * 4) as usize];
+            for y in 0..src_h {
+                for x in 0..src_w {
+                    let idx = ((y * src_w + x) as usize) * 4;
+                    src[idx + 3] = 0xFF;
+                    let in_blur = x >= bx && x < bx + bw && y >= by && y < by + bh;
+                    let is_secret = in_blur
+                        && x >= secret_x
+                        && x < secret_x + secret_w
+                        && (by..cy + 1).contains(&y);
+                    if is_secret {
+                        src[idx] = 0xFF;
+                        src[idx + 1] = 0x00;
+                        src[idx + 2] = 0xFF;
+                    } else {
+                        src[idx] = 0x40;
+                        src[idx + 1] = 0x40;
+                        src[idx + 2] = 0x40;
+                    }
+                }
+            }
+            let mut rgba = src.clone();
+            let ann = Annotation::blur(
+                AnnotationId(1),
+                PhysicalPoint::new(bx as i32, by as i32),
+                PhysicalSize::new(bw, bh),
+                radius,
+                0,
+            );
+            paint_annotation(&src, &mut rgba, size, &ann);
+            // No pixel inside the blur region may be pure magenta.
+            for y in by..by + bh {
+                for x in bx..bx + bw {
+                    let (r, g, b, _) = pixel_at(&rgba, src_w, x, y);
+                    assert!(
+                        !(r == 0xFF && g == 0x00 && b == 0xFF),
+                        "secret pixel leaked at ({x},{y}) for geometry {src_w}x{src_h} blur={bx},{by}+{bw}x{bh} r={radius} secret_w={secret_w}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Joint text + blur export path (mirrors the `save_capture_as`
+    /// flatten pipeline). A blur covering part of the source + a
+    /// text annotation elsewhere must both appear in the output and
+    /// the blur region must still not leak.
+    #[test]
+    fn joint_text_and_blur_export_path() {
+        let size = PhysicalSize::new(80, 60);
+        // Thin magenta "secret" line under the blur region so the
+        // 9×9 box-blur kernel averages mostly gray plus one column
+        // of magenta. The pure-magenta leak detection still holds
+        // because a uniform-secret block would simply average back
+        // to itself (no leak to detect).
+        let mut src = vec![0u8; (80 * 60 * 4) as usize];
+        for y in 0..60u32 {
+            for x in 0..80u32 {
+                let idx = ((y * 80 + x) as usize) * 4;
+                src[idx + 3] = 0xFF;
+                if x == 45 && (20..40).contains(&y) {
+                    src[idx] = 0xFF;
+                    src[idx + 1] = 0x00;
+                    src[idx + 2] = 0xFF;
+                } else {
+                    src[idx] = 0x40;
+                    src[idx + 1] = 0x40;
+                    src[idx + 2] = 0x40;
+                }
+            }
+        }
+        let annotations = vec![
+            Annotation::blur(
+                AnnotationId(1),
+                PhysicalPoint::new(30, 20),
+                PhysicalSize::new(30, 20),
+                4,
+                0,
+            ),
+            Annotation::text(
+                AnnotationId(2),
+                PhysicalPoint::new(5, 5),
+                PhysicalSize::new(50, 14),
+                "label".to_string(),
+                AnnotationColor::Red,
+                AnnotationStroke::Thin,
+                1,
+            ),
+        ];
+        let out = flatten_annotations(&src, size, &annotations);
+        // Blur region: no pure magenta survives.
+        for y in 20..40 {
+            for x in 30..60 {
+                let (r, g, b, _) = pixel_at(&out, 80, x, y);
+                assert!(
+                    !(r == 0xFF && g == 0x00 && b == 0xFF),
+                    "secret pixel leaked at ({x},{y})"
+                );
+            }
+        }
+        // Text region must contain non-zero bytes (text actually
+        // painted). The plate + glyphs leave a fingerprint even
+        // when the source is uniform gray.
+        let mut text_nonzero = 0;
+        for y in 5..19u32 {
+            for x in 5..55u32 {
+                let (r, g, b, _) = pixel_at(&out, 80, x, y);
+                if (r, g, b) != (0x40, 0x40, 0x40) {
+                    text_nonzero += 1;
+                }
+            }
+        }
+        assert!(
+            text_nonzero > 0,
+            "text annotation must leave a visible footprint on the output"
+        );
+    }
+
+    /// `tint_glyph` blends the user-chosen colour into the
+    /// contrast-determined base so the palette is visible. A pure
+    /// red user colour blended into a dark base yields a
+    /// red-shifted dark glyph; into a light base yields a
+    /// red-shifted light glyph.
+    #[test]
+    fn tint_glyph_blends_user_colour_with_contrast_base() {
+        let dark = PaintColor {
+            r: 0x14,
+            g: 0x14,
+            b: 0x14,
+            a: 0xFF,
+        };
+        let light = PaintColor {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+            a: 0xFF,
+        };
+        let red = PaintColor {
+            r: 0xE5,
+            g: 0x3B,
+            b: 0x3B,
+            a: 0xFF,
+        };
+        let tinted_dark = tint_glyph(dark, red);
+        // The red channel must dominate over the dark base.
+        assert!(tinted_dark.r > dark.r);
+        assert!(tinted_dark.r > tinted_dark.g);
+        assert!(tinted_dark.r > tinted_dark.b);
+        let tinted_light = tint_glyph(light, red);
+        // Tinted toward light base keeps a hint of the user colour
+        // but stays bright enough to read on a dark plate.
+        assert!(tinted_light.r < 0xFF);
+        assert!(tinted_light.r > tinted_light.g);
     }
 }

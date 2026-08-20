@@ -310,12 +310,14 @@ export type AnnotationColor = "red" | "green" | "blue" | "yellow" | "white";
 
 export type AnnotationStroke = "thin" | "medium" | "thick";
 
-export type AnnotationKind = "arrow" | "rectangle" | "numbered_badge";
+export type AnnotationKind = "arrow" | "rectangle" | "numbered_badge" | "text" | "blur";
 
 export type AnnotationGeometry =
   | { kind: "arrow"; tail: PhysicalPoint; tip: PhysicalPoint }
   | { kind: "rectangle"; origin: PhysicalPoint; size: PhysicalSize }
-  | { kind: "numbered_badge"; center: PhysicalPoint; radius: number };
+  | { kind: "numbered_badge"; center: PhysicalPoint; radius: number }
+  | { kind: "text"; origin: PhysicalPoint; size: PhysicalSize; text: string }
+  | { kind: "blur"; origin: PhysicalPoint; size: PhysicalSize; radius: number };
 
 export interface Annotation {
   id: number;
@@ -326,7 +328,18 @@ export interface Annotation {
   number?: number;
 }
 
-export type AnnotationTool = "select" | "arrow" | "rectangle" | "numbered_badge";
+export type AnnotationTool = "select" | "arrow" | "rectangle" | "numbered_badge" | "text" | "blur";
+
+export interface SaveCaptureAsRequest {
+  crop: PhysicalBounds;
+  annotations: Annotation[];
+  suggestedFilename: string;
+}
+
+export interface SaveCaptureAsResponse {
+  path?: string;
+  pngBytes: number;
+}
 
 export interface PlatformErrorKind {
   kind:

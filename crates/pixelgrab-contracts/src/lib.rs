@@ -50,9 +50,9 @@ pub use ipc::{
     CaptureResponse, ClearCacheResponse, CommitOutcome, CommitRequest, CommitResponse,
     DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError, IpcResponse, OverlaySelection,
     RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult,
-    SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot, StartShelfDragIntent,
-    StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
-    UpdateShelfPreferencesRequest,
+    SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot, ShelfPreferencesDto,
+    ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+    UpdateCachePolicyRequest, UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use pin::{

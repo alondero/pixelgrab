@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { mockGetSessionSnapshot } from "$lib/ipc/shell.svelte";
-  import { requestCommit, requestCancel } from "$lib/ipc/commands";
+  import { requestCommit, requestCancel, saveCaptureAs } from "$lib/ipc/commands";
   import KonvaStage from "./KonvaStage.svelte";
   import AnnotationToolbar from "$lib/annotation/AnnotationToolbar.svelte";
   import { annotationStore } from "$lib/annotation/store.svelte";
@@ -11,6 +11,8 @@
   let selection = $state<PhysicalBounds | null>(null);
   let lastDiagnosticsId = $state<string | null>(null);
   let commitError = $state<string | null>(null);
+  let saveAsError = $state<string | null>(null);
+  let lastSaveAsPath = $state<string | null>(null);
   // The overlay spans the entire primary monitor. Values are tuned for the
   // tracer-02 default layout; the real multi-monitor sizing arrives in
   // tracer-04.
@@ -76,6 +78,41 @@
       }
     }
   }
+
+  /// Tracer-05: native Save As (Ctrl+S). Opens the platform's save
+  /// dialog, flattens the active crop + annotations, and writes a
+  /// PNG. Cancel returns Ok(None); a write failure is surfaced as a
+  /// categorical kind string.
+  async function onSaveAs() {
+    if (!selection) return;
+    saveAsError = null;
+    const annotations = annotationStore.annotations.map((a) => ({
+      id: a.id,
+      geometry: a.geometry,
+      color: a.color,
+      stroke: a.stroke,
+      zOrder: a.zOrder,
+      ...(a.number !== undefined ? { number: a.number } : {}),
+    }));
+    const suggested = `pixelgrab-${capture?.captureId?.slice(0, 8) ?? "capture"}.png`;
+    const result = await saveCaptureAs({
+      crop: selection,
+      annotations,
+      suggestedFilename: suggested,
+    });
+    if (result.status === "err") {
+      saveAsError = result.error.message;
+      lastSaveAsPath = null;
+      return;
+    }
+    if (result.data.path) {
+      lastSaveAsPath = result.data.path;
+      saveAsError = null;
+    } else {
+      // User cancelled — session is unchanged.
+      lastSaveAsPath = null;
+    }
+  }
 </script>
 
 <section class="overlay" data-testid="overlay">
@@ -98,6 +135,7 @@
         {onSelectionChange}
         {onCommit}
         {onCancel}
+        {onSaveAs}
       />
       <div class="toolbar-slot" data-testid="toolbar-slot">
         <AnnotationToolbar visible={selection !== null} />
@@ -118,6 +156,12 @@
   {/if}
   {#if commitError}
     <footer class="error" data-testid="commit-error">{commitError}</footer>
+  {/if}
+  {#if saveAsError}
+    <footer class="error" data-testid="save-as-error">{saveAsError}</footer>
+  {/if}
+  {#if lastSaveAsPath}
+    <footer class="success" data-testid="save-as-success" aria-live="polite">Saved.</footer>
   {/if}
 </section>
 
@@ -182,6 +226,12 @@
     color: #ffb3b3;
     padding: 0.5rem 1rem;
     border-top: 1px solid rgba(255, 80, 80, 0.4);
+    font-size: 0.85rem;
+  }
+  .success {
+    color: #b6f0c8;
+    padding: 0.5rem 1rem;
+    border-top: 1px solid rgba(80, 200, 120, 0.4);
     font-size: 0.85rem;
   }
 </style>
