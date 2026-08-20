@@ -2067,9 +2067,7 @@ mod tests {
     fn blur_leak_guard_at_multiple_secret_widths() {
         // (src_w, src_h, blur_x, blur_y, blur_w, blur_h, blur_radius,
         //  secret_x, secret_width)
-        type Case = (
-            u32, u32, u32, u32, u32, u32, u32, u32, u32,
-        );
+        type Case = (u32, u32, u32, u32, u32, u32, u32, u32, u32);
         let cases: [Case; 4] = [
             (30, 20, 5, 5, 10, 10, 4, 10, 1),
             (40, 30, 5, 5, 20, 20, 2, 15, 2),
