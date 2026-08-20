@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "modifiers": [
+    {
+      "canonical": "CommandOrControl",
+      "aliases": ["ctrl", "control", "ctl", "cmd", "command", "commandorcontrol"]
+    },
+    {
+      "canonical": "Alt",
+      "aliases": ["alt", "option", "opt"]
+    },
+    {
+      "canonical": "Shift",
+      "aliases": ["shift", "shft"]
+    },
+    {
+      "canonical": "Super",
+      "aliases": ["win", "super", "meta"]
+    }
+  ],
+  "rank": ["CommandOrControl", "Alt", "Shift", "Super"]
+}

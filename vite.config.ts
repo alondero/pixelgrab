@@ -37,6 +37,12 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       $lib: resolve(__dirname, "src/lib"),
+      // Tracer 14 follow-up: the hotkey modifier alias set is
+      // owned by the `pixelgrab-contracts` crate (so the Rust
+      // parser can `include_str!` it at compile time). The
+      // frontend re-uses the same file via this alias so a
+      // single edit flows to both sides.
+      $contracts: resolve(__dirname, "crates/pixelgrab-contracts"),
     },
     conditions: ["browser"],
   },

@@ -26,7 +26,7 @@ use pixelgrab_contracts::{
     PinActionOutcome, PinCommand, PinId, PinViewModel, PlatformError, PlatformErrorKind,
     PlatformResult, ShelfId, ShelfPreferences,
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::PixelGrabApp;
 
@@ -1224,12 +1224,28 @@ pub fn get_hotkey_status(app: AppState<'_>) -> IpcResponse<HotkeyRegistryStatusD
 /// Toggle the paused state. The frontend calls this from the
 /// tray's "Pause Global Hotkeys" entry as well as the settings
 /// toggle so the in-memory state and the persisted file stay in
-/// sync.
+/// sync. After every successful toggle the tray icon is
+/// refreshed so the blue / amber / red state follows the
+/// underlying registry — `TrayState::update_status` is the only
+/// path that calls `set_icon`, and it does not get invoked on
+/// its own when the registry mutates internally (issue #46).
 #[tauri::command]
-pub fn set_hotkey_paused(app: AppState<'_>, paused: bool) -> IpcResponse<HotkeyRegistryStatusDto> {
+pub fn set_hotkey_paused(
+    app: AppState<'_>,
+    handle: AppHandle,
+    paused: bool,
+) -> IpcResponse<HotkeyRegistryStatusDto> {
     if app.hotkeys().set_paused(paused) {
         if let Err(err) = app.hotkey_store().set_paused(paused) {
             return IpcResponse::from_result(Err(err));
+        }
+        // Refresh the tray so the icon flips immediately. The
+        // `try_state` lookup is a no-op when shutdown has already
+        // torn the tray down (the IPC handler must not crash
+        // mid-shutdown), matching the pattern the run-event hook
+        // uses to flush preferences.
+        if let Some(tray) = handle.try_state::<crate::tray::TrayState>() {
+            crate::tray::refresh_tray(&tray, &app.hotkeys());
         }
     }
     let status = app.hotkeys().status();

@@ -208,3 +208,84 @@ fn malformed_binding_returns_platform_error() {
                  // Ensure the error is queryable for its kind.
     let _kind: PlatformErrorKind = PlatformErrorKind::InvalidPayload;
 }
+
+/// Tracer 14 follow-up (issue #46): three rebinds in a row
+/// must leave exactly one registration per action in the
+/// backend, matching the canonical form the parser produced.
+/// Mirrors the manual PowerShell-validation the issue asks for
+/// (`HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer
+/// \Hotkey\*`), but asserted at the trait boundary so the
+/// in-memory backend used by CI gives the same guarantee the
+/// production Tauri backend must satisfy.
+#[test]
+fn three_rebinds_in_a_row_leave_no_duplicate_registrations() {
+    let (registry, backend) = fresh_registry();
+    let _ = registry.apply();
+    let _ = registry
+        .rebind(HotkeyAction::RegionCapture, Some("Ctrl+Alt+R"))
+        .unwrap();
+    let _ = registry
+        .rebind(HotkeyAction::FullScreenCapture, Some("Ctrl+Alt+F"))
+        .unwrap();
+    let _ = registry
+        .rebind(HotkeyAction::ShelfToggle, Some("Ctrl+Alt+L"))
+        .unwrap();
+    let snapshot = backend.snapshot();
+    assert_eq!(
+        snapshot.len(),
+        HotkeyAction::ALL.len(),
+        "exactly one registration per action after three rebinds"
+    );
+    let map: std::collections::HashMap<_, _> = snapshot.into_iter().collect();
+    assert_eq!(
+        map.get(&HotkeyAction::RegionCapture).map(String::as_str),
+        Some("CommandOrControl+Alt+R")
+    );
+    assert_eq!(
+        map.get(&HotkeyAction::FullScreenCapture)
+            .map(String::as_str),
+        Some("CommandOrControl+Alt+F")
+    );
+    assert_eq!(
+        map.get(&HotkeyAction::ShelfToggle).map(String::as_str),
+        Some("CommandOrControl+Alt+L")
+    );
+    // Each canonical form round-trips through `parse_binding`,
+    // pinning the contract the production backend relies on.
+    for action in HotkeyAction::ALL {
+        let canonical = map.get(action).expect("present");
+        let parsed = pixelgrab_contracts::parse_binding(canonical)
+            .expect("backend-registered canonical must re-parse");
+        assert_eq!(parsed, *canonical, "{action:?} canonical form drift");
+    }
+}
+
+/// Tracer 14 follow-up: pause / resume drives the registry
+/// status payload without leaving stray OS handles behind. The
+/// tray icon reflect in `set_hotkey_paused` is wired through
+/// `tray::refresh_tray`; this test pins the underlying state
+/// machine that the icon reflects.
+#[test]
+fn pause_resume_cycle_keeps_status_payload_in_sync() {
+    let (registry, backend) = fresh_registry();
+    let _ = registry.apply();
+    assert!(registry.status().active);
+    assert!(!registry.status().paused);
+
+    assert!(registry.set_paused(true));
+    assert!(!registry.status().active);
+    assert!(registry.status().paused);
+    assert!(
+        backend.snapshot().is_empty(),
+        "paused registry must not hold OS handles"
+    );
+
+    assert!(registry.set_paused(false));
+    assert!(registry.status().active);
+    assert!(!registry.status().paused);
+    assert_eq!(
+        backend.snapshot().len(),
+        HotkeyAction::ALL.len(),
+        "resume must re-register every configured binding"
+    );
+}
