@@ -10,10 +10,11 @@ use pixelgrab_contracts::{
     capture::{CaptureFormat, CaptureRequest},
     coordinate::{PhysicalBounds, PhysicalSize},
     ipc::{
-        CancelOutcome, CaptureResponse, CommitRequest, CommitResponse, DismissCacheEntryRequest,
-        DismissCacheEntryResponse, IpcResponse, RequestCaptureIntent, RequestCommitIntent,
-        RequestOverlayIntent, RequestOverlayResult, SessionSnapshot, ShelfSnapshot,
-        StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+        CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureResponse, ClearCacheResponse,
+        CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse,
+        IpcResponse, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
+        RequestOverlayResult, SessionSnapshot, ShelfSnapshot, StartShelfDragIntent,
+        StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
         UpdateShelfPreferencesRequest,
     },
     shelf_queue::{
@@ -663,6 +664,50 @@ pub fn update_shelf_preferences(
         let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
     }
     IpcResponse::from_result(Ok(sanitized.into()))
+}
+
+/// Return the current cache policy. The frontend loads this on
+/// startup so the settings UI can render the user's choices, and on
+/// every change to mirror the post-update state.
+#[tauri::command]
+pub fn get_cache_policy(app: AppState<'_>) -> IpcResponse<CachePolicyDto> {
+    IpcResponse::from_result(Ok(app.cache_policy().current().into()))
+}
+
+/// Replace the persisted cache policy. The Rust core sanitizes the
+/// payload, updates the in-memory state immediately, and schedules
+/// a debounced disk write. The sweeper reads the policy via the store
+/// on every tick so a new policy takes effect on the next sweep
+/// without restarting the worker thread.
+#[tauri::command]
+pub fn update_cache_policy(
+    app: AppState<'_>,
+    payload: UpdateCachePolicyRequest,
+) -> IpcResponse<CachePolicyDto> {
+    let policy: pixelgrab_contracts::CachePolicy = payload.policy.into();
+    let sanitized = policy.sanitize();
+    app.cache_policy().update(sanitized.clone());
+    IpcResponse::from_result(Ok(sanitized.into()))
+}
+
+/// Return the live cache statistics. Reads are cheap (single
+/// `BTreeMap` snapshot) so the frontend can poll on every settings
+/// panel open without provisioning.
+#[tauri::command]
+pub fn get_cache_stats(app: AppState<'_>) -> IpcResponse<CacheStatsResponse> {
+    IpcResponse::from_result(Ok(CacheStatsResponse {
+        stats: app.cache().stats(),
+    }))
+}
+
+/// Manually clear every unlocked entry. Locked entries (editor,
+/// drag, pin) are not touched. The returned outcome records the
+/// reclaimed bytes so the frontend can show "reclaimed N MB"
+/// feedback.
+#[tauri::command]
+pub fn clear_cache(app: AppState<'_>) -> IpcResponse<ClearCacheResponse> {
+    let outcome = app.cache().clear_unlocked_entries();
+    IpcResponse::from_result(Ok(ClearCacheResponse { outcome }))
 }
 
 /// Internal helper: emit a shelf-updated event to the frontend.

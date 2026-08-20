@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::annotation::Annotation;
-use crate::cache::{CacheEntryMetadata, LockOwner, ShelfId, ShelfPosition};
+use crate::cache::{
+    CacheEntryMetadata, CachePolicy, CacheStats, LockOwner, ShelfId, ShelfPosition, SweepOutcome,
+};
 use crate::capture::CaptureResolution;
 use crate::coordinate::PhysicalBounds;
 use crate::drag::{DragDiagnostics, DragOutcome, DragRequest};
@@ -500,4 +502,86 @@ pub struct UpdateShelfPreferencesRequest {
     /// persistence).
     #[serde(default)]
     pub commit: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Tracer 13: cache policy, statistics, and clear-cache IPC.
+// ---------------------------------------------------------------------------
+
+/// Wire shape for the cache policy snapshot returned by
+/// `get_cache_policy`. Mirrors [`CachePolicy`] exactly so the frontend
+/// can hold an exact replica in its settings store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachePolicyDto {
+    /// Schema version.
+    pub schema_version: u32,
+    /// Upper bound on total cache bytes.
+    pub max_bytes: u64,
+    /// Upper bound on entry count.
+    pub max_entries: u32,
+    /// Upper bound on entry age in milliseconds.
+    pub max_age_ms: i64,
+    /// Hysteresis ratio, in `(0, 1]`.
+    pub low_water_ratio: f32,
+    /// Periodic sweep interval in milliseconds.
+    pub sweep_interval_ms: i64,
+    /// Whether the cache is purged on graceful exit.
+    pub purge_on_exit: bool,
+}
+
+impl From<CachePolicy> for CachePolicyDto {
+    fn from(p: CachePolicy) -> Self {
+        Self {
+            schema_version: p.schema_version,
+            max_bytes: p.max_bytes,
+            max_entries: p.max_entries,
+            max_age_ms: p.max_age_ms,
+            low_water_ratio: p.low_water_ratio,
+            sweep_interval_ms: p.sweep_interval_ms,
+            purge_on_exit: p.purge_on_exit,
+        }
+    }
+}
+
+impl From<CachePolicyDto> for CachePolicy {
+    fn from(p: CachePolicyDto) -> Self {
+        Self {
+            schema_version: p.schema_version,
+            max_bytes: p.max_bytes,
+            max_entries: p.max_entries,
+            max_age_ms: p.max_age_ms,
+            low_water_ratio: p.low_water_ratio,
+            sweep_interval_ms: p.sweep_interval_ms,
+            purge_on_exit: p.purge_on_exit,
+        }
+    }
+}
+
+/// Wire shape for the `update_cache_policy` IPC. The frontend sends the
+/// new full policy body; the Rust core sanitizes and persists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCachePolicyRequest {
+    /// New policy. Sanitized on receipt so out-of-range numbers are
+    /// clamped and unknown fields fall back to the default.
+    pub policy: CachePolicyDto,
+}
+
+/// Wire shape for the `get_cache_stats` IPC response. The struct
+/// contains the in-memory snapshot of the cache's usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStatsResponse {
+    /// Statistics payload.
+    pub stats: CacheStats,
+}
+
+/// Wire shape for the `clear_cache` IPC. Returns the sweep outcome so
+/// the UI can show "reclaimed N bytes" feedback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearCacheResponse {
+    /// Outcome of the manual clear pass.
+    pub outcome: SweepOutcome,
 }

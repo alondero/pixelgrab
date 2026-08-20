@@ -222,6 +222,8 @@ ADRs are:
 - 0003 — Physical-coordinate ownership
 - 0004 — Packaged-app testing strategy
 - 0005 — Cache and one-card shelf (tracer-07)
+- 0006 — External drag (tracer-09)
+- 0007 — Cache bounds + recovery (tracer-13)
 
 Additions and revisions must follow the template in
 [`docs/adr/README.md`](docs/adr/README.md). When a change supersedes a prior
@@ -483,3 +485,103 @@ begins with no annotations or inherited history."
 | A new action after undo discards the obsolete redo branch       | `pushHistory` clears `future`; store test                     |
 | Export dimensions remain identical to the physical crop         | `flatten_annotations` returns a same-size buffer              |
 | A fresh session begins with no annotations or inherited history | `OverlayApp` calls `annotationStore.reset()` on commit/cancel |
+
+## 16. Cache bounds + recovery (tracer-13)
+
+Tracer 13 introduces the cache lifetime policy and the recovery
+sweep. The temporary capture cache is bounded by size, count, and
+age, plus a non-blocking startup recovery and a periodic worker.
+The relevant code lives in:
+
+- `crates/pixelgrab-contracts/src/cache.rs` — `CachePolicy`,
+  `CacheStats`, `SweepOutcome`. The default policy is 250 MiB /
+  500 entries / 24 h / 80% low-water / 15-min sweep interval. The
+  wire-mirror `CachePolicyDto` is the IPC shape.
+- `src-tauri/src/cache/policy.rs` — `CachePolicyStore`. Mirrors
+  `PreferencesStore` (atomic write + backup rotation + trailing
+  debounce). The policy file lives at `cache-policy.json` next to
+  `shelf-preferences.json`, outside the cache root so a partial
+  cache reap cannot delete the user's policy.
+- `src-tauri/src/cache/sweeper.rs` — `CacheSweeper` with
+  `recover_startup` (run once on a worker thread at boot), and
+  `sweep_once` (TTL + LRU eviction). `SweepWorker` is the handle
+  for the periodic background worker.
+- `src-tauri/src/cache/store.rs` — added `Cache::stats`,
+  `Cache::recover_debris`, `Cache::clear_unlocked_entries`,
+  `Cache::is_protected_from_sweeper`, `Cache::entry_on_disk_size`.
+
+### Default policy
+
+The defaults are pinned by the spec (issue #25) and only change
+when the user opts in:
+
+- `max_bytes = 250 * 1024 * 1024` (250 MiB)
+- `max_entries = 500`
+- `max_age_ms = 24 * 60 * 60 * 1000` (24 h)
+- `low_water_ratio = 0.8` (prune until at or below 80% of the
+  high-water limits)
+- `sweep_interval_ms = 15 * 60 * 1000` (15 min)
+- `purge_on_exit = false`
+
+### Lock-aware eviction
+
+The sweeper respects the existing `LockOwner` registry. The default
+`Shelf` lock is the marker every commit acquires and does NOT
+protect — otherwise no entry would ever be evictable. An entry is
+protected only when it has any non-`Shelf` owner (editor / drag /
+pin). The helper `Cache::is_protected_from_sweeper` is the single
+source of truth for this check; the stats summary, the manual
+clear, and the sweeper all use it.
+
+`Cache::clear_unlocked_entries` is the manual clear path. It
+dismisses every entry whose `is_protected_from_sweeper` returns
+false. `bytes_reclaimed` is computed from the on-disk PNG size at
+the moment of dismissal, not the cached `size_bytes`, so the UI
+can show accurate "reclaimed N bytes" feedback.
+
+### Startup recovery
+
+The startup recovery runs on a worker thread (`spawn_blocking`
+inside the `setup` hook) so the tray appears without waiting for
+debris reaping. The recovery sweeps:
+
+- Stale `*.tmp` files at the cache root (atomic-write leftovers).
+- Zero-byte `capture.png` or `metadata.json` files inside entry
+  directories.
+- Empty entry directories (manifest present but no assets).
+- Manifest-less directories (incomplete unindexed groups from a
+  crashed commit).
+
+The periodic worker calls `sweep_once` every `sweep_interval_ms`
+unless the policy says the cache is already within the low-water
+targets. The work is non-blocking — the IPC layer is never held
+across I/O.
+
+### IPC surface
+
+Four new commands (registered in `src-tauri/src/lib.rs`):
+
+- `get_cache_policy` — returns the current `CachePolicyDto`.
+- `update_cache_policy` — sanitises the payload, replaces the
+  in-memory state, schedules a debounced disk write. The sweeper
+  reads the policy via the store on every tick so a new policy
+  takes effect on the next sweep.
+- `get_cache_stats` — returns the live `CacheStats` (total bytes,
+  entry count, locked count, oldest/newest timestamps).
+- `clear_cache` — runs `Cache::clear_unlocked_entries` and returns
+  the `SweepOutcome` so the UI can show "reclaimed N bytes"
+  feedback.
+
+### Privacy
+
+Error messages are categorical kind strings only — never raw file
+paths. The cache policy root lives outside the cache root, so any
+log would leak a path outside the cache. The `write_to_disk` helper
+in `cache::policy.rs` follows the same pattern as the shelf
+preferences store: the disk-io error kind is the category, the
+`io::Error`'s `Display` (which can include the absolute path on
+Windows) is discarded.
+
+## ADRs
+
+- 0007 — Cache bounds + recovery (tracer-13)

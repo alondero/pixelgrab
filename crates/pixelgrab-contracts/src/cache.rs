@@ -216,6 +216,177 @@ impl ShelfPosition {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tracer 13: cache policy, statistics, and sweep outcomes.
+// ---------------------------------------------------------------------------
+
+/// On-disk schema version for [`CachePolicy`]. Bumped when adding or
+/// removing fields. The loader is tolerant of unknown fields, so
+/// additive changes don't require a bump; renaming or removing a field
+/// does.
+pub const CACHE_POLICY_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum total cache size in bytes (250 MiB).
+pub const DEFAULT_MAX_BYTES: u64 = 250 * 1024 * 1024;
+/// Maximum number of cache entries. 500 matches the spec's default.
+pub const DEFAULT_MAX_ENTRIES: u32 = 500;
+/// Maximum age of an entry from `last_access_at_ms` in milliseconds
+/// (24 hours).
+pub const DEFAULT_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+/// Hysteresis low-water ratio. When a sweep exceeds the high-water
+/// limits it keeps evicting until current usage drops below this
+/// fraction of the limits. 0.8 means "evict until both bytes and
+/// entries are at or below 80% of the high-water values".
+pub const DEFAULT_LOW_WATER_RATIO: f32 = 0.8;
+/// How often the periodic sweeper runs, in milliseconds (15 minutes).
+pub const DEFAULT_SWEEP_INTERVAL_MS: i64 = 15 * 60 * 1000;
+/// Minimum allowed values for the policy fields. Used by `sanitize`
+/// to clamp a tampered settings file.
+pub const MIN_MAX_BYTES: u64 = 1024 * 1024; // 1 MiB floor
+/// Minimum allowed entry count.
+pub const MIN_MAX_ENTRIES: u32 = 1;
+/// Minimum allowed entry age in milliseconds.
+pub const MIN_MAX_AGE_MS: i64 = 60 * 1000; // 1 minute floor
+/// Minimum allowed low-water ratio.
+pub const MIN_LOW_WATER_RATIO: f32 = 0.1;
+/// Maximum allowed low-water ratio.
+pub const MAX_LOW_WATER_RATIO: f32 = 1.0;
+/// Minimum allowed sweep interval in milliseconds.
+pub const MIN_SWEEP_INTERVAL_MS: i64 = 60 * 1000; // 1 minute floor
+/// Maximum allowed sweep interval in milliseconds.
+pub const MAX_SWEEP_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000; // 24 h ceiling
+
+/// The user's cache policy. Every field is independently clamped or
+/// defaulted by [`CachePolicy::sanitize`] so an invalid settings file
+/// never crashes the app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachePolicy {
+    /// Schema version the on-disk file was written with. The loader
+    /// uses this to branch on older files; future migrations live in
+    /// `sanitize`.
+    pub schema_version: u32,
+    /// Upper bound on total cache bytes. The sweeper prunes unlocked
+    /// entries until usage drops to the low-water ratio.
+    pub max_bytes: u64,
+    /// Upper bound on entry count. The sweeper prunes unlocked
+    /// entries until count drops to the low-water ratio.
+    pub max_entries: u32,
+    /// Upper bound on entry age (from `last_access_at_ms`). Expired
+    /// entries are pruned regardless of the quota.
+    pub max_age_ms: i64,
+    /// Hysteresis ratio; the sweep keeps pruning until both byte and
+    /// entry usage are at or below this fraction of the high-water
+    /// limits. The value is in `(0, 1]`.
+    pub low_water_ratio: f32,
+    /// Sweep cadence for the periodic background worker. The startup
+    /// sweep is independent and runs once on boot.
+    pub sweep_interval_ms: i64,
+    /// When `true`, the cache is purged on graceful exit. The user
+    /// setting is honoured: a panic or kill bypasses the purge.
+    pub purge_on_exit: bool,
+}
+
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            schema_version: CACHE_POLICY_SCHEMA_VERSION,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_entries: DEFAULT_MAX_ENTRIES,
+            max_age_ms: DEFAULT_MAX_AGE_MS,
+            low_water_ratio: DEFAULT_LOW_WATER_RATIO,
+            sweep_interval_ms: DEFAULT_SWEEP_INTERVAL_MS,
+            purge_on_exit: false,
+        }
+    }
+}
+
+impl CachePolicy {
+    /// Clamp every numeric field to its documented range and reset the
+    /// schema version. Called by the loader on every read so a
+    /// tampered file can never crash the app.
+    pub fn sanitize(&self) -> Self {
+        Self {
+            schema_version: CACHE_POLICY_SCHEMA_VERSION,
+            max_bytes: self.max_bytes.clamp(MIN_MAX_BYTES, u64::MAX),
+            max_entries: self.max_entries.clamp(MIN_MAX_ENTRIES, u32::MAX),
+            max_age_ms: self.max_age_ms.clamp(MIN_MAX_AGE_MS, i64::MAX),
+            low_water_ratio: self
+                .low_water_ratio
+                .clamp(MIN_LOW_WATER_RATIO, MAX_LOW_WATER_RATIO),
+            sweep_interval_ms: self
+                .sweep_interval_ms
+                .clamp(MIN_SWEEP_INTERVAL_MS, MAX_SWEEP_INTERVAL_MS),
+            purge_on_exit: self.purge_on_exit,
+        }
+    }
+
+    /// Low-water byte target. Below this total the sweeper stops
+    /// pruning for size.
+    pub fn low_water_bytes(&self) -> u64 {
+        ((self.max_bytes as f64) * (self.low_water_ratio as f64)) as u64
+    }
+
+    /// Low-water entry count target. Below this count the sweeper
+    /// stops pruning for count.
+    pub fn low_water_entries(&self) -> u32 {
+        ((self.max_entries as f64) * (self.low_water_ratio as f64)) as u32
+    }
+}
+
+/// Live snapshot of the cache's usage. Returned by the
+/// `get_cache_stats` IPC and used by the sweeper to decide whether
+/// pruning is needed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStats {
+    /// Total bytes used by all currently-durable entries.
+    pub total_bytes: u64,
+    /// Number of durable entries.
+    pub entry_count: u32,
+    /// Number of entries locked by something other than the shelf
+    /// (e.g. editor / drag / pin owners). The sweeper skips these.
+    pub locked_count: u32,
+    /// `created_at_ms` of the oldest entry, or `None` when the cache
+    /// is empty.
+    pub oldest_created_at_ms: Option<i64>,
+    /// `last_access_at_ms` of the most-recently-accessed entry, or
+    /// `None` when the cache is empty.
+    pub newest_access_at_ms: Option<i64>,
+}
+
+/// Outcome of a single sweep pass. Returned by the sweeper and
+/// surfaced via the `clear_cache` IPC. Partial failures are recorded
+/// by *category* (no paths) so the summary stays useful for telemetry
+/// without leaking the cache root.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepOutcome {
+    /// Entries removed because they were expired (TTL) AND unlocked.
+    pub expired_evicted: u32,
+    /// Entries removed to bring usage below the low-water targets.
+    pub quota_evicted: u32,
+    /// Total bytes reclaimed from evicted entries (or cleaned debris).
+    pub bytes_reclaimed: u64,
+    /// Stale `*.tmp` files removed from inside the cache root.
+    pub tmp_files_removed: u32,
+    /// Zero-byte asset files removed from inside entry directories.
+    pub zero_byte_assets_removed: u32,
+    /// Empty entry directories removed (no manifest, no files).
+    pub unindexed_dirs_removed: u32,
+    /// Per-stage failure counts. The list deliberately omits the
+    /// failing paths so the response can be surfaced to the UI
+    /// without leaking the cache root.
+    pub partial_failures: u32,
+}
+
+impl SweepOutcome {
+    /// Total entries the sweep removed across all eviction paths.
+    pub fn total_evicted(&self) -> u32 {
+        self.expired_evicted.saturating_add(self.quota_evicted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +468,79 @@ mod tests {
         assert_eq!(wa_right - right, 24);
         // X must land inside the work area.
         assert!(pos.x >= pos.work_area.origin.x);
+    }
+
+    #[test]
+    fn cache_policy_defaults_match_spec() {
+        // The defaults are pinned by the spec (issue #25). Bumping
+        // these without a coordinated front-end change is a breaking
+        // change.
+        let p = CachePolicy::default();
+        assert_eq!(p.schema_version, CACHE_POLICY_SCHEMA_VERSION);
+        assert_eq!(p.max_bytes, DEFAULT_MAX_BYTES);
+        assert_eq!(p.max_entries, DEFAULT_MAX_ENTRIES);
+        assert_eq!(p.max_age_ms, DEFAULT_MAX_AGE_MS);
+        assert_eq!(p.low_water_ratio, DEFAULT_LOW_WATER_RATIO);
+        assert_eq!(p.sweep_interval_ms, DEFAULT_SWEEP_INTERVAL_MS);
+        assert!(!p.purge_on_exit);
+    }
+
+    #[test]
+    fn cache_policy_sanitize_clamps_out_of_range() {
+        let dirty = CachePolicy {
+            schema_version: 99,
+            max_bytes: 10,
+            max_entries: 0,
+            max_age_ms: 5,
+            low_water_ratio: 7.0,
+            sweep_interval_ms: 10,
+            purge_on_exit: false,
+        };
+        let clean = dirty.sanitize();
+        assert_eq!(clean.schema_version, CACHE_POLICY_SCHEMA_VERSION);
+        assert_eq!(clean.max_bytes, MIN_MAX_BYTES);
+        assert_eq!(clean.max_entries, MIN_MAX_ENTRIES);
+        assert_eq!(clean.max_age_ms, MIN_MAX_AGE_MS);
+        assert_eq!(clean.low_water_ratio, MAX_LOW_WATER_RATIO);
+        assert_eq!(clean.sweep_interval_ms, MIN_SWEEP_INTERVAL_MS);
+    }
+
+    #[test]
+    fn cache_policy_low_water_targets() {
+        let p = CachePolicy {
+            max_bytes: 1000,
+            max_entries: 20,
+            low_water_ratio: 0.5,
+            ..CachePolicy::default()
+        };
+        assert_eq!(p.low_water_bytes(), 500);
+        assert_eq!(p.low_water_entries(), 10);
+    }
+
+    #[test]
+    fn cache_policy_unknown_fields_are_tolerated() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "maxBytes": 1024,
+            "maxEntries": 2,
+            "maxAgeMs": 60000,
+            "lowWaterRatio": 0.5,
+            "sweepIntervalMs": 60000,
+            "purgeOnExit": false,
+            "futureField": "ignored"
+        }"#;
+        let parsed: CachePolicy = serde_json::from_str(json).expect("parse");
+        assert_eq!(parsed.max_bytes, 1024);
+        assert_eq!(parsed.max_entries, 2);
+    }
+
+    #[test]
+    fn sweep_outcome_total_evicted_sums_both_kinds() {
+        let o = SweepOutcome {
+            expired_evicted: 3,
+            quota_evicted: 5,
+            ..SweepOutcome::default()
+        };
+        assert_eq!(o.total_evicted(), 8);
     }
 }

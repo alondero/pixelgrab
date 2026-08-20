@@ -28,7 +28,13 @@ pub use annotation::{
     flatten_annotations, paint_annotation, Annotation, AnnotationColor, AnnotationGeometry,
     AnnotationId, AnnotationStroke, BADGE_RADIUS_PX,
 };
-pub use cache::{CacheEntry, CacheEntryMetadata, CaptureId, LockOwner, ShelfId, ShelfPosition};
+pub use cache::{
+    CacheEntry, CacheEntryMetadata, CachePolicy, CacheStats, CaptureId, LockOwner, ShelfId,
+    ShelfPosition, SweepOutcome, CACHE_POLICY_SCHEMA_VERSION, DEFAULT_LOW_WATER_RATIO,
+    DEFAULT_MAX_AGE_MS, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES, DEFAULT_SWEEP_INTERVAL_MS,
+    MAX_LOW_WATER_RATIO, MAX_SWEEP_INTERVAL_MS, MIN_LOW_WATER_RATIO, MIN_MAX_AGE_MS, MIN_MAX_BYTES,
+    MIN_MAX_ENTRIES, MIN_SWEEP_INTERVAL_MS,
+};
 pub use capture::{CaptureFormat, CaptureRequest, CaptureResolution};
 pub use coordinate::{
     transform, ClientBounds, ClientPoint, ClientSize, PhysicalBounds, PhysicalPoint, PhysicalSize,
@@ -40,11 +46,12 @@ pub use drag::{
 };
 pub use error::{PlatformError, PlatformErrorKind, PlatformResult};
 pub use ipc::{
-    CancelOutcome, CaptureDiagnostics, CaptureIntent, CaptureResponse, CommitOutcome,
-    CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError,
-    IpcResponse, OverlaySelection, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
-    RequestOverlayResult, SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot,
-    StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+    CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureDiagnostics, CaptureIntent,
+    CaptureResponse, ClearCacheResponse, CommitOutcome, CommitRequest, CommitResponse,
+    DismissCacheEntryRequest, DismissCacheEntryResponse, IpcError, IpcResponse, OverlaySelection,
+    RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult,
+    SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot, StartShelfDragIntent,
+    StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
     UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
