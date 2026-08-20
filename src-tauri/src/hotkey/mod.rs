@@ -27,6 +27,9 @@
 //! module use the fake exclusively.
 
 pub mod store;
+pub mod tauri_backend;
+
+pub use tauri_backend::TauriGlobalShortcutBackend;
 
 use parking_lot::Mutex;
 use pixelgrab_contracts::{

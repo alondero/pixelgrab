@@ -8,15 +8,19 @@
 //! `()`. Declaring any map (even an empty `{}`) makes the plugin's
 //! serde deserialiser panic on startup with:
 //!
-//!     error while running PixelGrab:
+//!     thread 'main' panicked at src-tauri\src\lib.rs:519:10:
+//!     error while building PixelGrab:
 //!       PluginInitialization("<plugin>",
 //!         "Error deserializing 'plugins.<plugin>' within your Tauri
 //!          configuration: invalid type: map, expected unit")
 //!
-//! That panic happens inside `Builder::run()` after the test suite
-//! has finished, so the test suite cannot catch it — only launching
-//! the binary does. This regression test guards against any future
-//! author copy-pasting `"{plugin}": {}` back into the config.
+//! Note it is `Builder::build()`, not `Builder::run()` — the panic is the
+//! `.expect()` on the `build()` call in `lib.rs::run`. The suite never
+//! calls `build()` and never expands `generate_context!()`, so no test
+//! reaches this path; only launching the binary does. CI's `Launch smoke
+//! test` step in the `e2e` job covers that side. This test covers the
+//! static side, guarding against any future author copy-pasting
+//! `"{plugin}": {}` back into the config.
 
 /// The Tauri config must not declare any `plugins.*` entries.
 ///
@@ -30,10 +34,16 @@ fn tauri_config_declares_no_plugin_entries() {
     let value: serde_json::Value =
         serde_json::from_str(&raw).expect("tauri.conf.json must be valid JSON");
 
-    let plugins = value
-        .get("plugins")
-        .and_then(|p| p.as_object())
-        .expect("tauri.conf.json must declare a top-level `plugins` object");
+    // An absent `plugins` key is safer still than an empty one: Tauri reads
+    // the block with `config.get(plugin.name()).cloned().unwrap_or_default()`,
+    // so a missing key arrives as JSON `null` — which the unit config type
+    // accepts. Only a *present* map can break startup, so nothing to check.
+    let Some(plugins) = value.get("plugins") else {
+        return;
+    };
+    let plugins = plugins.as_object().unwrap_or_else(|| {
+        panic!("`plugins` in tauri.conf.json must be a JSON object, found: {plugins}")
+    });
 
     if !plugins.is_empty() {
         let mut keys: Vec<&String> = plugins.keys().collect();

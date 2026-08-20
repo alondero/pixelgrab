@@ -45,12 +45,90 @@
 //! structural shape — invalid strings round-trip to `None` rather
 //! than silently flipping a binding off.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ipc::HotkeyBindingsDto;
 use crate::PlatformError;
+
+/// Single source of truth for hotkey modifier aliases. Loaded from
+/// `data/hotkey_modifiers.json` so the frontend (Svelte) and the
+/// Rust core parse the same set of synonyms. Edits to the JSON
+/// flow to both sides without code changes — `include_str!` keeps
+/// the file embedded at compile time, eliminating the runtime
+/// miss-distance that produced the drift this issue closed.
+const MODIFIER_ALIASES_JSON: &str = include_str!("../data/hotkey_modifiers.json");
+
+/// Parsed shape of [`MODIFIER_ALIASES_JSON`]. Kept private; the
+/// runtime table is built by [`modifier_table`] and consumed via
+/// [`canonicalise_modifier`] / [`modifier_rank`].
+#[derive(Debug, Deserialize)]
+struct ModifierAliasTable {
+    /// Schema version. Read by tests but not at runtime; the
+    /// file is bundled at compile time so any drift is caught at
+    /// the `serde_json::from_str` site instead.
+    #[serde(default)]
+    #[allow(dead_code)]
+    schema_version: u32,
+    modifiers: Vec<ModifierEntry>,
+    /// Canonical-order rank. Read by tests; runtime sort uses
+    /// [`ModifierTable::rank`] which is a `Vec<&'static str>`
+    /// sharing the leaked canonical names from [`modifier_table`].
+    #[allow(dead_code)]
+    rank: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModifierEntry {
+    canonical: String,
+    aliases: Vec<String>,
+}
+
+/// Static lookup table mapping a lowercased modifier alias to its
+/// canonical name. Built lazily on first use so the JSON parse
+/// cost is paid at most once per process.
+fn modifier_table() -> &'static ModifierTable {
+    static TABLE: OnceLock<ModifierTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let parsed: ModifierAliasTable =
+            serde_json::from_str(MODIFIER_ALIASES_JSON).expect("hotkey_modifiers.json must parse");
+        let mut map: HashMap<String, &'static str> =
+            HashMap::with_capacity(parsed.modifiers.len() * 6);
+        let mut canonicals: Vec<&'static str> = Vec::with_capacity(parsed.modifiers.len());
+        for entry in parsed.modifiers {
+            // Leak the canonical name once per entry so we can
+            // hand out `&'static str` without re-leaking on every
+            // lookup. Bounded by the modifier count (currently 4).
+            let canonical_static: &'static str = Box::leak(entry.canonical.into_boxed_str());
+            canonicals.push(canonical_static);
+            for alias in entry.aliases {
+                map.insert(alias.to_ascii_lowercase(), canonical_static);
+            }
+            // The canonical name itself maps to itself so
+            // `parse_binding("Alt+F4")` round-trips through the
+            // same table as `parse_binding("Option+F4")`.
+            map.insert(canonical_static.to_ascii_lowercase(), canonical_static);
+        }
+        ModifierTable {
+            aliases: map,
+            rank: canonicals,
+        }
+    })
+}
+
+/// Process-lifetime modifier alias table. Constructed once on
+/// first use; both the `HashMap<String, &'static str>` for
+/// alias→canonical lookups and the rank-ordered `Vec<&'static str>`
+/// for canonical-order sorting share the leaked canonical-name
+/// strings, so the memory footprint is bounded by the number of
+/// canonical modifier names (currently four).
+struct ModifierTable {
+    aliases: HashMap<String, &'static str>,
+    rank: Vec<&'static str>,
+}
 
 /// Schema version for the persisted bindings document. Bumped when
 /// the wire shape changes incompatibly so a stale file can be
@@ -111,6 +189,22 @@ impl HotkeyAction {
             HotkeyAction::RegionCapture => "Capture Region",
             HotkeyAction::FullScreenCapture => "Capture Full Screen",
             HotkeyAction::ShelfToggle => "Toggle Shelf",
+        }
+    }
+}
+
+/// Map a [`HotkeyAction`] onto the matching
+/// [`crate::ipc::SecondaryLaunchIntent`] so the global-shortcut
+/// plugin's handler closure (and any future tray-driven dispatch)
+/// can resolve the intent in one step. Lives next to the source
+/// enum so a future addition to [`HotkeyAction`] is forced to
+/// extend this mapping before the IPC layer compiles.
+impl From<HotkeyAction> for crate::ipc::SecondaryLaunchIntent {
+    fn from(action: HotkeyAction) -> Self {
+        match action {
+            HotkeyAction::RegionCapture => crate::ipc::SecondaryLaunchIntent::CaptureRegion,
+            HotkeyAction::FullScreenCapture => crate::ipc::SecondaryLaunchIntent::CaptureFullScreen,
+            HotkeyAction::ShelfToggle => crate::ipc::SecondaryLaunchIntent::ShelfHistory,
         }
     }
 }
@@ -411,25 +505,16 @@ pub struct HotkeyRegistryStatus {
 }
 
 fn canonicalise_modifier(token: &str) -> Option<&'static str> {
-    match token.to_ascii_lowercase().as_str() {
-        "ctrl" | "control" | "ctl" | "cmd" | "command" | "commandorcontrol" => {
-            Some("CommandOrControl")
-        }
-        "alt" | "option" | "opt" => Some("Alt"),
-        "shift" | "shft" => Some("Shift"),
-        "win" | "super" | "meta" => Some("Super"),
-        _ => None,
-    }
+    let key = token.to_ascii_lowercase();
+    modifier_table().aliases.get(&key).copied()
 }
 
 fn modifier_rank(modifier: &str) -> u8 {
-    match modifier {
-        "CommandOrControl" => 0,
-        "Alt" => 1,
-        "Shift" => 2,
-        "Super" => 3,
-        _ => 255,
-    }
+    let rank = &modifier_table().rank;
+    rank.iter()
+        .position(|m| *m == modifier)
+        .and_then(|idx| u8::try_from(idx).ok())
+        .unwrap_or(255)
 }
 
 fn is_main_key(token: &str) -> bool {
@@ -747,5 +832,65 @@ mod tests {
         let err = validate_for_storage(HotkeyAction::RegionCapture, "bogus").expect_err("invalid");
         let msg = format!("{err:?}");
         assert!(msg.contains("region_capture"));
+    }
+
+    /// Tracer 14 follow-up: every alias in
+    /// `data/hotkey_modifiers.json` must round-trip through the
+    /// Rust parser AND through the TS canonicaliser. The JSON is
+    /// shared between both sides (Rust: `include_str!`, TS:
+    /// `import ... from`), so iterating the JSON here pins the
+    /// "TS + Rust modifier aliases round-trip" acceptance
+    /// criterion from issue #46.
+    #[test]
+    fn modifier_aliases_round_trip_via_shared_json() {
+        // Parse the same JSON the TS side imports. A drift
+        // between the file and the runtime table would surface
+        // as a missing alias here.
+        let parsed: super::ModifierAliasTable =
+            serde_json::from_str(super::MODIFIER_ALIASES_JSON).expect("shared JSON parses");
+        assert!(
+            !parsed.modifiers.is_empty(),
+            "modifier alias table must not be empty"
+        );
+        for entry in &parsed.modifiers {
+            // Each alias canonicalises to the entry's canonical
+            // form via `parse_binding("<alias>+S")`. The
+            // canonicalised binding's modifier prefix must equal
+            // the canonical name.
+            for alias in &entry.aliases {
+                let raw = format!("{alias}+S");
+                let parsed_binding =
+                    parse_binding(&raw).unwrap_or_else(|| panic!("alias {alias:?} must parse"));
+                assert!(
+                    parsed_binding.starts_with(&entry.canonical),
+                    "alias {alias:?} must canonicalise to {}, got {parsed_binding:?}",
+                    entry.canonical
+                );
+            }
+            // Canonical name itself round-trips.
+            let self_binding =
+                parse_binding(&format!("{}+S", entry.canonical)).expect("canonical parses");
+            assert!(
+                self_binding.starts_with(&entry.canonical),
+                "canonical {canonical:?} must self-canonicalise, got {self_binding:?}",
+                canonical = entry.canonical
+            );
+        }
+        // Rank order is preserved — canonicalise a chord with
+        // every modifier in arbitrary order and check the
+        // output is rank-sorted.
+        let shuffled = "Super+Shift+Alt+CommandOrControl+S";
+        let canonical = parse_binding(shuffled).expect("all-modifier chord parses");
+        let parts: Vec<&str> = canonical.split('+').collect();
+        let mod_only = &parts[..parts.len() - 1];
+        let expected_rank = &parsed.rank;
+        assert_eq!(
+            mod_only.len(),
+            expected_rank.len(),
+            "every modifier appears exactly once: got {mod_only:?}"
+        );
+        for (got, want) in mod_only.iter().zip(expected_rank.iter()) {
+            assert_eq!(got, want, "rank order must match the JSON");
+        }
     }
 }

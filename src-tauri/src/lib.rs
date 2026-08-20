@@ -28,11 +28,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 
 use crate::cache::policy::CachePolicyStore;
 use crate::cache::sweeper::{CacheSweeper, SweepWorker};
 use crate::hotkey::store::HotkeyPreferencesStore;
+#[cfg(all(target_os = "windows", not(feature = "synthetic")))]
+use crate::hotkey::TauriGlobalShortcutBackend;
 use crate::hotkey::{GlobalShortcutBackend, HotkeyRegistry, InMemoryBackend};
 use crate::pin::PinRegistry;
 use crate::preferences::PreferencesStore;
@@ -341,10 +343,16 @@ pub fn run() {
             // builds on Windows always run through the Windows adapter
             // and capture a frozen frame before the overlay is revealed.
             let platform: Arc<dyn platform::PixelGrabPlatform> = default_platform();
-            // The hotkey backend is the in-memory fake in CI / dev
-            // and the Tauri adapter in production builds. Tests
-            // inject a custom backend through `PixelGrabApp::new`.
-            let hotkey_backend: Arc<dyn GlobalShortcutBackend> = default_hotkey_backend();
+            // Production Windows builds drive the real
+            // `tauri-plugin-global-shortcut` plugin; CI / dev /
+            // non-Windows builds stay on the in-memory fake so
+            // no OS interaction is required. The plugin must
+            // already be initialised when this runs (it is —
+            // see the `.plugin(tauri_plugin_global_shortcut::
+            // Builder::new().build())` call above), so the
+            // `AppHandle` exposes its managed state.
+            let hotkey_backend: Arc<dyn GlobalShortcutBackend> =
+                install_hotkey_backend(app.handle());
             let app_state = PixelGrabApp::new(platform, hotkey_backend);
 
             // Wire the cache root and recover any partial entries
@@ -600,27 +608,31 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Pick a hotkey backend. The synthetic feature (CI / dev on
-/// non-Windows) gets the in-memory fake so no OS-level
-/// registration is attempted. Production uses a Tauri adapter —
-/// see the platform module for the Windows adapter; non-Windows
-/// production builds fall back to the in-memory fake so the
-/// binary still runs.
-fn default_hotkey_backend() -> Arc<dyn GlobalShortcutBackend> {
+/// Pick a hotkey backend for the running build. Production
+/// Windows builds drive the real `tauri-plugin-global-shortcut`
+/// plugin; CI / dev / non-Windows builds (and every test that
+/// constructs a `PixelGrabApp` directly) stay on the in-memory
+/// fake so no OS interaction is required. The plugin's
+/// managed state is initialised by the `.plugin(...)` call
+/// above the setup hook, so by the time this runs the
+/// `AppHandle` already exposes `global_shortcut()`.
+fn install_hotkey_backend(handle: &AppHandle<Wry>) -> Arc<dyn GlobalShortcutBackend> {
     #[cfg(all(target_os = "windows", not(feature = "synthetic")))]
     {
-        // The Tauri global-shortcut plugin owns the real backend
-        // at runtime; the registry's transactions still run on
-        // the in-memory adapter because the plugin's APIs are
-        // not thread-safe. The in-memory adapter lives alongside
-        // the real hook registration so a future migration is a
-        // one-file change. This keeps CI green while letting a
-        // developer working on the Windows path verify the
-        // hooks by checking the actual OS hook list.
-        return InMemoryBackend::new();
+        // Production: every shortcut chord lands on the real
+        // OS hook list. The handler closures the backend
+        // installs emit the existing `pixelgrab://secondary-
+        // launch` event so tray clicks, single-instance argv,
+        // and chord presses all funnel through one frontend
+        // intent handler.
+        return TauriGlobalShortcutBackend::install(handle.clone());
     }
     #[cfg(any(not(target_os = "windows"), feature = "synthetic"))]
     {
+        // CI / dev / non-Windows / tests. Keep the in-memory
+        // fake so the registry's transaction semantics can be
+        // exercised without involving the OS.
+        let _ = handle;
         InMemoryBackend::new()
     }
 }

@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { HotkeyBindingsDto } from "$lib/ipc/types";
+import modifierAliases from "$contracts/data/hotkey_modifiers.json";
 import {
   actionBinding,
   canonicaliseChord,
@@ -56,10 +57,12 @@ describe("canonicaliseChord", () => {
     expect(canonicaliseChord(["cmd", "shift", "s"])).toBe("CommandOrControl+Shift+S");
     expect(canonicaliseChord(["alt", "f4"])).toBe("Alt+F4");
     // Meta + Win both map to the same canonical modifier, so
-    // the chord collapses to a single Meta + main key — bare
-    // Meta without a main key is rejected.
+    // the chord collapses to a single Super + main key — bare
+    // Super without a main key is rejected. (Tracer 14
+    // follow-up: the canonical form is "Super", mirroring
+    // `pixelgrab_contracts::hotkey::parse_binding`.)
     expect(canonicaliseChord(["Meta", "Win"])).toBeNull();
-    expect(canonicaliseChord(["Meta", "Tab"])).toBe("Meta+TAB");
+    expect(canonicaliseChord(["Meta", "Tab"])).toBe("Super+TAB");
   });
 
   it("sorts modifiers in canonical order", () => {
@@ -84,5 +87,51 @@ describe("canonicaliseChord", () => {
 
   it("deduplicates repeated modifiers", () => {
     expect(canonicaliseChord(["Ctrl", "Control", "S"])).toBe("CommandOrControl+S");
+  });
+});
+
+/// Tracer 14 follow-up (issue #46): every alias in the shared
+/// `hotkey_modifiers.json` must round-trip through the
+/// canonicaliser. This is the "TS + Rust modifier aliases
+/// round-trip via a single test" acceptance criterion: both
+/// sides import the same file, so iterating it here pins the
+/// Rust parser's behaviour from the JS test surface (and vice
+/// versa).
+describe("modifier alias round-trip via shared JSON", () => {
+  type ModifierAliasTable = {
+    modifiers: Array<{ canonical: string; aliases: string[] }>;
+    rank: string[];
+  };
+
+  it("resolves every alias in the shared JSON to its canonical name", () => {
+    const table = modifierAliases as ModifierAliasTable;
+    expect(table.modifiers.length).toBeGreaterThan(0);
+    for (const entry of table.modifiers) {
+      for (const alias of entry.aliases) {
+        const chord = canonicaliseChord([alias, "S"]);
+        // `toMatch` only takes the expected pattern; surface the
+        // offending alias + canonical in the assertion message
+        // so a failure points the developer at the JSON entry
+        // that drifted out of sync.
+        expect(
+          chord,
+          `alias ${alias} must canonicalise to ${entry.canonical}, got ${chord}`,
+        ).toMatch(new RegExp(`^${entry.canonical}\\+S$`));
+      }
+    }
+  });
+
+  it("respects the rank order declared in the shared JSON", () => {
+    const table = modifierAliases as ModifierAliasTable;
+    // Pick the canonical name of every modifier; submit them in
+    // reverse order; expect the canonicaliser to re-sort them
+    // into the order declared in the JSON's `rank` array.
+    const canonicals = table.modifiers.map((m) => m.canonical);
+    const reverseInput = [...canonicals].reverse().concat(["S"]);
+    const chord = canonicaliseChord(reverseInput);
+    expect(chord).not.toBeNull();
+    const parts = chord!.split("+");
+    const expected = [...table.rank, "S"];
+    expect(parts).toEqual(expected);
   });
 });
