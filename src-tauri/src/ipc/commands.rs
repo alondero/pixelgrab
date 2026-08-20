@@ -109,17 +109,23 @@ fn snapshot_with_position(app: &PixelGrabApp) -> ShelfQueueSnapshot {
 /// Begin a capture from the tray or shortcut. The orchestrator refuses the
 /// call when the session is already busy; an overlapping capture request
 /// cannot replace or corrupt the in-flight session.
+///
+/// `intent.region` captures the full virtual desktop (the overlay shows
+/// the user a freeze frame over the whole desktop and asks them to drag a
+/// region). `intent.full_screen` resolves the target monitor (primary by
+/// default, or the monitor under the pointer when the platform provides
+/// cursor coordinates) and captures that monitor at native resolution.
 #[tauri::command]
 pub fn request_capture(
     app: AppState<'_>,
     payload: RequestCaptureIntent,
+    handle: AppHandle,
 ) -> IpcResponse<CaptureResponse> {
-    let _ = payload; // shape-only payload; the actual format comes from the
-                     // orchestrator's platform contract.
-    let request = CaptureRequest {
-        format: CaptureFormat::VirtualDesktop,
-        monitor_id: None,
-        region: None,
+    let request = match resolve_capture_request(&app, payload.intent) {
+        Ok(req) => req,
+        Err(err) => {
+            return IpcResponse::from_result(Err(err));
+        }
     };
     let started_at = now_ms();
     let result = app.session().request_capture(&request);
@@ -128,7 +134,7 @@ pub fn request_capture(
         Err(err) => {
             let diag = CaptureDiagnostics::started(
                 "<rejected>",
-                "virtual-desktop",
+                monitor_id_for_format(request.format),
                 pixelgrab_contracts::PhysicalBounds::EMPTY,
                 started_at,
             )
@@ -138,6 +144,21 @@ pub fn request_capture(
             return IpcResponse::from_result(Err(err));
         }
     };
+    // Position the overlay over the captured bounds. The tray menu
+    // doesn't open the overlay directly; the frontend asks for it via
+    // `request_overlay` after the user has acknowledged the freeze frame.
+    // We still position the window here so the next reveal is instantaneous.
+    if let Ok(layout) = app.platform().monitor_layout() {
+        if let Err(err) = crate::overlay::position_over_bounds(&handle, &capture.bounds) {
+            log::warn!("overlay positioning failed: {err}");
+            // Recompute from the full layout if the captured bounds
+            // (e.g. a single-monitor capture) is not the full virtual
+            // desktop.
+            if let Err(err) = crate::overlay::position_over_virtual_desktop(&handle, &layout) {
+                log::warn!("overlay virtual-desktop positioning failed: {err}");
+            }
+        }
+    }
     let monitor_id = monitor_id_for(&capture);
     let diag =
         CaptureDiagnostics::started(&capture.capture_id, &monitor_id, capture.bounds, started_at)
@@ -148,6 +169,57 @@ pub fn request_capture(
         diagnostics: app.session().last_diagnostics(),
     };
     IpcResponse::from_result(Ok(response))
+}
+
+/// Resolve the IPC intent into a concrete `CaptureRequest`. The
+/// `Region` intent captures the full virtual desktop so the overlay can
+/// show a freeze frame covering every monitor. The `FullScreen` intent
+/// resolves the target monitor using the platform's monitor layout and
+/// issues a `SingleMonitor` capture at the monitor's native resolution.
+fn resolve_capture_request(
+    app: &PixelGrabApp,
+    intent: pixelgrab_contracts::ipc::CaptureIntent,
+) -> Result<CaptureRequest, pixelgrab_contracts::PlatformError> {
+    use pixelgrab_contracts::PlatformError;
+    use pixelgrab_contracts::PlatformErrorKind;
+    match intent {
+        pixelgrab_contracts::ipc::CaptureIntent::Region => Ok(CaptureRequest {
+            format: CaptureFormat::VirtualDesktop,
+            monitor_id: None,
+            region: None,
+        }),
+        pixelgrab_contracts::ipc::CaptureIntent::FullScreen => {
+            let layout = app.platform().monitor_layout()?;
+            let monitor = layout
+                .monitors
+                .iter()
+                .find(|m| m.is_primary)
+                .or_else(|| layout.monitors.first())
+                .ok_or_else(|| {
+                    PlatformError::new(
+                        PlatformErrorKind::MonitorQueryFailed,
+                        "no monitor available for full-screen capture",
+                    )
+                })?;
+            Ok(CaptureRequest {
+                format: CaptureFormat::SingleMonitor,
+                monitor_id: Some(monitor.id.clone()),
+                region: None,
+            })
+        }
+    }
+}
+
+/// Map a `CaptureFormat` to the diagnostics monitor id used by the
+/// `CaptureDiagnostics` record. The capture pipeline tracks this label
+/// even for stitched captures so the telemetry stream can group
+/// captures by intent.
+fn monitor_id_for_format(format: CaptureFormat) -> &'static str {
+    match format {
+        CaptureFormat::VirtualDesktop => "virtual-desktop",
+        CaptureFormat::SingleMonitor => "single-monitor",
+        CaptureFormat::PhysicalRegion => "physical-region",
+    }
 }
 
 /// The overlay calls this when it has finished showing the freeze frame.

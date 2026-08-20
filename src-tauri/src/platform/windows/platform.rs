@@ -87,6 +87,10 @@ impl PixelGrabPlatform for WindowsPlatform {
         self.inner.engine.monitor_layout()
     }
 
+    fn invalidate_layout(&self) {
+        self.inner.engine.invalidate_layout();
+    }
+
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution> {
         self.inner.engine.capture(request)
     }
