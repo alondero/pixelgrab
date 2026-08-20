@@ -1,22 +1,24 @@
 <script lang="ts">
-  // Konva-driven overlay stage. Hosts two layered UI surfaces:
-  //   1. The frozen-frame image plus the dim mask, crosshair, and
-  //      region-selection rectangle from tracer-02.
-  //   2. The annotation layer (tracer-04): renders every annotation
-  //      plus the in-flight draft, captures pointer events for the
-  //      drawing tools, and binds the toolbar's keyboard shortcuts.
+  // Konva-driven overlay stage. Hosts three layered UI surfaces:
+  //   1. The frozen-frame image + the dim mask / crosshair / region
+  //      selection rectangle (handles the user's crop — tracer-02).
+  //   2. The annotation layer (tracer-04): renders every committed
+  //      annotation plus the in-flight draft, captures pointer events
+  //      for the drawing tools.
+  //   3. The annotation-selection chrome (tracer-06): per-annotation
+  //      bounding boxes + resolved handles, plus the marquee rectangle
+  //      for shift-drag group selection.
   //
-  // The two surfaces share a single pointer pipeline. When the active
-  // tool is `select`, the region-selection rectangle owns the pointer.
-  // When the tool is arrow/rectangle/numbered_badge, the annotation
-  // pipeline owns the pointer. The crop must already be committed
-  // before drawing tools become active (a draft outside the crop has
-  // no meaning for the flattened output).
+  // The three surfaces share a single pointer pipeline. When the
+  // active tool is `select`, the annotation pipeline takes the pointer
+  // (click on an annotation selects it; shift-click toggles; bare
+  // drag creates a marquee). When the tool is arrow/rectangle/etc.,
+  // the annotation pipeline owns the pointer for a draw gesture.
 
   import { onMount } from "svelte";
   import Konva from "konva";
   import type { Annotation, PhysicalBounds, PhysicalPoint } from "$lib/ipc/types";
-  import { annotationStore } from "$lib/annotation/store.svelte";
+  import { annotationStore, type TransformHandle } from "$lib/annotation/store.svelte";
   import type { AnnotationColor, AnnotationStroke } from "$lib/ipc/types";
 
   interface Props {
@@ -44,29 +46,39 @@
   let container: HTMLDivElement;
   let stage: Konva.Stage | null = null;
   let imageNode: Konva.Image | null = null;
+  // Crop selection (tracer-02).
   let dimMaskTop: Konva.Rect | null = null;
   let dimMaskBottom: Konva.Rect | null = null;
   let dimMaskLeft: Konva.Rect | null = null;
   let dimMaskRight: Konva.Rect | null = null;
   let crosshairH: Konva.Line | null = null;
   let crosshairV: Konva.Line | null = null;
-  let selectionRect: Konva.Rect | null = null;
-  let selectionBorder: Konva.Rect | null = null;
-  let handles: Konva.Rect[] = [];
-  // Annotation layer nodes.
+  let cropSelectionRect: Konva.Rect | null = null;
+  let cropSelectionBorder: Konva.Rect | null = null;
+  let cropHandles: Konva.Rect[] = [];
+  // Annotation layer.
   let annotationLayer: Konva.Layer | null = null;
   let annotationNodes = new Map<number, Konva.Group>();
   let draftNode: Konva.Group | null = null;
+  // Annotation selection chrome (tracer-06).
+  let annotationSelectionLayer: Konva.Layer | null = null;
+  let selectionBoxNodes = new Map<number, Konva.Rect>();
+  let selectionHandleNodes = new Map<string, Konva.Rect>();
+  let marqueeRect: Konva.Rect | null = null;
   // Region selection state (tracer-02).
   let dragging = $state(false);
   let startPoint: { x: number; y: number } | null = null;
   let pointerPos = $state<{ x: number; y: number } | null>(null);
-  let activeHandle: HandlePosition | null = null;
+  let activeCropHandle: HandlePosition | null = null;
   let lastSelection = $state<PhysicalBounds | null>(null);
   // Region-lock flag: once a selection is committed, drawing tools
   // take over the pointer until the user cancels or commits.
   let drawingDraft = $state(false);
   let draftStart: PhysicalPoint | null = null;
+  // Annotation selection gesture state (tracer-06).
+  let marqueeDragging = $state(false);
+  let marqueeStart: { x: number; y: number } | null = null;
+  let annotationDragging = $state(false);
   // Text editor overlay visibility. Set true at the end of a text
   // draft drag; reset when the overlay commits or cancels.
   let textEditing = $state(false);
@@ -77,7 +89,9 @@
 
   type HandlePosition = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
-  const HANDLE_SIZE = 10;
+  const CROP_HANDLE_SIZE = 10;
+  const ANNOTATION_HANDLE_SIZE = 8;
+  const MIN_SELECTION_DIM = 4;
 
   // Palette mirror: must agree with `crates/pixelgrab-contracts/src/annotation.rs`
   // `AnnotationColor::rgba` so the Konva preview and the rasterized
@@ -145,10 +159,6 @@
     ) {
       return null;
     }
-    // The overlay renders the capture 1:1 (stageWidth matches
-    // bounds.size.width at 100% browser zoom); the scale is the
-    // inverse of that ratio so a future tracer can introduce
-    // per-monitor DPI without changing this code.
     const scaleX = bounds.size.width / stageWidth;
     const scaleY = bounds.size.height / stageHeight;
     return {
@@ -210,30 +220,41 @@
     dimMaskRight.visible(true);
   }
 
-  function positionHandles(rect: { x: number; y: number; width: number; height: number } | null) {
-    if (handles.length !== 8 || !rect) {
-      for (const handle of handles) handle.visible(false);
+  function positionCropHandles(
+    rect: { x: number; y: number; width: number; height: number } | null,
+  ) {
+    if (cropHandles.length !== 8 || !rect) {
+      for (const handle of cropHandles) handle.visible(false);
       return;
     }
     const positions: Array<{ x: number; y: number }> = [
-      { x: rect.x - HANDLE_SIZE / 2, y: rect.y - HANDLE_SIZE / 2 },
-      { x: rect.x + rect.width / 2 - HANDLE_SIZE / 2, y: rect.y - HANDLE_SIZE / 2 },
-      { x: rect.x + rect.width - HANDLE_SIZE / 2, y: rect.y - HANDLE_SIZE / 2 },
-      { x: rect.x + rect.width - HANDLE_SIZE / 2, y: rect.y + rect.height / 2 - HANDLE_SIZE / 2 },
-      { x: rect.x + rect.width - HANDLE_SIZE / 2, y: rect.y + rect.height - HANDLE_SIZE / 2 },
-      { x: rect.x + rect.width / 2 - HANDLE_SIZE / 2, y: rect.y + rect.height - HANDLE_SIZE / 2 },
-      { x: rect.x - HANDLE_SIZE / 2, y: rect.y + rect.height - HANDLE_SIZE / 2 },
-      { x: rect.x - HANDLE_SIZE / 2, y: rect.y + rect.height / 2 - HANDLE_SIZE / 2 },
+      { x: rect.x - CROP_HANDLE_SIZE / 2, y: rect.y - CROP_HANDLE_SIZE / 2 },
+      { x: rect.x + rect.width / 2 - CROP_HANDLE_SIZE / 2, y: rect.y - CROP_HANDLE_SIZE / 2 },
+      { x: rect.x + rect.width - CROP_HANDLE_SIZE / 2, y: rect.y - CROP_HANDLE_SIZE / 2 },
+      {
+        x: rect.x + rect.width - CROP_HANDLE_SIZE / 2,
+        y: rect.y + rect.height / 2 - CROP_HANDLE_SIZE / 2,
+      },
+      {
+        x: rect.x + rect.width - CROP_HANDLE_SIZE / 2,
+        y: rect.y + rect.height - CROP_HANDLE_SIZE / 2,
+      },
+      {
+        x: rect.x + rect.width / 2 - CROP_HANDLE_SIZE / 2,
+        y: rect.y + rect.height - CROP_HANDLE_SIZE / 2,
+      },
+      { x: rect.x - CROP_HANDLE_SIZE / 2, y: rect.y + rect.height - CROP_HANDLE_SIZE / 2 },
+      { x: rect.x - CROP_HANDLE_SIZE / 2, y: rect.y + rect.height / 2 - CROP_HANDLE_SIZE / 2 },
     ];
     positions.forEach((pos, index) => {
-      const handle = handles[index];
+      const handle = cropHandles[index];
       handle.position(pos);
-      handle.size({ width: HANDLE_SIZE, height: HANDLE_SIZE });
+      handle.size({ width: CROP_HANDLE_SIZE, height: CROP_HANDLE_SIZE });
       handle.visible(true);
     });
   }
 
-  function handleHit(
+  function cropHandleHit(
     pos: { x: number; y: number },
     rect: { x: number; y: number; width: number; height: number },
   ): HandlePosition | null {
@@ -247,7 +268,7 @@
       ["sw", rect.x, rect.y + rect.height],
       ["w", rect.x, rect.y + rect.height / 2],
     ];
-    const tolerance = HANDLE_SIZE;
+    const tolerance = CROP_HANDLE_SIZE;
     for (const [name, hx, hy] of positions) {
       if (Math.abs(pos.x - hx) <= tolerance && Math.abs(pos.y - hy) <= tolerance) {
         return name;
@@ -256,7 +277,7 @@
     return null;
   }
 
-  function applyHandleDrag(
+  function applyCropHandleDrag(
     startRect: { x: number; y: number; width: number; height: number },
     handle: HandlePosition,
     pos: { x: number; y: number },
@@ -314,33 +335,33 @@
     return { x, y, width, height };
   }
 
-  function selectionGeometry(): { x: number; y: number; width: number; height: number } | null {
-    if (!selectionRect) return null;
+  function cropSelectionGeometry(): { x: number; y: number; width: number; height: number } | null {
+    if (!cropSelectionRect) return null;
     return {
-      x: selectionRect.x(),
-      y: selectionRect.y(),
-      width: selectionRect.width(),
-      height: selectionRect.height(),
+      x: cropSelectionRect.x(),
+      y: cropSelectionRect.y(),
+      width: cropSelectionRect.width(),
+      height: cropSelectionRect.height(),
     };
   }
 
-  function redrawOverlay(rect: { x: number; y: number; width: number; height: number } | null) {
-    if (!selectionRect || !selectionBorder || !stage) return;
+  function redrawCropOverlay(rect: { x: number; y: number; width: number; height: number } | null) {
+    if (!cropSelectionRect || !cropSelectionBorder || !stage) return;
     if (!rect) {
-      selectionRect.visible(false);
-      selectionBorder.visible(false);
+      cropSelectionRect.visible(false);
+      cropSelectionBorder.visible(false);
       updateDimMask(null);
-      positionHandles(null);
+      positionCropHandles(null);
       return;
     }
-    selectionRect.position({ x: rect.x, y: rect.y });
-    selectionRect.size({ width: rect.width, height: rect.height });
-    selectionRect.visible(true);
-    selectionBorder.position({ x: rect.x, y: rect.y });
-    selectionBorder.size({ width: rect.width, height: rect.height });
-    selectionBorder.visible(true);
+    cropSelectionRect.position({ x: rect.x, y: rect.y });
+    cropSelectionRect.size({ width: rect.width, height: rect.height });
+    cropSelectionRect.visible(true);
+    cropSelectionBorder.position({ x: rect.x, y: rect.y });
+    cropSelectionBorder.size({ width: rect.width, height: rect.height });
+    cropSelectionBorder.visible(true);
     updateDimMask(rect);
-    positionHandles(rect);
+    positionCropHandles(rect);
   }
 
   function updateCrosshair() {
@@ -364,8 +385,9 @@
     const strokeWidth = STROKE_PX[annotation.stroke];
     const color = COLOR_HEX[annotation.color];
     const opacity = isDraft ? 0.6 : 1;
+    const listening = !isDraft;
     if (annotation.geometry.kind === "arrow") {
-      const group = new Konva.Group({ listening: false, opacity });
+      const group = new Konva.Group({ listening, opacity });
       const { tail, tip } = annotation.geometry;
       group.add(
         new Konva.Line({
@@ -408,11 +430,21 @@
           }),
         );
       }
+      // The hit area is a thick stroked line so a thin arrow is
+      // still clickable without ballooning the visible stroke.
+      group.add(
+        new Konva.Line({
+          points: [tail.x, tail.y, tip.x, tip.y],
+          stroke: "rgba(0,0,0,0.001)",
+          strokeWidth: Math.max(strokeWidth + 8, 12),
+          listening: true,
+        }),
+      );
       return group;
     }
     if (annotation.geometry.kind === "rectangle") {
       const { origin, size } = annotation.geometry;
-      const group = new Konva.Group({ listening: false, opacity });
+      const group = new Konva.Group({ listening, opacity });
       group.add(
         new Konva.Rect({
           x: origin.x,
@@ -424,13 +456,22 @@
           listening: false,
         }),
       );
+      // Invisible hit area for the body-drag.
+      group.add(
+        new Konva.Rect({
+          x: origin.x,
+          y: origin.y,
+          width: Math.max(size.width, 4),
+          height: Math.max(size.height, 4),
+          fill: "rgba(0,0,0,0.001)",
+          listening: true,
+        }),
+      );
       return group;
     }
-    // Numbered badge: a filled circle plus a centred digit drawn as a
-    // Group so the digit text overlays the fill.
     if (annotation.geometry.kind === "numbered_badge") {
       const { center, radius } = annotation.geometry;
-      const group = new Konva.Group({ listening: false, opacity });
+      const group = new Konva.Group({ listening, opacity });
       group.add(
         new Konva.Circle({
           x: center.x,
@@ -453,23 +494,26 @@
             fontSize: radius * 0.9,
             fontStyle: "bold",
             align: "center",
-            // Mirror the Rust rasterizer's luminance rule: dark text on
-            // light fills, light text on dark fills. White badges must
-            // not paint an invisible "1".
             fill: digitFillForColor(color),
             listening: false,
           }),
         );
       }
+      // Hit area: a circle slightly larger than the visible badge.
+      group.add(
+        new Konva.Circle({
+          x: center.x,
+          y: center.y,
+          radius: radius + 4,
+          fill: "rgba(0,0,0,0.001)",
+          listening: true,
+        }),
+      );
       return group;
     }
-    // Text: a translucent plate preview plus the user-typed content.
-    // The preview can't sample source pixels, so we use a neutral
-    // mid-tone plate; the rust-side plate picks the real colour at
-    // flatten time via the source-luminance rule.
     if (annotation.geometry.kind === "text") {
       const { origin, size, text } = annotation.geometry;
-      const group = new Konva.Group({ listening: false, opacity });
+      const group = new Konva.Group({ listening, opacity });
       group.add(
         new Konva.Rect({
           x: origin.x,
@@ -498,14 +542,21 @@
           }),
         );
       }
+      group.add(
+        new Konva.Rect({
+          x: origin.x,
+          y: origin.y,
+          width: Math.max(size.width, 4),
+          height: Math.max(size.height, 4),
+          fill: "rgba(0,0,0,0.001)",
+          listening: true,
+        }),
+      );
       return group;
     }
-    // Blur: a translucent dark rectangle so the user sees the
-    // redaction zone. The real blur is sampled from the source at
-    // flatten time.
     if (annotation.geometry.kind === "blur") {
       const { origin, size } = annotation.geometry;
-      const group = new Konva.Group({ listening: false, opacity });
+      const group = new Konva.Group({ listening, opacity });
       group.add(
         new Konva.Rect({
           x: origin.x,
@@ -519,18 +570,24 @@
           listening: false,
         }),
       );
+      group.add(
+        new Konva.Rect({
+          x: origin.x,
+          y: origin.y,
+          width: Math.max(size.width, 4),
+          height: Math.max(size.height, 4),
+          fill: "rgba(0,0,0,0.001)",
+          listening: true,
+        }),
+      );
       return group;
     }
-    // Exhaustiveness: the discriminated union is exhaustive so this
-    // line is unreachable, but TypeScript needs a fallthrough return.
     return new Konva.Group({ listening: false });
   }
 
   /// Compute the badge digit colour that contrasts with the badge
   /// fill. Mirrors `digit_color_for_luminance` in the Rust rasterizer
-  /// so the Konva preview and the flattened PNG agree. Takes the hex
-  /// string form (already resolved from `COLOR_HEX`) so callers do
-  /// not need to re-resolve the enum.
+  /// so the Konva preview and the flattened PNG agree.
   function digitFillForColor(hex: string): string {
     const h = hex.replace("#", "");
     const r = parseInt(h.slice(0, 2), 16) / 255;
@@ -540,12 +597,56 @@
     return lum < 0.5 ? "#ffffff" : "#141414";
   }
 
+  /// Find the annotation under a CSS pointer position. The check uses
+  /// the per-geometry hit rules (line-distance for arrows, rectangle
+  /// containment for box geometries, distance for badges). Returns
+  /// `null` when no annotation contains the pointer.
+  function annotationHitTest(pos: { x: number; y: number }): Annotation | null {
+    const crop = cropCssRect();
+    if (!crop) return null;
+    const local = pointerToCropLocal(pos, crop);
+    if (!local) return null;
+    // Iterate top-down so the highest-z-order annotation wins.
+    const sorted = [...annotationStore.annotations].sort((a, b) => b.zOrder - a.zOrder);
+    for (const ann of sorted) {
+      if (annotationContainsLocal(ann, local)) return ann;
+    }
+    return null;
+  }
+
+  function annotationContainsLocal(ann: Annotation, p: PhysicalPoint): boolean {
+    const g = ann.geometry;
+    if (g.kind === "arrow") {
+      return distanceToSegment(p, g.tail, g.tip) <= Math.max(8, STROKE_PX[ann.stroke] + 4);
+    }
+    if (g.kind === "rectangle" || g.kind === "text" || g.kind === "blur") {
+      return (
+        p.x >= g.origin.x &&
+        p.x <= g.origin.x + g.size.width &&
+        p.y >= g.origin.y &&
+        p.y <= g.origin.y + g.size.height
+      );
+    }
+    // Numbered badge: distance to the centre ≤ radius.
+    const dx = p.x - g.center.x;
+    const dy = p.y - g.center.y;
+    return Math.hypot(dx, dy) <= g.radius + 4;
+  }
+
+  function distanceToSegment(p: PhysicalPoint, a: PhysicalPoint, b: PhysicalPoint): number {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+    const proj = { x: a.x + t * dx, y: a.y + t * dy };
+    return Math.hypot(p.x - proj.x, p.y - proj.y);
+  }
+
   function rerenderAnnotations() {
     if (!annotationLayer) return;
     annotationLayer.destroyChildren();
     annotationNodes = new Map();
-    // Translate the layer so crop-local coordinates map onto stage CSS
-    // coordinates: the crop's CSS origin is the layer offset.
     const crop = cropCssRect();
     if (crop) {
       annotationLayer.position({ x: crop.x, y: crop.y });
@@ -554,8 +655,12 @@
     }
     for (const annotation of annotationStore.annotations) {
       const node = annotationNode(annotation, false);
+      const id = annotation.id;
+      // Attach the annotation id so a click handler can resolve the
+      // underlying entity without a separate lookup.
+      (node as unknown as { __annotationId?: number }).__annotationId = id;
       annotationLayer.add(node);
-      annotationNodes.set(annotation.id, node);
+      annotationNodes.set(id, node);
     }
     const draft = annotationStore.draft;
     if (draft) {
@@ -577,6 +682,209 @@
     return {};
   }
 
+  // ---- Annotation selection chrome (tracer-06) ---------------------
+
+  /// Refresh the selection chrome (bounding box + handles) for every
+  /// selected annotation. Called whenever the selection set, the
+  /// annotations, or the crop rect changes.
+  function rerenderSelection() {
+    if (!annotationSelectionLayer) return;
+    annotationSelectionLayer.destroyChildren();
+    selectionBoxNodes = new Map();
+    selectionHandleNodes = new Map();
+    const crop = cropCssRect();
+    if (!crop) {
+      annotationSelectionLayer.draw();
+      return;
+    }
+    const scaleX = stageWidth / bounds.size.width;
+    const scaleY = stageHeight / bounds.size.height;
+    // The selection layer is positioned at the crop's CSS origin so
+    // every coordinate can be expressed in physical pixels.
+    annotationSelectionLayer.position({ x: crop.x, y: crop.y });
+    for (const ann of annotationStore.annotations) {
+      if (!annotationStore.isSelected(ann.id)) continue;
+      const rect = annotationBoundsLocal(ann);
+      if (!rect) continue;
+      const box = new Konva.Rect({
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.width,
+        height: rect.size.height,
+        stroke: "#4f46e5",
+        strokeWidth: 1,
+        dash: [4, 3],
+        listening: false,
+      });
+      annotationSelectionLayer.add(box);
+      selectionBoxNodes.set(ann.id, box);
+      // Per-geometry handles.
+      for (const handle of annotationStore.handlesFor(ann)) {
+        const handleRect = createAnnotationHandle(ann.id, handle, rect, scaleX, scaleY);
+        if (handleRect) {
+          annotationSelectionLayer.add(handleRect);
+          selectionHandleNodes.set(handleKey(ann.id, handle), handleRect);
+        }
+      }
+    }
+    annotationSelectionLayer.draw();
+  }
+
+  function handleKey(id: number, handle: TransformHandle): string {
+    return `${id}:${handle}`;
+  }
+
+  function createAnnotationHandle(
+    id: number,
+    handle: TransformHandle,
+    rect: { origin: { x: number; y: number }; size: { width: number; height: number } },
+    scaleX: number,
+    scaleY: number,
+  ): Konva.Rect | null {
+    if (handle === "move") return null; // The body itself is the move handle.
+    let x: number;
+    let y: number;
+    if (handle === "tail") {
+      // We don't know tail without geometry; the caller passes the
+      // bounding rect, so use the closest corner as a stub for the
+      // tail handle. The exact handle position is computed by
+      // `annotationHandlePosition` below.
+      return null;
+    }
+    if (handle === "tip") {
+      return null;
+    }
+    if (handle === "left") {
+      x = rect.origin.x;
+      y = rect.origin.y + rect.size.height / 2;
+    } else if (handle === "right") {
+      x = rect.origin.x + rect.size.width;
+      y = rect.origin.y + rect.size.height / 2;
+    } else {
+      const r = annotationHandlePosition(id, handle, rect);
+      if (!r) return null;
+      x = r.x;
+      y = r.y;
+    }
+    // Convert from physical to CSS pixels so the handle size stays
+    // constant on screen regardless of the crop scale.
+    const sizeX = ANNOTATION_HANDLE_SIZE / scaleX;
+    const sizeY = ANNOTATION_HANDLE_SIZE / scaleY;
+    const handleRect = new Konva.Rect({
+      x: x - sizeX / 2,
+      y: y - sizeY / 2,
+      width: sizeX,
+      height: sizeY,
+      fill: "white",
+      stroke: "#4f46e5",
+      strokeWidth: 1.5,
+      listening: true,
+    });
+    (handleRect as unknown as { __annotationId?: number }).__annotationId = id;
+    (handleRect as unknown as { __annotationHandle?: TransformHandle }).__annotationHandle = handle;
+    return handleRect;
+  }
+
+  /// Compute the physical-pixel position of an annotation handle
+  /// (excluding tail/tip, which are looked up directly from the
+  /// geometry). Returns `null` for handles that don't apply to the
+  /// bounding rect (e.g. `tail` geometry).
+  function annotationHandlePosition(
+    id: number,
+    handle: TransformHandle,
+    rect: { origin: { x: number; y: number }; size: { width: number; height: number } },
+  ): { x: number; y: number } | null {
+    const ann = annotationStore.annotations.find((a) => a.id === id);
+    if (!ann) return null;
+    const g = ann.geometry;
+    if (g.kind === "arrow") {
+      if (handle === "tail") return g.tail;
+      if (handle === "tip") return g.tip;
+      return null;
+    }
+    const { x, y, width: w, height: h } = { ...rect.origin, ...rect.size };
+    switch (handle) {
+      case "nw":
+        return { x, y };
+      case "n":
+        return { x: x + w / 2, y };
+      case "ne":
+        return { x: x + w, y };
+      case "e":
+        return { x: x + w, y: y + h / 2 };
+      case "se":
+        return { x: x + w, y: y + h };
+      case "s":
+        return { x: x + w / 2, y: y + h };
+      case "sw":
+        return { x, y: y + h };
+      case "w":
+        return { x, y: y + h / 2 };
+    }
+    return null;
+  }
+
+  /// Compute the bounding box of an annotation in physical pixels.
+  /// Mirrors the store's `annotationBounds` (kept duplicated here so
+  /// the overlay can render the chrome without traversing the store
+  /// on every refresh).
+  function annotationBoundsLocal(ann: Annotation): {
+    origin: { x: number; y: number };
+    size: { width: number; height: number };
+  } | null {
+    const g = ann.geometry;
+    if (g.kind === "arrow") {
+      const x = Math.min(g.tail.x, g.tip.x);
+      const y = Math.min(g.tail.y, g.tip.y);
+      const right = Math.max(g.tail.x, g.tip.x);
+      const bottom = Math.max(g.tail.y, g.tip.y);
+      return {
+        origin: { x, y },
+        size: { width: Math.max(0, right - x), height: Math.max(0, bottom - y) },
+      };
+    }
+    if (g.kind === "rectangle" || g.kind === "text" || g.kind === "blur") {
+      return {
+        origin: { x: g.origin.x, y: g.origin.y },
+        size: { width: g.size.width, height: g.size.height },
+      };
+    }
+    return {
+      origin: { x: g.center.x - g.radius, y: g.center.y - g.radius },
+      size: { width: g.radius * 2, height: g.radius * 2 },
+    };
+  }
+
+  /// Hit-test for the annotation selection chrome. Returns the
+  /// `(id, handle)` of the matching handle, or `null` when none.
+  function annotationHandleHitTest(pos: { x: number; y: number }): {
+    id: number;
+    handle: TransformHandle;
+  } | null {
+    const crop = cropCssRect();
+    if (!crop) return null;
+    const local = pointerToCropLocal(pos, crop);
+    if (!local) return null;
+    const scaleX = stageWidth / bounds.size.width;
+    const scaleY = stageHeight / bounds.size.height;
+    const toleranceX = ANNOTATION_HANDLE_SIZE / scaleX;
+    const toleranceY = ANNOTATION_HANDLE_SIZE / scaleY;
+    for (const ann of annotationStore.annotations) {
+      if (!annotationStore.isSelected(ann.id)) continue;
+      const rect = annotationBoundsLocal(ann);
+      if (!rect) continue;
+      for (const handle of annotationStore.handlesFor(ann)) {
+        if (handle === "move") continue;
+        const pos2 = annotationHandlePosition(ann.id, handle, rect);
+        if (!pos2) continue;
+        if (Math.abs(pos2.x - local.x) <= toleranceX && Math.abs(pos2.y - local.y) <= toleranceY) {
+          return { id: ann.id, handle };
+        }
+      }
+    }
+    return null;
+  }
+
   // ---- Pointer / keyboard handlers ---------------------------------
 
   function isDrawingTool(): boolean {
@@ -589,17 +897,27 @@
     );
   }
 
+  function isSelectTool(): boolean {
+    return annotationStore.tool === "select";
+  }
+
   function startDraft(pos: { x: number; y: number }) {
     if (!isDrawingTool()) return;
     const crop = cropCssRect();
-    if (!crop) return; // No crop yet — drawing is disabled.
+    if (!crop) return;
     const local = pointerToCropLocal(pos, crop);
     if (!local) return;
+    // Tracer-06: direct focus from drawing modes. If the user clicks
+    // an existing annotation while a drawing tool is active, treat
+    // the click as a select instead of starting a fresh draw.
+    const hit = annotationHitTest(pos);
+    if (hit) {
+      annotationStore.selectOnly(hit.id);
+      rerenderSelection();
+      return;
+    }
     drawingDraft = true;
     draftStart = local;
-    // `isDrawingTool` guarantees the tool is one of the drawable
-    // kinds (excludes "select"); narrow the union here so the call
-    // to `beginDraft` keeps its strict signature.
     const tool = annotationStore.tool;
     if (tool === "select") return;
     annotationStore.beginDraft(tool, local);
@@ -619,11 +937,6 @@
     if (!drawingDraft) return;
     drawingDraft = false;
     draftStart = null;
-    // For badges we always commit (a single click is a valid badge).
-    // For arrows, rectangles, and blur we commit if the shape has
-    // area. For text the draft stays open until the overlay commits
-    // (Enter) or cancels (Escape) — so the user can drag a box, see
-    // the editor appear, type a label, and confirm.
     const draft = annotationStore.draft;
     if (!draft) return;
     if (draft.geometry.kind === "arrow") {
@@ -652,8 +965,6 @@
         rerenderAnnotations();
         return;
       }
-      // The overlay editor opens via the `textEditing` reactive flag
-      // (see below); do NOT commit yet.
       textEditing = true;
       rerenderAnnotations();
       return;
@@ -662,30 +973,54 @@
     rerenderAnnotations();
   }
 
-  function handleKey(event: KeyboardEvent) {
-    // Annotation shortcuts: A/R/N/V/T/B switch tools; Ctrl+Z /
-    // Ctrl+Shift+Z operate on history; Ctrl+S triggers native Save
-    // As for the active session. Escape staged: first clears the
-    // draft (and the text overlay), then cancels the session.
+  function handleKeyDown(event: KeyboardEvent) {
     const key = event.key.toLowerCase();
     if (event.ctrlKey || event.metaKey) {
       if (key === "z" && !event.shiftKey) {
         event.preventDefault();
         annotationStore.undo();
         rerenderAnnotations();
+        rerenderSelection();
         return;
       }
       if ((key === "z" && event.shiftKey) || key === "y") {
         event.preventDefault();
         annotationStore.redo();
         rerenderAnnotations();
+        rerenderSelection();
         return;
       }
       if (key === "s") {
-        // Tracer-05: native Save As for the in-flight session. The
-        // host (OverlayApp) wires this to the `save_capture_as` IPC.
         event.preventDefault();
         onSaveAs?.();
+        return;
+      }
+      if (key === "a") {
+        event.preventDefault();
+        annotationStore.selectAll();
+        rerenderSelection();
+        return;
+      }
+      // Tracer-06: z-order shortcuts. Ctrl+[ / Ctrl+] raise / lower;
+      // Ctrl+Shift+[ / Ctrl+Shift+] bring to front / send to back.
+      if (key === "[") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          annotationStore.sendToBackSelection();
+        } else {
+          annotationStore.lowerSelection();
+        }
+        rerenderAnnotations();
+        return;
+      }
+      if (key === "]") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          annotationStore.bringToFrontSelection();
+        } else {
+          annotationStore.raiseSelection();
+        }
+        rerenderAnnotations();
         return;
       }
     }
@@ -716,10 +1051,33 @@
           annotationStore.setTool("blur");
           return;
       }
+      // Tracer-06: Delete / Backspace removes the selected set.
+      if (event.key === "Delete" || event.key === "Backspace") {
+        if (annotationStore.selection.size > 0) {
+          event.preventDefault();
+          annotationStore.deleteSelection();
+          rerenderAnnotations();
+          rerenderSelection();
+        }
+      }
+    }
+    // Commit shortcut: Ctrl+C or Enter on the active crop.
+    if (((event.ctrlKey || event.metaKey) && key === "c") || event.key === "Enter") {
+      if (lastSelection) {
+        event.preventDefault();
+        onCommit?.();
+      }
     }
     if (event.key === "Escape") {
-      // First Escape: drop any in-flight draft and close the text
-      // editor. Second Escape: cancel the session.
+      // First Escape: cancel an in-flight transform, drop the draft,
+      // then clear the selection.
+      if (annotationStore.transform) {
+        event.preventDefault();
+        annotationStore.cancelTransform();
+        rerenderAnnotations();
+        rerenderSelection();
+        return;
+      }
       if (annotationStore.draft || textEditing) {
         event.preventDefault();
         annotationStore.cancelDraft();
@@ -727,15 +1085,14 @@
         rerenderAnnotations();
         return;
       }
+      if (annotationStore.selection.size > 0) {
+        event.preventDefault();
+        annotationStore.clearSelection();
+        rerenderSelection();
+        return;
+      }
       event.preventDefault();
       onCancel?.();
-      return;
-    }
-    if (((event.ctrlKey || event.metaKey) && key === "c") || event.key === "Enter") {
-      if (lastSelection) {
-        event.preventDefault();
-        onCommit?.();
-      }
     }
   }
 
@@ -748,10 +1105,12 @@
 
     const imageLayer = new Konva.Layer();
     const overlayLayer = new Konva.Layer();
-    annotationLayer = new Konva.Layer({ listening: false });
+    annotationLayer = new Konva.Layer({ listening: true });
+    annotationSelectionLayer = new Konva.Layer({ listening: true });
     stage.add(imageLayer);
     stage.add(overlayLayer);
     stage.add(annotationLayer);
+    stage.add(annotationSelectionLayer);
 
     const img = new Image();
     img.onload = () => {
@@ -793,7 +1152,7 @@
     overlayLayer.add(crosshairH);
     overlayLayer.add(crosshairV);
 
-    selectionRect = new Konva.Rect({
+    cropSelectionRect = new Konva.Rect({
       x: 0,
       y: 0,
       width: 0,
@@ -804,7 +1163,7 @@
       fill: "rgba(79, 70, 229, 0.15)",
       visible: false,
     });
-    selectionBorder = new Konva.Rect({
+    cropSelectionBorder = new Konva.Rect({
       x: 0,
       y: 0,
       width: 0,
@@ -814,15 +1173,15 @@
       listening: false,
       visible: false,
     });
-    overlayLayer.add(selectionRect);
-    overlayLayer.add(selectionBorder);
+    overlayLayer.add(cropSelectionRect);
+    overlayLayer.add(cropSelectionBorder);
 
-    handles = Array.from({ length: 8 }, () => {
+    cropHandles = Array.from({ length: 8 }, () => {
       const handle = new Konva.Rect({
         x: 0,
         y: 0,
-        width: HANDLE_SIZE,
-        height: HANDLE_SIZE,
+        width: CROP_HANDLE_SIZE,
+        height: CROP_HANDLE_SIZE,
         fill: "white",
         stroke: "#4f46e5",
         strokeWidth: 1.5,
@@ -833,6 +1192,20 @@
       return handle;
     });
 
+    marqueeRect = new Konva.Rect({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      stroke: "#4f46e5",
+      strokeWidth: 1,
+      dash: [3, 3],
+      fill: "rgba(79, 70, 229, 0.08)",
+      visible: false,
+      listening: false,
+    });
+    annotationSelectionLayer.add(marqueeRect);
+
     stage.on("mousedown", (event) => {
       const pos = stage!.getPointerPosition();
       if (!pos) return;
@@ -841,11 +1214,64 @@
         startDraft(pos);
         return;
       }
-      const existing = selectionGeometry();
-      if (existing) {
-        const hit = handleHit(pos, existing);
+      // Select tool: handle annotation handles, body-drag, marquee.
+      if (isSelectTool()) {
+        // Handle drag first.
+        const handleHit = annotationHandleHitTest(pos);
+        if (handleHit) {
+          const crop = cropCssRect();
+          if (!crop) return;
+          const local = pointerToCropLocal(pos, crop);
+          if (!local) return;
+          annotationStore.beginTransform(handleHit.id, handleHit.handle, local);
+          annotationDragging = true;
+          return;
+        }
+        // Click on an annotation: select it (shift-click toggles).
+        const hit = annotationHitTest(pos);
         if (hit) {
-          activeHandle = hit;
+          // If the click is on a selected annotation, default to a
+          // translate gesture so the user can drag the selection.
+          if (annotationStore.isSelected(hit.id)) {
+            const crop = cropCssRect();
+            if (crop) {
+              const local = pointerToCropLocal(pos, crop);
+              if (local) {
+                annotationStore.beginTranslateSelection(local);
+                annotationDragging = true;
+              }
+            }
+            return;
+          }
+          if (event.evt.shiftKey) {
+            annotationStore.selectAdd(hit.id);
+          } else {
+            annotationStore.selectOnly(hit.id);
+          }
+          rerenderSelection();
+          return;
+        }
+        // Empty-canvas click: clear the selection (or, if shift is
+        // held, begin a marquee that adds to the current selection).
+        if (event.evt.shiftKey) {
+          marqueeStart = pos;
+          marqueeRect!.position(pos);
+          marqueeRect!.size({ width: 0, height: 0 });
+          marqueeRect!.visible(true);
+          marqueeDragging = true;
+        } else {
+          annotationStore.clearSelection();
+          rerenderSelection();
+          // Fall through to the crop-region drag if the crop is
+          // missing (the user might still be drawing the crop).
+          if (event.target !== imageNode) return;
+        }
+      }
+      const existing = cropSelectionGeometry();
+      if (existing) {
+        const hit = cropHandleHit(pos, existing);
+        if (hit) {
+          activeCropHandle = hit;
           dragging = true;
           startPoint = pos;
           return;
@@ -853,12 +1279,12 @@
       }
       if (event.target !== imageNode) return;
       startPoint = pos;
-      selectionRect!.position(pos);
-      selectionRect!.size({ width: 0, height: 0 });
-      selectionRect!.visible(true);
+      cropSelectionRect!.position(pos);
+      cropSelectionRect!.size({ width: 0, height: 0 });
+      cropSelectionRect!.visible(true);
       dragging = true;
-      activeHandle = null;
-      redrawOverlay({ x: pos.x, y: pos.y, width: 0, height: 0 });
+      activeCropHandle = null;
+      redrawCropOverlay({ x: pos.x, y: pos.y, width: 0, height: 0 });
     });
 
     stage.on("mousemove", () => {
@@ -871,18 +1297,42 @@
         continueDraft(pos);
         return;
       }
+      if (annotationDragging) {
+        const crop = cropCssRect();
+        if (!crop) return;
+        const local = pointerToCropLocal(pos, crop);
+        if (!local) return;
+        if (annotationStore.transform?.kind === "transform") {
+          annotationStore.updateTransform(local);
+        } else if (annotationStore.transform?.kind === "translate") {
+          annotationStore.updateTranslateSelection(local);
+        }
+        rerenderAnnotations();
+        rerenderSelection();
+        return;
+      }
+      if (marqueeDragging && marqueeStart && marqueeRect) {
+        const x = Math.min(marqueeStart.x, pos.x);
+        const y = Math.min(marqueeStart.y, pos.y);
+        const width = Math.abs(pos.x - marqueeStart.x);
+        const height = Math.abs(pos.y - marqueeStart.y);
+        marqueeRect.position({ x, y });
+        marqueeRect.size({ width, height });
+        annotationSelectionLayer?.draw();
+        return;
+      }
       if (!dragging || !startPoint) return;
-      if (activeHandle && selectionRect) {
-        const existing = selectionGeometry();
+      if (activeCropHandle) {
+        const existing = cropSelectionGeometry();
         if (!existing) return;
-        const next = applyHandleDrag(existing, activeHandle, pos);
-        redrawOverlay(next);
+        const next = applyCropHandleDrag(existing, activeCropHandle, pos);
+        redrawCropOverlay(next);
       } else {
         const x = Math.min(startPoint.x, pos.x);
         const y = Math.min(startPoint.y, pos.y);
         const width = Math.abs(pos.x - startPoint.x);
         const height = Math.abs(pos.y - startPoint.y);
-        redrawOverlay({ x, y, width, height });
+        redrawCropOverlay({ x, y, width, height });
       }
     });
 
@@ -891,16 +1341,60 @@
         endDraft();
         return;
       }
+      if (annotationDragging) {
+        annotationDragging = false;
+        if (annotationStore.transform?.kind === "transform") {
+          annotationStore.endTransform();
+        } else if (annotationStore.transform?.kind === "translate") {
+          annotationStore.endTranslateSelection();
+        }
+        rerenderAnnotations();
+        rerenderSelection();
+        return;
+      }
+      if (marqueeDragging && marqueeStart && marqueeRect) {
+        const rect = {
+          x: marqueeRect.x(),
+          y: marqueeRect.y(),
+          width: marqueeRect.width(),
+          height: marqueeRect.height(),
+        };
+        marqueeDragging = false;
+        marqueeStart = null;
+        marqueeRect.visible(false);
+        if (rect.width >= MIN_SELECTION_DIM && rect.height >= MIN_SELECTION_DIM) {
+          const crop = cropCssRect();
+          if (crop) {
+            const scaleX = bounds.size.width / stageWidth;
+            const scaleY = bounds.size.height / stageHeight;
+            const physicalRect = {
+              origin: {
+                x: clampPositive((rect.x - crop.x) * scaleX),
+                y: clampPositive((rect.y - crop.y) * scaleY),
+              },
+              size: {
+                width: clampPositive(rect.width * scaleX),
+                height: clampPositive(rect.height * scaleY),
+              },
+            };
+            annotationStore.selectMarquee(physicalRect, "add");
+            rerenderSelection();
+          }
+        } else {
+          annotationSelectionLayer?.draw();
+        }
+        return;
+      }
       if (!dragging) return;
       dragging = false;
-      activeHandle = null;
-      const rect = selectionGeometry();
-      if (!rect || rect.width < 4 || rect.height < 4) {
-        redrawOverlay(null);
+      activeCropHandle = null;
+      const rect = cropSelectionGeometry();
+      if (!rect || rect.width < MIN_SELECTION_DIM || rect.height < MIN_SELECTION_DIM) {
+        redrawCropOverlay(null);
         emitPhysicalSelection(null);
         return;
       }
-      redrawOverlay(rect);
+      redrawCropOverlay(rect);
       emitPhysicalSelection(rect);
     });
 
@@ -911,15 +1405,15 @@
       overlayLayer?.draw();
     });
 
-    window.addEventListener("keydown", handleKey);
+    window.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("keydown", handleKeyDown);
       stage?.destroy();
     };
   });
 
-  // Whenever the store annotations change (after an undo, a tool
-  // change that resets state, etc.) re-render the layer.
+  // Refresh the annotation + selection chrome whenever the store
+  // changes (after a draw, undo, batch style, etc.).
   $effect(() => {
     // Touch every reactive dependency so the effect re-runs when any
     // of them changes.
@@ -928,8 +1422,10 @@
     void annotationStore.stroke;
     void annotationStore.annotations;
     void annotationStore.draft;
+    void annotationStore.selection;
     void lastSelection;
     rerenderAnnotations();
+    rerenderSelection();
   });
 </script>
 
@@ -940,6 +1436,7 @@
   data-has-selection={lastSelection ? "true" : "false"}
   data-active-tool={annotationStore.tool}
   data-draft={annotationStore.draft ? "true" : "false"}
+  data-annotation-selection={annotationStore.selection.size}
   style:width="{stageWidth}px"
   style:height="{stageHeight}px"
 ></div>
@@ -962,9 +1459,6 @@
     style:width="{Math.max(width, 80)}px"
     style:height="{Math.max(height, 24)}px"
     onkeydown={(event) => {
-      // Suppress Enter while an IME composition is in flight — the
-      // browser emits Enter to confirm the IME candidate list, and
-      // we must not commit prematurely.
       if (event.key === "Enter" && !event.shiftKey && !isComposing) {
         event.preventDefault();
         const target = event.currentTarget as HTMLTextAreaElement;
@@ -1007,8 +1501,6 @@
     resize: none;
     outline: none;
     box-sizing: border-box;
-    /* Block canvas pointer events so clicks inside the textarea
-       don't fall through to the Konva stage. */
     pointer-events: auto;
   }
 </style>
