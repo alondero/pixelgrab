@@ -874,12 +874,15 @@ impl Cache {
                 format!("unknown shelf id: {shelf_id}"),
             )
         })?;
+        // Prefer the entry's monitor when it is still present in the
+        // layout. Fall back to the primary monitor via the shared
+        // helper so primary-monitor selection has a single owner.
+        let primary_id = Self::primary_monitor_id(layout)?;
         let monitor = layout
             .monitors
             .iter()
-            .find(|m| m.id == entry.monitor_id && m.is_primary)
-            .or_else(|| layout.monitors.iter().find(|m| m.is_primary))
-            .or_else(|| layout.monitors.first())
+            .find(|m| m.id == entry.monitor_id)
+            .or_else(|| layout.monitors.iter().find(|m| m.id == primary_id))
             .ok_or_else(|| {
                 PlatformError::new(
                     PlatformErrorKind::MonitorQueryFailed,

@@ -349,7 +349,7 @@ pub fn dismiss_cache_entry(
             }
             emit_shelf_queue_updated(&handle, snapshot);
             if outcome.removed {
-                let event = ShelfClearedEvent {
+                let event = crate::shelf::ShelfClearedEvent {
                     shelf_id: payload.shelf_id.clone(),
                 };
                 let _ = handle.emit("pixelgrab://shelf-cleared", &event);
@@ -677,14 +677,6 @@ pub fn tick_shelf_queue(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
     }
     let snapshot = with_position(outcome.snapshot, &app);
     IpcResponse::from_result(Ok(snapshot))
-}
-
-/// Wire payload for the `pixelgrab://shelf-cleared` event.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShelfClearedEvent {
-    /// Shelf id that was dismissed.
-    shelf_id: String,
 }
 
 /// Wire payload for the `hover_shelf_card` IPC.

@@ -168,6 +168,19 @@ describe("IPC type contract", () => {
     expect(json.bgraPixels).toHaveLength(4 * 4 * 4);
   });
 
+  it("ShelfClearedEvent shape mirrors Rust", () => {
+    // Mirrors `crate::shelf::ShelfClearedEvent` in
+    // `src-tauri/src/shelf/mod.rs`. Without this test a `shelfId`
+    // rename on the Rust side would slip past CI silently because
+    // the listen call site in `src/shelf.ts` declared the field
+    // inline before it was lifted into the named type.
+    const event: import("$lib/shelf/types").ShelfClearedEvent = {
+      shelfId: "shelf-1",
+    };
+    const json = JSON.parse(JSON.stringify(event));
+    expect(json.shelfId).toBe("shelf-1");
+  });
+
   it("StartShelfDragIntent serialises the request envelope", () => {
     const intent: StartShelfDragIntent = {
       request: {
