@@ -141,6 +141,23 @@ pub fn request_capture(
             return IpcResponse::from_result(Err(err));
         }
     };
+    // Defensive recovery: if a previous capture left the session
+    // stuck in `Ready` (e.g. the overlay window never reached the
+    // `Selecting` state because the WebView failed to mount), the
+    // user's next attempt would be rejected with "session is
+    // already Ready". Force the orchestrator back to `Idle` so the
+    // retry can proceed. The previous capture was never committed
+    // to the shelf, so it is safe to drop. The `Ready` state is
+    // the only one we recover from here: `Capturing` /
+    // `Selecting` / `Committing` / `Cleanup` all imply an active
+    // pipeline that we must not interrupt.
+    if matches!(
+        app.session().current_state(),
+        pixelgrab_contracts::session::SessionState::Ready
+    ) {
+        log::info!("request_capture: recovering from stuck Ready state");
+        app.session().reset();
+    }
     let started_at = now_ms();
     let result = app.session().request_capture(&request);
     let capture = match result {
@@ -163,7 +180,8 @@ pub fn request_capture(
     // so the frontend never has to call a separate overlay IPC. A
     // monitor-layout failure falls back to positioning over the captured
     // bounds directly (single-monitor captures don't have a full virtual
-    // desktop to span).
+    // desktop to span). The defensive `reset()` above already recovered
+    // any stuck `Ready` state from a previous capture.
     let position_fallback = |reason: &str| {
         if let Err(err) = crate::overlay::position_over_bounds(&handle, &capture.bounds) {
             log::warn!("overlay {reason} failed: {err}");

@@ -24,6 +24,11 @@
   const STAGE_HEIGHT = 1080;
 
   onMount(async () => {
+    // Issue #60: the overlay reveal contract is collapsed into one
+    // backend seam (`show_over_virtual_desktop` → `overlay_mounted`),
+    // so the frontend never has to drive the `Ready -> Selecting`
+    // transition. We just read the snapshot the orchestrator already
+    // stamped.
     const response = await getSessionSnapshot();
     if (response.status === "ok" && response.data.lastCapture) {
       capture = response.data.lastCapture;
