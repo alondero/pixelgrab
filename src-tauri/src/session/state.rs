@@ -609,7 +609,9 @@ mod tests {
         assert_eq!(session.current_state(), SessionState::Selecting);
         // Cleanup / Idle: also no-op.
         session.finish().expect("finish");
-        session.overlay_mounted().expect("idle-after-finish is a no-op");
+        session
+            .overlay_mounted()
+            .expect("idle-after-finish is a no-op");
         assert_eq!(session.current_state(), SessionState::Idle);
     }
 
@@ -628,7 +630,11 @@ mod tests {
         assert_eq!(session.current_state(), SessionState::Ready);
         // No diagnostics field touched yet.
         assert!(
-            session.last_diagnostics().unwrap().capture_to_overlay_ms.is_none(),
+            session
+                .last_diagnostics()
+                .unwrap()
+                .capture_to_overlay_ms
+                .is_none(),
             "fresh capture must not stamp the overlay latency yet",
         );
         session.overlay_mounted().expect("overlay mounted");
