@@ -182,11 +182,19 @@ impl SessionOrchestrator {
     }
 
     /// Force a reset back to Idle regardless of state. Used when the
-    /// overlay is dismissed by Escape or when an internal error is recovered.
+    /// overlay is dismissed by Escape, when an internal error is
+    /// recovered, and as the defensive recovery path that lets a
+    /// user retry a capture that left the session stuck in `Ready`.
+    /// Clears the last-capture record too: a reset means a fresh
+    /// attempt, so the previous (uncommitted) capture must not be
+    /// available to the commit pipeline.
     pub fn reset(&self) {
         let mut inner = self.inner.lock();
         inner.state = SessionState::Idle;
         inner.selection = None;
+        inner.last_capture = None;
+        inner.last_capture_id = None;
+        inner.last_diagnostics = None;
     }
 
     /// Staged Escape behaviour. The first Escape while a selection is
