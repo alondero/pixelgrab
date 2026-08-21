@@ -78,6 +78,17 @@ impl SessionOrchestrator {
         self.inner.lock().last_capture.clone()
     }
 
+    /// Latest capture as an IPC DTO (for window-targeted emits). Returns
+    /// `None` when no capture has been taken yet, so the frontend can
+    /// distinguish "no capture" from a capture present.
+    pub fn last_capture_dto(&self) -> Option<pixelgrab_contracts::ipc::CaptureResolutionDto> {
+        self.inner
+            .lock()
+            .last_capture
+            .as_ref()
+            .map(|c| pixelgrab_contracts::ipc::CaptureResolutionDto::from(c.clone()))
+    }
+
     /// Most recent selection reported by the overlay.
     pub fn selection(&self) -> Option<PhysicalBounds> {
         self.inner.lock().selection

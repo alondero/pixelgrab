@@ -262,7 +262,7 @@ fn monitor_id_for_format(format: CaptureFormat) -> &'static str {
 
 /// Cancel the active session. Honours the staged Escape behaviour.
 #[tauri::command]
-pub fn request_cancel(app: AppState<'_>) -> IpcResponse<CancelOutcome> {
+pub fn request_cancel(app: AppState<'_>, handle: AppHandle) -> IpcResponse<CancelOutcome> {
     let action = match app.session().handle_escape() {
         Ok(action) => action,
         Err(err) => return IpcResponse::from_result(Err(err)),
@@ -272,10 +272,18 @@ pub fn request_cancel(app: AppState<'_>) -> IpcResponse<CancelOutcome> {
             action: "selection_cleared".into(),
             snapshot: app.session().snapshot(),
         },
-        crate::session::state::EscapeAction::SessionCancelled => CancelOutcome {
-            action: "session_cancelled".into(),
-            snapshot: app.session().snapshot(),
-        },
+        crate::session::state::EscapeAction::SessionCancelled => {
+            // Full cancel: the session is back in Idle, so hide the
+            // overlay. A first-Escape that only clears the selection
+            // keeps the overlay visible (the user is still selecting).
+            if let Some(window) = handle.get_webview_window("overlay") {
+                let _ = window.hide();
+            }
+            CancelOutcome {
+                action: "session_cancelled".into(),
+                snapshot: app.session().snapshot(),
+            }
+        }
         crate::session::state::EscapeAction::NoOp => CancelOutcome {
             action: "noop".into(),
             snapshot: app.session().snapshot(),
@@ -651,6 +659,14 @@ pub fn request_commit(
         Ok(outcome) => Ok(CommitResponse { outcome }),
         Err(err) => Err(err),
     };
+    // Whatever the outcome, the commit pipeline always walks the
+    // session back to Idle (`session.finish()` runs exactly once at
+    // the end of every commit attempt), so the overlay's job is
+    // done. Hide it here so the freeze frame never lingers on the
+    // user's desktop after Enter.
+    if let Some(window) = handle.get_webview_window("overlay") {
+        let _ = window.hide();
+    }
     IpcResponse::from_result(result)
 }
 

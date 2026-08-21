@@ -16,6 +16,8 @@ vi.mock("konva", () => {
     height() {
       return 100;
     }
+    size(_v?: { width: number; height: number }) {}
+    batchDraw() {}
     getPointerPosition() {
       return { x: 0, y: 0 };
     }

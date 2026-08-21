@@ -56,6 +56,10 @@ arboard = "3.6"
 [dev-dependencies]
 tauri = { workspace = true, features = ["test"] }
 tempfile = "3.13"
+# Reused by examples/hotkey_probe.rs to validate the OS hotkey layer
+# without pulling in the full Tauri runtime.
+global-hotkey = "0.7"
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!

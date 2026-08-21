@@ -33,7 +33,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 use crate::cache::policy::CachePolicyStore;
 use crate::cache::sweeper::{CacheSweeper, SweepWorker};
 use crate::hotkey::store::HotkeyPreferencesStore;
-#[cfg(all(target_os = "windows", not(feature = "synthetic")))]
+#[cfg(all(target_os = "windows", not(test)))]
 use crate::hotkey::TauriGlobalShortcutBackend;
 use crate::hotkey::{GlobalShortcutBackend, HotkeyRegistry, InMemoryBackend};
 use crate::pin::PinRegistry;
@@ -635,21 +635,14 @@ fn init_tracing() {
 /// above the setup hook, so by the time this runs the
 /// `AppHandle` already exposes `global_shortcut()`.
 fn install_hotkey_backend(handle: &AppHandle<Wry>) -> Arc<dyn GlobalShortcutBackend> {
-    #[cfg(all(target_os = "windows", not(feature = "synthetic")))]
+    // Real Windows builds (including `tauri:dev`) drive the real OS
+    // hook; only test compilations stay on the in-memory fake.
+    #[cfg(all(target_os = "windows", not(test)))]
     {
-        // Production: every shortcut chord lands on the real
-        // OS hook list. The handler closures the backend
-        // installs emit the existing `pixelgrab://secondary-
-        // launch` event so tray clicks, single-instance argv,
-        // and chord presses all funnel through one frontend
-        // intent handler.
         return TauriGlobalShortcutBackend::install(handle.clone());
     }
-    #[cfg(any(not(target_os = "windows"), feature = "synthetic"))]
+    #[cfg(any(not(target_os = "windows"), test))]
     {
-        // CI / dev / non-Windows / tests. Keep the in-memory
-        // fake so the registry's transaction semantics can be
-        // exercised without involving the OS.
         let _ = handle;
         InMemoryBackend::new()
     }
@@ -663,19 +656,18 @@ pub fn test_app() -> PixelGrabApp {
     PixelGrabApp::new(platform, InMemoryBackend::new())
 }
 
-/// Pick the production platform for the current target. The Windows
-/// adapter is selected on Windows builds; the synthetic adapter is the
-/// fallback for non-Windows builds and for CI runs with the `synthetic`
-/// feature enabled.
+/// Pick the production platform for the current target. Real Windows
+/// builds always run through the Windows adapter so a plain
+/// `cargo build` / `pnpm tauri:dev` captures the actual desktop; only
+/// test compilations fall back to the deterministic synthetic adapter.
+/// Non-Windows hosts use the synthetic adapter until their native
+/// capture engines land.
 fn default_platform() -> Arc<dyn platform::PixelGrabPlatform> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", not(test)))]
     {
-        if cfg!(feature = "synthetic") {
-            return Arc::new(platform::synthetic::SyntheticPlatform::new());
-        }
         return Arc::new(platform::windows::WindowsPlatform::new());
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(any(not(target_os = "windows"), test))]
     {
         Arc::new(platform::synthetic::SyntheticPlatform::new())
     }

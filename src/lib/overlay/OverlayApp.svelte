@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import {
     getSessionSnapshot,
     requestCommit,
@@ -17,23 +18,58 @@
   let commitError = $state<string | null>(null);
   let saveAsError = $state<string | null>(null);
   let lastSaveAsPath = $state<string | null>(null);
-  // The overlay spans the entire primary monitor. Values are tuned for the
-  // tracer-02 default layout; the real multi-monitor sizing arrives in
-  // tracer-04.
-  const STAGE_WIDTH = 1920;
-  const STAGE_HEIGHT = 1080;
+  let viewport = $state({ width: window.innerWidth, height: window.innerHeight });
 
-  onMount(async () => {
-    // Issue #60: the overlay reveal contract is collapsed into one
-    // backend seam (`show_over_virtual_desktop` → `overlay_mounted`),
-    // so the frontend never has to drive the `Ready -> Selecting`
-    // transition. We just read the snapshot the orchestrator already
-    // stamped.
-    const response = await getSessionSnapshot();
-    if (response.status === "ok" && response.data.lastCapture) {
-      capture = response.data.lastCapture;
-      lastDiagnosticsId = response.data.lastCapture.captureId;
+  // The stage fits the freeze frame's physical aspect ratio into the
+  // window so the frozen desktop is never distorted, regardless of
+  // the monitor layout the capture spans.
+  const stageSize = $derived.by(() => {
+    if (!capture) return null;
+    const boundsWidth = Math.max(1, capture.bounds.size.width);
+    const boundsHeight = Math.max(1, capture.bounds.size.height);
+    const scale = Math.min(viewport.width / boundsWidth, viewport.height / boundsHeight);
+    return {
+      width: Math.max(1, Math.floor(boundsWidth * scale)),
+      height: Math.max(1, Math.floor(boundsHeight * scale)),
+    };
+  });
+
+  // Pull the current capture out of the session. The backend pings
+  // this window (`pixelgrab://overlay-revealed`) on every reveal; the
+  // heavy freeze-frame bytes are fetched here rather than shipped
+  // through the event payload, so ordering can never lose a frame.
+  async function pullCapture() {
+    try {
+      const snap = await getSessionSnapshot();
+      if (snap.status === "ok" && snap.data.lastCapture) {
+        capture = snap.data.lastCapture;
+        lastDiagnosticsId = snap.data.lastCapture.captureId;
+        // Each reveal starts fresh — drop any stale selection /
+        // annotation carry-over from a previous reveal.
+        selection = null;
+        annotationStore.reset();
+      }
+    } catch {
+      // IPC unavailable (browser dev / unit tests) — leave state as-is.
     }
+  }
+
+  onMount(() => {
+    // Register the reveal listener BEFORE any await so a fast backend
+    // reveal can never outrun the registration.
+    const listening = listen("pixelgrab://overlay-revealed", () => {
+      void pullCapture();
+    });
+    listening.catch(() => {});
+    void pullCapture();
+    const onResize = () => {
+      viewport = { width: window.innerWidth, height: window.innerHeight };
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      listening.then((fn) => fn()).catch(() => {});
+    };
   });
 
   function onSelectionChange(next: PhysicalBounds | null) {
@@ -125,22 +161,13 @@
 </script>
 
 <section class="overlay" data-testid="overlay">
-  <header class="header">
-    <span class="pill">Overlay</span>
-    <span class="muted">
-      {capture ? "Capture loaded" : "No capture yet"}
-    </span>
-    {#if lastDiagnosticsId}
-      <span class="diag" data-testid="diagnostics-id">{lastDiagnosticsId}</span>
-    {/if}
-  </header>
-  {#if capture}
-    <div class="stage-wrap">
+  {#if capture && stageSize}
+    <div class="stage-wrap" style:width="{stageSize.width}px" style:height="{stageSize.height}px">
       <KonvaStage
         assetUrl={capture.assetUrl}
         bounds={capture.bounds}
-        stageWidth={STAGE_WIDTH}
-        stageHeight={STAGE_HEIGHT}
+        stageWidth={stageSize.width}
+        stageHeight={stageSize.height}
         {onSelectionChange}
         {onCommit}
         {onCancel}
@@ -150,8 +177,14 @@
         <AnnotationToolbar visible={selection !== null} />
       </div>
     </div>
+    <div class="hint" class:faded={selection !== null} data-testid="hint" aria-live="polite">
+      Drag to select · Enter to confirm · Esc to cancel
+    </div>
   {:else}
     <div class="placeholder">No capture</div>
+  {/if}
+  {#if lastDiagnosticsId}
+    <span class="diag" data-testid="diagnostics-id">{lastDiagnosticsId}</span>
   {/if}
   {#if selection}
     <footer class="footer" data-testid="selection">
@@ -183,35 +216,47 @@
     background: rgba(0, 0, 0, 0.65);
     color: white;
     font-family: system-ui, sans-serif;
-  }
-  .header {
-    padding: 0.5rem 1rem;
-    display: flex;
-    gap: 0.75rem;
-    align-items: center;
-  }
-  .pill {
-    background: #4f46e5;
-    padding: 0.1rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-  }
-  .muted {
-    opacity: 0.7;
-    font-size: 0.85rem;
-  }
-  .diag {
-    font-family: monospace;
-    opacity: 0.7;
-    font-size: 0.75rem;
+    /* The overlay covers the live desktop; dragging must never
+       text-select the placeholder or hint UI. */
+    user-select: none;
+    -webkit-user-select: none;
   }
   .stage-wrap {
-    position: relative;
-    flex: 1;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    cursor: crosshair;
+  }
+  .hint {
+    position: fixed;
+    top: 1.25rem;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 15, 20, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    letter-spacing: 0.01em;
+    pointer-events: none;
+    transition: opacity 200ms ease;
+  }
+  .hint.faded {
+    opacity: 0;
+  }
+  .diag {
+    position: fixed;
+    bottom: 0.25rem;
+    right: 0.5rem;
+    font-family: monospace;
+    opacity: 0.35;
+    font-size: 0.7rem;
+    pointer-events: none;
   }
   .toolbar-slot {
     position: absolute;
