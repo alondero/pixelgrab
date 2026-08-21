@@ -5,8 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CacheEntryDto,
   CancelOutcome,
+  CancelRevisionIntent,
+  CancelRevisionResult,
   CaptureResponse,
   CommitResponse,
+  CommitRevisionIntent,
+  CommitRevisionResult,
   CopyShelfCardRequest,
   CopyShelfCardResponse,
   DismissCacheEntryRequest,
@@ -15,6 +19,8 @@ import type {
   HotkeyRegistryStatusDto,
   HoverShelfCardRequest,
   IpcResponse,
+  OpenRevisionIntent,
+  OpenRevisionResult,
   RequestCaptureIntent,
   RequestCommitIntent,
   RequestOverlayIntent,
@@ -32,6 +38,8 @@ import type {
   UnhoverShelfCardRequest,
   UpdateCacheMetadataRequest,
   UpdateHotkeyBindingsRequest,
+  UpdateRevisionIntent,
+  UpdateRevisionResult,
   UpdateShelfPreferencesRequest,
 } from "./types";
 
@@ -160,4 +168,45 @@ export async function setHotkeyPaused(
   paused: boolean,
 ): Promise<IpcResponse<HotkeyRegistryStatusDto>> {
   return invoke<IpcResponse<HotkeyRegistryStatusDto>>("set_hotkey_paused", { paused });
+}
+
+// ---------------------------------------------------------------------------
+// Tracer-10: reopen / non-destructive revision IPC.
+// ---------------------------------------------------------------------------
+
+/// Open a shelf entry for non-destructive editing. Acquires the
+/// `Editor` lock on the source entry, reads the `revision.json`
+/// sidecar (or falls back to the flat PNG when the sidecar is
+/// missing / unparseable / has an unsupported version), and
+/// returns the restored editor scene.
+export async function openRevision(
+  payload: OpenRevisionIntent,
+): Promise<IpcResponse<OpenRevisionResult>> {
+  return invoke<IpcResponse<OpenRevisionResult>>("open_revision", { payload });
+}
+
+/// Persist the in-progress editor scene to the source entry's
+/// `revision.json` without committing. The frontend drives this
+/// from a debounced handler on every annotation change.
+export async function updateRevision(
+  payload: UpdateRevisionIntent,
+): Promise<IpcResponse<UpdateRevisionResult>> {
+  return invoke<IpcResponse<UpdateRevisionResult>>("update_revision", { payload });
+}
+
+/// Commit the editor scene as a revised capture. The source
+/// entry's assets remain untouched; the new entry has a distinct
+/// `captureId` and `shelfId`.
+export async function commitRevision(
+  payload: CommitRevisionIntent,
+): Promise<IpcResponse<CommitRevisionResult>> {
+  return invoke<IpcResponse<CommitRevisionResult>>("commit_revision", { payload });
+}
+
+/// Cancel a reopen session. Releases the editor lock on the
+/// source entry and resets the session to `Idle`.
+export async function cancelRevision(
+  payload: CancelRevisionIntent,
+): Promise<IpcResponse<CancelRevisionResult>> {
+  return invoke<IpcResponse<CancelRevisionResult>>("cancel_revision", { payload });
 }

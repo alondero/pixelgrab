@@ -52,7 +52,7 @@ use pixelgrab_contracts::{
     coordinate::{PhysicalBounds, PhysicalSize},
     monitor::MonitorLayout,
     CacheEntry as PublicCacheEntry, CaptureId, LockOwner, PlatformError, PlatformErrorKind,
-    PlatformResult, ShelfId,
+    PlatformResult, RevisionMetadata, ShelfId, REVISION_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -69,6 +69,11 @@ pub mod file_names {
     pub const BITMAP_PNG: &str = "bitmap.png";
     /// Editable metadata, JSON-encoded.
     pub const METADATA_JSON: &str = "metadata.json";
+    /// Tracer-10: editor scene (annotations, badge counter, tool /
+    /// style state). Sibling of `metadata.json` so the user-facing
+    /// metadata schema and the editor-scene schema can evolve
+    /// independently.
+    pub const REVISION_JSON: &str = "revision.json";
     /// Publish sentinel; written last.
     pub const MANIFEST_JSON: &str = "manifest.json";
 }
@@ -202,6 +207,13 @@ struct CacheInner {
     /// map so dropping a guard does not require touching the entries
     /// map.
     shelf_guards: std::collections::BTreeMap<ShelfId, LockGuard>,
+    /// Tracer-10: owned `Editor` lock guards. The editor lock is
+    /// acquired when a user opens a shelf entry for non-destructive
+    /// editing and released on commit success or cancel. Storing it
+    /// here keeps the lock alive for the lifetime of the reopen
+    /// session so the sweeper and the manual `clear_cache` cannot
+    /// evict the user's work-in-progress.
+    editor_guards: std::collections::BTreeMap<ShelfId, LockGuard>,
     /// Optional one-shot fault for the next commit. `None` in
     /// production; tests set this to exercise a specific stage.
     pending_failure: Option<InjectedFailure>,
@@ -224,6 +236,7 @@ impl Cache {
                 entries: Default::default(),
                 locks: ActiveLockSet::new(),
                 shelf_guards: Default::default(),
+                editor_guards: Default::default(),
                 pending_failure: None,
             })),
         }
@@ -407,6 +420,19 @@ impl Cache {
                     return Err(err);
                 }
                 write_atomic(&entry_dir.join(file_names::METADATA_JSON), &metadata_json)?;
+                // Tracer-10: write the initial empty revision sidecar
+                // so a reopen session has a baseline to round-trip.
+                // The wrapper `AssetWrite` stage keeps the existing
+                // fault-injection contract intact — every prior
+                // failure test still uses the same anchors.
+                let initial_revision = RevisionMetadata::empty(
+                    shelf_id.clone(),
+                    capture_id.clone(),
+                    request.bounds,
+                    request.size,
+                );
+                let revision_json = serde_json::to_vec_pretty(&initial_revision)?;
+                write_atomic(&entry_dir.join(file_names::REVISION_JSON), &revision_json)?;
                 Ok(png_bytes)
             })();
 
@@ -464,7 +490,8 @@ impl Cache {
         }
         let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG))?;
         let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON))?;
-        let total_size_bytes = png_size + metadata_size + manifest_bytes;
+        let revision_size = file_size(&entry_dir.join(file_names::REVISION_JSON))?;
+        let total_size_bytes = png_size + metadata_size + revision_size + manifest_bytes;
 
         let entry = PublicCacheEntry {
             capture_id: capture_id.clone(),
@@ -530,6 +557,7 @@ impl Cache {
         // the in-memory entry agree on `size_bytes`.
         let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG))?;
         let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON))?;
+        let revision_size = file_size(&entry_dir.join(file_names::REVISION_JSON))?;
 
         let updated_metadata_only = PublicCacheEntry {
             metadata: metadata.clone(),
@@ -554,7 +582,7 @@ impl Cache {
                 AtomicWriteOutcome::Written { bytes, .. } => bytes,
                 AtomicWriteOutcome::AlreadyDurable { bytes, .. } => bytes,
             };
-        let total_size_bytes = png_size + metadata_size + manifest_bytes;
+        let total_size_bytes = png_size + metadata_size + revision_size + manifest_bytes;
         let updated = PublicCacheEntry {
             size_bytes: total_size_bytes,
             ..updated_metadata_only.clone()
@@ -586,6 +614,11 @@ impl Cache {
             // Release the cache-owned shelf guard first so the lock
             // count decrements before `try_dismiss` runs.
             inner.shelf_guards.remove(shelf_id);
+            // Tracer-10: any editor lock is owned by the cache so we
+            // must drop the guard here too — otherwise an entry
+            // dismissed via the shelf path would leak the editor
+            // lock until the process restarts.
+            inner.editor_guards.remove(shelf_id);
             let outcome = inner.locks.try_dismiss(shelf_id);
             if outcome.removed {
                 inner.entries.remove(shelf_id);
@@ -604,6 +637,165 @@ impl Cache {
     /// Snapshot of the current entries.
     pub fn entries(&self) -> Vec<PublicCacheEntry> {
         self.inner.lock().entries.values().cloned().collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Tracer-10: revision lifecycle. The helpers below are the storage
+    // half of the reopen / commit / cancel flow. The IPC layer in
+    // `src-tauri/src/ipc/commands.rs` is the only caller.
+    // -----------------------------------------------------------------------
+
+    /// Read the revision sidecar for the given shelf id. Returns
+    /// `None` when the entry is unknown, the file is missing,
+    /// the JSON is unparseable, or the schema version is
+    /// unsupported — the caller is responsible for choosing
+    /// between the full editor and the flat-PNG fallback.
+    pub fn read_revision(&self, shelf_id: &str) -> Option<RevisionMetadata> {
+        let entry = self.entry(shelf_id)?;
+        let entry_dir = PathBuf::from(&entry.png_path).parent()?.to_path_buf();
+        let path = entry_dir.join(file_names::REVISION_JSON);
+        let bytes = fs::read(&path).ok()?;
+        let parsed = serde_json::from_slice::<RevisionMetadata>(&bytes).ok()?;
+        // Reject unsupported versions BEFORE sanitizing so the
+        // IPC layer can fall back to the flat-PNG path. The
+        // acceptance criterion "Unsupported or missing metadata
+        // degrades safely to flattened-image editing" hinges on
+        // this branch.
+        if parsed.schema_version != REVISION_SCHEMA_VERSION {
+            return None;
+        }
+        Some(parsed.sanitize())
+    }
+
+    /// Write the revision sidecar for the given shelf id. Refuses
+    /// to write when the entry is unknown so a stale shelf id
+    /// cannot create a stray sidecar.
+    ///
+    /// The revision contents are expected to change on every
+    /// edit (badge counter, annotations, tool state), so this
+    /// helper deletes the existing file before delegating to
+    /// `write_atomic`. The delete + write pair is not atomic on
+    /// its own — a crash window between the two operations
+    /// leaves a missing file, which the loader treats as a flat
+    /// fallback. That is the correct behavior: the in-progress
+    /// scene is recoverable from the user's next edit, not from
+    /// a stale persisted file.
+    pub fn write_revision(
+        &self,
+        shelf_id: &str,
+        revision: &RevisionMetadata,
+    ) -> PlatformResult<RevisionMetadata> {
+        let entry_dir = {
+            let inner = self.inner.lock();
+            let entry = inner.entries.get(shelf_id).cloned().ok_or_else(|| {
+                PlatformError::new(
+                    PlatformErrorKind::InvalidPayload,
+                    format!("unknown shelf id: {shelf_id}"),
+                )
+            })?;
+            PathBuf::from(&entry.png_path)
+                .parent()
+                .ok_or_else(|| {
+                    PlatformError::new(PlatformErrorKind::Io, "cache entry has no parent directory")
+                })?
+                .to_path_buf()
+        };
+        let sanitized = revision.sanitize();
+        let json = serde_json::to_vec_pretty(&sanitized)?;
+        let target = entry_dir.join(file_names::REVISION_JSON);
+        // `write_atomic` refuses to overwrite a file with
+        // different bytes; the revision payload changes on every
+        // edit, so we delete the existing file first.
+        let _ = fs::remove_file(&target);
+        write_atomic(&target, &json)?;
+        // Refresh `last_access_at_ms` so the sweeper sees the user's
+        // recent attention.
+        let mut inner = self.inner.lock();
+        if let Some(entry) = inner.entries.get_mut(shelf_id) {
+            entry.last_access_at_ms = now_ms();
+        }
+        Ok(sanitized)
+    }
+
+    /// Acquire the `Editor` lock on the given entry. The lock guard
+    /// is stored in the cache so it lives for the lifetime of the
+    /// reopen session. Returns the locked entry's current revision
+    /// payload (or `None` when the sidecar is missing / unparseable)
+    /// so the IPC layer can fold the two reads into one IPC round.
+    ///
+    /// Returns `Err` with `InvalidPayload` when the entry is
+    /// unknown. The `Editor` lock is idempotent: re-acquiring it
+    /// for an already-locked entry is a no-op (the active-lock
+    /// registry treats the same `(shelf_id, owner)` pair as a
+    /// single lock).
+    pub fn acquire_editor_lock(
+        &self,
+        shelf_id: &str,
+    ) -> PlatformResult<(PublicCacheEntry, Option<RevisionMetadata>)> {
+        let mut inner = self.inner.lock();
+        let entry = inner.entries.get(shelf_id).cloned().ok_or_else(|| {
+            PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                format!("unknown shelf id: {shelf_id}"),
+            )
+        })?;
+        // Acquire the lock guard only if not already held. The
+        // underlying registry is idempotent, but we store one guard
+        // per shelf id — a second `insert` would replace the prior
+        // guard and silently change the lock release timing.
+        if !inner.editor_guards.contains_key(shelf_id) {
+            let guard = inner.locks.acquire(shelf_id.to_string(), LockOwner::Editor);
+            inner.editor_guards.insert(shelf_id.to_string(), guard);
+        }
+        // Read the revision sidecar off-disk (lock is held across
+        // the read so the response is consistent with the lock
+        // state). Tolerate a missing or unparseable file —
+        // `read_revision` returns `None` in that case.
+        let entry_dir = PathBuf::from(&entry.png_path)
+            .parent()
+            .ok_or_else(|| {
+                PlatformError::new(PlatformErrorKind::Io, "cache entry has no parent directory")
+            })?
+            .to_path_buf();
+        let path = entry_dir.join(file_names::REVISION_JSON);
+        let revision = match fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RevisionMetadata>(&bytes).ok())
+        {
+            Some(r) if r.schema_version == REVISION_SCHEMA_VERSION => Some(r.sanitize()),
+            _ => None,
+        };
+        Ok((entry, revision))
+    }
+
+    /// Release the `Editor` lock on the given entry. Idempotent:
+    /// releasing a lock that is not held is a no-op, mirroring the
+    /// `ActiveLockSet::release` semantics.
+    pub fn release_editor_lock(&self, shelf_id: &str) {
+        let mut inner = self.inner.lock();
+        inner.editor_guards.remove(shelf_id);
+        // The wrapper map drops the owned `LockGuard`, which fires
+        // the underlying `registry.release` on Drop. This is the
+        // parking_lot-safe pattern (the cache's mutex is
+        // non-reentrant).
+    }
+
+    /// True when the given entry currently holds an `Editor` lock.
+    /// Used by the IPC layer to reject a `commit_revision` /
+    /// `cancel_revision` that lacks the lock.
+    pub fn has_editor_lock(&self, shelf_id: &str) -> bool {
+        self.inner.lock().editor_guards.contains_key(shelf_id)
+    }
+
+    /// Read the absolute path of the entry's `revision.json` file.
+    /// Used by the integration tests so the test can write a
+    /// corrupt JSON to the sidecar and exercise the loader's
+    /// fallback path.
+    #[cfg(test)]
+    pub fn revision_path_for(&self, shelf_id: &str) -> Option<PathBuf> {
+        let entry = self.entry(shelf_id)?;
+        let entry_dir = PathBuf::from(&entry.png_path).parent()?.to_path_buf();
+        Some(entry_dir.join(file_names::REVISION_JSON))
     }
 
     /// Single-entry lookup by shelf id.
@@ -938,7 +1130,11 @@ fn load_manifest(entry_dir: &Path) -> PlatformResult<PublicCacheEntry> {
     })?;
     let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG)).unwrap_or(0);
     let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON)).unwrap_or(0);
-    let total_size_bytes = png_size + metadata_size + manifest_bytes.len() as u64;
+    // `revision.json` is tracer-10; tolerate a missing file so an
+    // entry pre-dating the sidecar (e.g. committed before the
+    // branch landed) still loads cleanly.
+    let revision_size = file_size(&entry_dir.join(file_names::REVISION_JSON)).unwrap_or(0);
+    let total_size_bytes = png_size + metadata_size + revision_size + manifest_bytes.len() as u64;
     Ok(PublicCacheEntry {
         capture_id: manifest.capture_id,
         shelf_id: manifest.shelf_id,

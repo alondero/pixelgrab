@@ -13,6 +13,7 @@ use crate::capture::CaptureResolution;
 use crate::coordinate::PhysicalBounds;
 use crate::drag::{DragDiagnostics, DragOutcome, DragRequest};
 use crate::error::PlatformError;
+use crate::revision::{AnnotationTool, RevisionContext, RevisionMetadata};
 use crate::session::SessionState;
 use crate::shelf_preferences::ShelfPreferences;
 
@@ -175,7 +176,7 @@ pub struct CommitRequest {
 }
 
 /// Outcome of a commit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitOutcome {
     /// Capture id (UUID v4) assigned by the Rust core.
@@ -711,4 +712,133 @@ pub struct SaveCaptureAsResponse {
     pub path: Option<String>,
     /// Number of PNG bytes written. Zero on cancel.
     pub png_bytes: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Tracer 10: reopen / non-destructive revision IPC.
+// ---------------------------------------------------------------------------
+
+/// Wire shape for the `open_revision` IPC. The frontend sends the
+/// shelf id of the entry to reopen; the Rust core acquires the
+/// `Editor` lock, reads `revision.json` (or falls back to the flat
+/// PNG when the sidecar is missing / unparseable), and returns a
+/// `RevisionContext` for the editor to seed itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRevisionIntent {
+    /// Shelf card id of the entry to reopen.
+    pub shelf_id: ShelfId,
+}
+
+/// Wire shape for the `open_revision` IPC response. Mirrors the
+/// `RevisionContext` exactly so the frontend can hold an exact
+/// replica in its editor store.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRevisionResult {
+    /// The restored editor scene (PNG path + revision metadata +
+    /// locks + loader status).
+    pub context: RevisionContext,
+}
+
+/// Wire shape for the `commit_revision` IPC. The frontend assembles
+/// the final annotation list + style state + badge counter and the
+/// Rust core re-runs the two-phase commit to produce a new cache
+/// entry whose `capture_id` is distinct from the source. The
+/// source entry's assets remain untouched — the issue's
+/// "Cancellation does not mutate original assets" and "Commit
+/// creates a distinct revised capture and card" acceptance
+/// criteria.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitRevisionIntent {
+    /// Shelf id of the source entry (the one being revised).
+    pub shelf_id: ShelfId,
+    /// Final annotation list to flatten onto the source PNG.
+    /// Empty when the user committed without changes.
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
+    /// Badge counter at the moment of commit. The source entry's
+    /// `revision.json` is updated with this value so a future
+    /// reopen starts at the same point.
+    pub badge_counter: u32,
+    /// Active draw tool at the moment of commit. Persisted to
+    /// the source entry's `revision.json`.
+    pub active_tool: AnnotationTool,
+    /// Active color at the moment of commit.
+    pub active_color: crate::annotation::AnnotationColor,
+    /// Active stroke width at the moment of commit.
+    pub active_stroke: crate::annotation::AnnotationStroke,
+    /// Updated user-authored metadata (title / note / tags). The
+    /// Rust core persists this to `metadata.json` on the source
+    /// entry on commit success.
+    pub metadata: CacheEntryMetadata,
+    /// Whether to copy the revised PNG to the clipboard.
+    #[serde(default)]
+    pub to_clipboard: bool,
+}
+
+/// Wire shape for the `commit_revision` IPC response. Mirrors
+/// `CommitResponse` so the frontend can share the same toast /
+/// shelf-update flow. The `shelf_id` is the **new** entry's id —
+/// the source entry keeps its original shelf id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitRevisionResult {
+    /// The new entry's commit outcome (shelves it on the queue,
+    /// publishes the `pixelgrab://shelf-queue-updated` event).
+    pub outcome: CommitOutcome,
+}
+
+/// Wire shape for the `cancel_revision` IPC. The frontend sends the
+/// shelf id of the entry whose `Editor` lock should be released; the
+/// Rust core releases the lock and returns to `Idle`. The source
+/// entry's assets remain untouched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRevisionIntent {
+    /// Shelf id of the entry whose reopen session should be
+    /// cancelled.
+    pub shelf_id: ShelfId,
+}
+
+/// Wire shape for the `cancel_revision` IPC response. The `cancelled`
+/// flag is `true` when an `Editor` lock was released; `false` when
+/// no reopen session was active for the given shelf id. The
+/// `reason` carries a stable categorical label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRevisionResult {
+    /// True when the `Editor` lock was released.
+    pub cancelled: bool,
+    /// Stable diagnostic label. One of `"cancelled"`,
+    /// `"no_active_revision"`.
+    pub reason: String,
+}
+
+/// Wire shape for the `update_revision` IPC. Optional path for
+/// persisting the in-progress editor scene to the source entry's
+/// `revision.json` without committing. Used when the user wants
+/// to save their work-in-progress and resume later. The frontend
+/// drives this from a debounced handler on every annotation
+/// change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRevisionIntent {
+    /// Shelf id of the entry whose in-progress revision is being
+    /// written.
+    pub shelf_id: ShelfId,
+    /// New revision metadata to persist.
+    pub revision: RevisionMetadata,
+}
+
+/// Wire shape for the `update_revision` IPC response. Returns the
+/// persisted revision metadata so the frontend can confirm the
+/// write succeeded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRevisionResult {
+    /// The persisted revision metadata (sanitized so the
+    /// schema_version is the current one).
+    pub revision: RevisionMetadata,
 }

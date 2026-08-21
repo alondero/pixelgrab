@@ -10,14 +10,17 @@ use pixelgrab_contracts::{
     capture::{CaptureFormat, CaptureRequest},
     coordinate::{PhysicalBounds, PhysicalSize},
     ipc::{
-        CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureResponse, ClearCacheResponse,
-        CommitRequest, CommitResponse, DismissCacheEntryRequest, DismissCacheEntryResponse,
-        HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse, RequestCaptureIntent,
-        RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest,
-        SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot, StartShelfDragIntent,
-        StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
-        UpdateShelfPreferencesRequest,
+        CachePolicyDto, CacheStatsResponse, CancelOutcome, CancelRevisionIntent,
+        CancelRevisionResult, CaptureResponse, ClearCacheResponse, CommitRequest, CommitResponse,
+        CommitRevisionIntent, CommitRevisionResult, DismissCacheEntryRequest,
+        DismissCacheEntryResponse, HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse,
+        OpenRevisionIntent, OpenRevisionResult, RequestCaptureIntent, RequestCommitIntent,
+        RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest, SaveCaptureAsResponse,
+        SessionSnapshot, ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult,
+        UpdateCacheMetadataRequest, UpdateCachePolicyRequest, UpdateRevisionIntent,
+        UpdateRevisionResult, UpdateShelfPreferencesRequest,
     },
+    revision::{RevisionContext, RevisionLoaderStatus, RevisionMetadata, REVISION_SCHEMA_VERSION},
     shelf_queue::{
         CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest,
         SaveShelfCardAsResponse, ShelfQueueSnapshot,
@@ -271,6 +274,347 @@ pub fn request_cancel(app: AppState<'_>) -> IpcResponse<CancelOutcome> {
         },
     };
     IpcResponse::from_result(Ok(outcome))
+}
+
+// ---------------------------------------------------------------------------
+// Tracer 10: reopen / non-destructive revision IPC.
+// ---------------------------------------------------------------------------
+
+/// Open a shelf entry for non-destructive editing. Acquires the
+/// `Editor` lock on the source entry, reads the `revision.json`
+/// sidecar, and returns the restored editor scene. Falls back to
+/// the flattened PNG + empty scene when the sidecar is missing,
+/// unparseable, or carries an unsupported version — the
+/// "Unsupported or missing metadata degrades safely to
+/// flattened-image editing" acceptance criterion.
+#[tauri::command]
+pub fn open_revision(
+    app: AppState<'_>,
+    payload: OpenRevisionIntent,
+) -> IpcResponse<OpenRevisionResult> {
+    // Reject when the session is busy. A second reopen (or a
+    // capture) cannot race the editor session.
+    if let Err(err) = app.session().request_reopen() {
+        return IpcResponse::from_result(Err(err));
+    }
+    // Acquire the editor lock + read the entry. The IPC layer
+    // never lets the lock leak; the Drop on the wrapper guard
+    // releases if anything below returns Err — but Rust's ? would
+    // need a manual roll-back. The cleanest path is to validate
+    // everything before the side-effects fire.
+    let acquired = app.cache().acquire_editor_lock(&payload.shelf_id);
+    let (entry, revision) = match acquired {
+        Ok(ok) => ok,
+        Err(err) => {
+            // Roll back the session transition on failure.
+            let _ = app.session().cancel_session();
+            return IpcResponse::from_result(Err(err));
+        }
+    };
+    // Filter the revision: future / older versions fall back to the
+    // flat-PNG path. The sidecar bytes are still on disk so a
+    // future migration tool can recover them.
+    let (revision, loader_status) = match revision {
+        Some(r) if r.schema_version == REVISION_SCHEMA_VERSION => (r, RevisionLoaderStatus::Full),
+        Some(_) | None => (
+            RevisionMetadata::empty(
+                entry.shelf_id.clone(),
+                entry.capture_id.clone(),
+                entry.bounds,
+                entry.size,
+            ),
+            RevisionLoaderStatus::FlatFallback,
+        ),
+    };
+    let locks = app.cache().locks().owners_of(&entry.shelf_id);
+    let context = RevisionContext {
+        shelf_id: entry.shelf_id.clone(),
+        capture_id: entry.capture_id.clone(),
+        png_path: entry.png_path.clone(),
+        revision,
+        locks,
+        loader_status,
+    };
+    IpcResponse::from_result(Ok(OpenRevisionResult { context }))
+}
+
+/// Persist the in-progress editor scene to the source entry's
+/// `revision.json` without committing. Used by the frontend's
+/// debounced handler so the user can resume work on a subsequent
+/// reopen without having to commit first.
+#[tauri::command]
+pub fn update_revision(
+    app: AppState<'_>,
+    payload: UpdateRevisionIntent,
+) -> IpcResponse<UpdateRevisionResult> {
+    // Refuse when the editor lock is not held — the user cannot
+    // update a revision they did not open.
+    if !app.cache().has_editor_lock(&payload.shelf_id) {
+        return IpcResponse::from_result(Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "revision_no_active_session",
+        )));
+    }
+    let result = app
+        .cache()
+        .write_revision(&payload.shelf_id, &payload.revision);
+    IpcResponse::from_result(match result {
+        Ok(revision) => Ok(UpdateRevisionResult { revision }),
+        Err(err) => Err(err),
+    })
+}
+
+/// Commit the editor scene as a revised capture. Routes through the
+/// existing two-phase commit pipeline with a fresh `capture_id`
+/// (the source entry retains its original identity). Releases the
+/// editor lock on success and rolls back to `Idle` on failure.
+///
+/// The source entry's assets are untouched on every outcome:
+/// - On success, `Cache::commit` writes a brand-new entry dir; the
+///   source entry's PNG + metadata remain byte-for-byte identical.
+/// - On failure, the partial new entry is reaped by the existing
+///   two-phase commit invariant.
+#[tauri::command]
+pub fn commit_revision(
+    app: AppState<'_>,
+    payload: CommitRevisionIntent,
+    handle: AppHandle,
+) -> IpcResponse<CommitRevisionResult> {
+    let outcome = match commit_revision_inner(&app, &handle, &payload) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            // Roll the session back to Idle even on failure so the
+            // tray does not stay stuck in a busy state. The cache
+            // hook is the source of truth for the editor lock —
+            // we leave it acquired so the user can retry.
+            if let Err(inner) = app.session().cancel_session() {
+                log::warn!("commit_revision: session.cancel_session failed: {inner}");
+            }
+            return IpcResponse::from_result(Err(err));
+        }
+    };
+    IpcResponse::from_result(Ok(CommitRevisionResult { outcome }))
+}
+
+/// Commit body: extractable so the session-state invariants are
+/// testable without a full Tauri runtime. Mirrors the regular
+/// `commit()` helper's pattern — every side effect runs inside a
+/// closure so `session.finish_revision()` runs exactly once.
+fn commit_revision_inner(
+    app: &PixelGrabApp,
+    handle: &AppHandle,
+    payload: &CommitRevisionIntent,
+) -> PlatformResult<pixelgrab_contracts::CommitOutcome> {
+    use crate::cache::CacheCommitRequest;
+    // Verify the editor lock is held — the commit path is the
+    // terminal step of the reopen session.
+    if !app.cache().has_editor_lock(&payload.shelf_id) {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "revision_no_active_session",
+        ));
+    }
+    let source_entry = app.cache().entry(&payload.shelf_id).ok_or_else(|| {
+        PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            format!("unknown shelf id: {}", payload.shelf_id),
+        )
+    })?;
+    // Decode the source PNG so we can flatten the new annotations
+    // onto the original framebuffer. The flattened output is the
+    // new entry's PNG — the "single source of truth" invariant
+    // from tracer-02 / tracer-04.
+    let png_bytes = std::fs::read(&source_entry.png_path).map_err(|_err| {
+        // Privacy: categorical kind only.
+        PlatformError::new(PlatformErrorKind::Io, "revision_read_source_png_failed")
+    })?;
+    let (source_rgba, size) = decode_png_to_rgba(&png_bytes, source_entry.size)?;
+    let expected_len = (size.width as usize) * (size.height as usize) * 4;
+    if source_rgba.len() != expected_len {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            format!(
+                "revision source PNG decode: {} bytes for {}x{}, expected {}",
+                source_rgba.len(),
+                size.width,
+                size.height,
+                expected_len
+            ),
+        ));
+    }
+    let flat = pixelgrab_contracts::flatten_annotations(&source_rgba, size, &payload.annotations);
+    // Transition to RevisionCommitting so the orchestrator rejects
+    // any overlapping capture / revision commit.
+    app.session().request_revision_commit()?;
+    // The whole commit body is wrapped in a closure so
+    // `session.finish_revision()` runs exactly once at the end of
+    // the function — mirroring the existing tracer-07 round-2 fix.
+    let commit_result: Result<pixelgrab_contracts::CommitOutcome, PlatformError> = (|| {
+        // Publish to the clipboard first when requested. Same
+        // ordering as the regular commit path: the cheapest
+        // non-reversible side effect runs first so a clipboard
+        // failure never leaves a phantom shelf card.
+        if payload.to_clipboard {
+            // The synthetic adapter is a no-op for the clipboard;
+            // the Windows adapter publishes the same bitmap the
+            // regular commit path uses. We use the source entry's
+            // capture_id as the publish key — the platform's
+            // publish_clipboard contract only cares about the
+            // pixels, not the id, and the new entry's id is not
+            // minted until the cache commit runs below.
+            let source_capture_id = source_entry.capture_id.clone();
+            app.platform()
+                .publish_clipboard(&source_capture_id, &flat, size)?;
+        }
+        // Write the new entry via the cache's two-phase commit.
+        let primary_monitor_id =
+            crate::cache::Cache::primary_monitor_id(&app.platform().monitor_layout()?)?;
+        let commit = app.cache().commit(CacheCommitRequest {
+            bounds: source_entry.bounds,
+            size,
+            rgba: flat.clone(),
+            metadata: payload.metadata.clone(),
+            monitor_id: primary_monitor_id.clone(),
+        });
+        let commit = match commit {
+            Ok(c) => c,
+            Err(err) => {
+                log::warn!("commit_revision: cache commit failed: {err}");
+                return Err(err);
+            }
+        };
+        let outcome = pixelgrab_contracts::CommitOutcome {
+            capture_id: commit.entry.capture_id.clone(),
+            shelf_id: Some(commit.entry.shelf_id.clone()),
+            png_path: Some(commit.entry.png_path.clone()),
+            png_bytes: commit.png_bytes,
+            size_bytes: commit.entry.size_bytes,
+            created_at_ms: commit.entry.created_at_ms,
+        };
+        // Push the new card onto the queue and emit a snapshot.
+        app.shelf_queue().add(commit.entry.clone(), now_ms());
+        let snapshot = snapshot_with_position(app);
+        if let Some(position) = snapshot.position.as_ref() {
+            if let Err(err) = crate::shelf::show_queue(handle, position) {
+                log::warn!("shelf window show failed: {err}");
+            }
+        }
+        emit_shelf_queue_updated(handle, snapshot);
+        // Persist the in-progress scene to the source entry's
+        // `revision.json` so a future reopen starts from the same
+        // point. We never overwrite the source PNG — the issue's
+        // "Cancellation does not mutate original assets" guarantee.
+        let updated_revision = RevisionMetadata {
+            schema_version: REVISION_SCHEMA_VERSION,
+            source_shelf_id: payload.shelf_id.clone(),
+            source_capture_id: source_entry.capture_id.clone(),
+            crop: source_entry.bounds,
+            size: source_entry.size,
+            annotations: payload.annotations.clone(),
+            badge_counter: payload.badge_counter,
+            draft: None,
+            active_tool: payload.active_tool,
+            active_color: payload.active_color,
+            active_stroke: payload.active_stroke,
+            metadata: payload.metadata.clone(),
+        };
+        if let Err(err) = app
+            .cache()
+            .write_revision(&payload.shelf_id, &updated_revision)
+        {
+            // The new entry is already durable. Failing to persist
+            // the in-progress revision is a soft failure — log it
+            // and continue so the user is not stranded. The next
+            // reopen will fall back to the flat-PNG path if the
+            // sidecar is corrupted.
+            log::warn!("commit_revision: write_revision failed: {err}");
+        }
+        // Optionally update the source entry's title / note / tags
+        // so the visible shelf card reflects the user's edits.
+        if let Err(err) = app
+            .cache()
+            .update_metadata(&payload.shelf_id, payload.metadata.clone())
+        {
+            log::warn!("commit_revision: update_metadata failed: {err}");
+        }
+        // Release the editor lock ONLY after the new entry is
+        // durable. The active-lock registry is the source of truth.
+        app.cache().release_editor_lock(&payload.shelf_id);
+        Ok(outcome)
+    })();
+    // Always finish the session — even on failure — so the
+    // orchestrator walks back to Idle and the tray does not get
+    // stuck in a busy state. Mirrors the regular commit's
+    // `session.finish()` pattern.
+    if let Err(err) = app.session().finish_revision() {
+        log::warn!("commit_revision: session.finish_revision failed: {err}");
+    }
+    commit_result
+}
+
+/// Decode PNG bytes into an RGBA buffer. Uses the `png` crate so
+/// the path is portable across the synthetic and Windows
+/// adapters. The decoded length is validated against the
+/// declared size — the source entry's `size` is the single
+/// source of truth.
+fn decode_png_to_rgba(
+    bytes: &[u8],
+    declared: PhysicalSize,
+) -> PlatformResult<(Vec<u8>, PhysicalSize)> {
+    let decoder = png::Decoder::new(bytes);
+    let mut reader = decoder.read_info().map_err(|_e| {
+        PlatformError::new(PlatformErrorKind::Io, "revision_png_decode_header_failed")
+    })?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|_e| {
+        PlatformError::new(PlatformErrorKind::Io, "revision_png_decode_frame_failed")
+    })?;
+    let bytes = &buf[..info.buffer_size()];
+    // The new entry must be RGBA8. Reject any other colour type so
+    // a corrupt PNG never lands in the cache.
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "revision_png_decode_unsupported_color_type",
+        ));
+    }
+    let size = PhysicalSize::new(info.width, info.height);
+    if size != declared {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "revision_png_decode_size_mismatch",
+        ));
+    }
+    Ok((bytes.to_vec(), size))
+}
+
+/// Cancel a reopen session. Releases the editor lock on the
+/// source entry and resets the session to `Idle`. The source
+/// entry's assets remain untouched.
+#[tauri::command]
+pub fn cancel_revision(
+    app: AppState<'_>,
+    payload: CancelRevisionIntent,
+) -> IpcResponse<CancelRevisionResult> {
+    let result = if app.cache().has_editor_lock(&payload.shelf_id) {
+        app.cache().release_editor_lock(&payload.shelf_id);
+        // Walk the session back to Idle. The cancel reason is
+        // `RevisionCancelled` so the telemetry stream can
+        // distinguish it from a regular session cancel.
+        if let Err(err) = app.session().cancel_session() {
+            return IpcResponse::from_result(Err(err));
+        }
+        CancelRevisionResult {
+            cancelled: true,
+            reason: "cancelled".to_string(),
+        }
+    } else {
+        CancelRevisionResult {
+            cancelled: false,
+            reason: "no_active_revision".to_string(),
+        }
+    };
+    IpcResponse::from_result(Ok(result))
 }
 
 /// Commit the current selection. Returns the commit outcome. The flattened

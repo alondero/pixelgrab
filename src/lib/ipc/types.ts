@@ -381,6 +381,154 @@ export interface SaveCaptureAsResponse {
   pngBytes: number;
 }
 
+// ---------------------------------------------------------------------------
+// Tracer-10: reopen / non-destructive revision IPC payloads.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire shape for the `open_revision` IPC. The frontend sends the
+ * shelf id of the entry to reopen; the Rust core acquires the
+ * `Editor` lock, reads the `revision.json` sidecar (or falls back
+ * to the flat PNG when the sidecar is missing / unparseable / has
+ * an unsupported version), and returns a {@link RevisionContext}.
+ */
+export interface OpenRevisionIntent {
+  /** Shelf card id of the entry to reopen. */
+  shelfId: string;
+}
+
+/** Wire shape for the `open_revision` IPC response. */
+export interface OpenRevisionResult {
+  /** The restored editor scene (PNG path + revision metadata + locks). */
+  context: RevisionContext;
+}
+
+/**
+ * Wire shape for the `commit_revision` IPC. The frontend assembles
+ * the final annotation list + style state + badge counter and the
+ * Rust core re-runs the two-phase commit to produce a new cache
+ * entry whose `captureId` is distinct from the source. The source
+ * entry's assets remain untouched — the issue's "Cancellation does
+ * not mutate original assets" and "Commit creates a distinct
+ * revised capture and card" acceptance criteria.
+ */
+export interface CommitRevisionIntent {
+  /** Shelf id of the source entry (the one being revised). */
+  shelfId: string;
+  /** Final annotation list to flatten onto the source PNG. */
+  annotations: Annotation[];
+  /** Badge counter at the moment of commit. */
+  badgeCounter: number;
+  /** Active draw tool at the moment of commit. */
+  activeTool: AnnotationTool;
+  /** Active color at the moment of commit. */
+  activeColor: AnnotationColor;
+  /** Active stroke width at the moment of commit. */
+  activeStroke: AnnotationStroke;
+  /** Updated user-authored metadata (title / note / tags). */
+  metadata: CacheEntryMetadata;
+  /** Whether to copy the revised PNG to the clipboard. */
+  toClipboard: boolean;
+}
+
+/** Wire shape for the `commit_revision` IPC response. */
+export interface CommitRevisionResult {
+  /** The new entry's commit outcome (the `shelfId` is the NEW entry's). */
+  outcome: CommitOutcome;
+}
+
+/**
+ * Wire shape for the `cancel_revision` IPC. The frontend sends the
+ * shelf id of the entry whose `Editor` lock should be released.
+ */
+export interface CancelRevisionIntent {
+  /** Shelf id of the entry whose reopen session should be cancelled. */
+  shelfId: string;
+}
+
+/** Wire shape for the `cancel_revision` IPC response. */
+export interface CancelRevisionResult {
+  /** `true` when the `Editor` lock was released. */
+  cancelled: boolean;
+  /** Stable diagnostic label. One of `"cancelled"`, `"no_active_revision"`. */
+  reason: string;
+}
+
+/**
+ * Wire shape for the `update_revision` IPC. Optional path for
+ * persisting the in-progress editor scene to the source entry's
+ * `revision.json` without committing. The frontend drives this from
+ * a debounced handler on every annotation change.
+ */
+export interface UpdateRevisionIntent {
+  /** Shelf id of the entry whose in-progress revision is being written. */
+  shelfId: string;
+  /** New revision metadata to persist. */
+  revision: RevisionMetadata;
+}
+
+/** Wire shape for the `update_revision` IPC response. */
+export interface UpdateRevisionResult {
+  /** The persisted revision metadata (sanitized so the schema_version is the current one). */
+  revision: RevisionMetadata;
+}
+
+/**
+ * Editor scene persisted alongside every cache entry. Round-trips
+ * across the `open_revision` IPC so the user can resume a previous
+ * edit. Silently upgrades to a fresh editor when the sidecar is
+ * missing or unparseable.
+ */
+export interface RevisionMetadata {
+  /** Schema version. Pinned to 1 by the Rust core. */
+  schemaVersion: number;
+  /** Shelf id of the entry that authored this revision. */
+  sourceShelfId: string;
+  /** Capture id of the source entry. */
+  sourceCaptureId: string;
+  /** Final physical crop used to render the entry's PNG. */
+  crop: PhysicalBounds;
+  /** Pixel size of the frozen crop. */
+  size: PhysicalSize;
+  /** Restored annotation list. */
+  annotations: Annotation[];
+  /** Next badge number to assign (preserved across the reopen). */
+  badgeCounter: number;
+  /** In-flight draft (pointerdown + drag). */
+  draft?: Annotation;
+  /** Active draw tool. */
+  activeTool: AnnotationTool;
+  /** Active color. */
+  activeColor: AnnotationColor;
+  /** Active stroke width. */
+  activeStroke: AnnotationStroke;
+  /** User-authored metadata (title / note / tags). */
+  metadata: CacheEntryMetadata;
+}
+
+/**
+ * The wire shape returned by `open_revision`. Paired with the
+ * Rust mirror in `crates/pixelgrab-contracts/src/revision.rs` and
+ * the contract tests in `src-tauri/tests/ipc_contracts.rs`.
+ */
+export interface RevisionContext {
+  /** Shelf id of the source entry. */
+  shelfId: string;
+  /** Capture id of the source entry. */
+  captureId: string;
+  /** Absolute path to the source entry's flattened PNG. */
+  pngPath: string;
+  /** The restored editor scene. */
+  revision: RevisionMetadata;
+  /** Active lock owners on the source entry. */
+  locks: LockOwner[];
+  /** Stable diagnostic label describing the loader's path. */
+  loaderStatus: RevisionLoaderStatus;
+}
+
+/** Diagnostic label describing how the revision was resolved. */
+export type RevisionLoaderStatus = "full" | "flat_fallback";
+
 export interface PlatformErrorKind {
   kind:
     | "capture_unavailable"

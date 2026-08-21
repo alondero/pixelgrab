@@ -21,6 +21,16 @@ pub enum SessionState {
     Committing,
     /// Cleanup in progress (overlay being hidden, locks released).
     Cleanup,
+    /// A shelf entry is loaded into the editor for non-destructive
+    /// editing. Tracer-10. The source entry holds a `Shelf` +
+    /// `Editor` lock pair; the original card stays on the shelf.
+    /// A new capture request is rejected with `InvalidSessionState`,
+    /// matching the existing overlap guard.
+    Reopening,
+    /// A revision commit is in flight (the user accepted the edit).
+    /// Same overlap guard as `Committing`: any second capture or
+    /// second revision commit is rejected.
+    RevisionCommitting,
 }
 
 impl SessionState {
@@ -32,12 +42,14 @@ impl SessionState {
     /// Returns the legal next states for the current state.
     pub fn allowed_next(&self) -> &'static [SessionState] {
         match self {
-            Self::Idle => &[Self::Capturing],
+            Self::Idle => &[Self::Capturing, Self::Reopening],
             Self::Capturing => &[Self::Ready, Self::Cleanup],
             Self::Ready => &[Self::Selecting, Self::Cleanup],
             Self::Selecting => &[Self::Committing, Self::Cleanup],
             Self::Committing => &[Self::Cleanup],
             Self::Cleanup => &[Self::Idle],
+            Self::Reopening => &[Self::RevisionCommitting, Self::Cleanup, Self::Idle],
+            Self::RevisionCommitting => &[Self::Cleanup, Self::Idle],
         }
     }
 }
@@ -77,4 +89,13 @@ pub enum SessionTransitionReason {
     CleanupComplete,
     /// Internal invariant violation forced a reset.
     Reset,
+    /// User directed the resident process to reopen a shelf entry.
+    /// Tracer-10. Transitions `Idle -> Reopening`.
+    ReopenRequested,
+    /// User pressed Enter on a reopened shelf entry (commit the
+    /// revision). Tracer-10. Transitions `Reopening -> RevisionCommitting`.
+    RevisionCommitRequested,
+    /// User cancelled the reopen session (Escape). Tracer-10.
+    /// Transitions `Reopening -> Idle`.
+    RevisionCancelled,
 }

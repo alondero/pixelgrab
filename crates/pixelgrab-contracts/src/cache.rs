@@ -87,6 +87,13 @@ pub struct CacheEntry {
     pub monitor_id: String,
 }
 
+/// Tracer-10: the file name of the per-entry revision sidecar. The
+/// file lives next to `metadata.json` and `manifest.json` and
+/// carries the editor scene (annotations, badge counter, tool /
+/// style state). Persistence helpers: `Cache::read_revision` and
+/// `Cache::write_revision` in `src-tauri/src/cache/store.rs`.
+pub const REVISION_JSON_FILE_NAME: &str = "revision.json";
+
 /// Owner label of an active lock on a cache entry. The set of owners is
 /// stable for the v1 release: more owners (e.g. a future
 /// "AnnotationDraft" lock) can be appended as new enum variants.

@@ -217,6 +217,22 @@ impl SessionOrchestrator {
                 self.cancel_session()?;
                 Ok(EscapeAction::SessionCancelled)
             }
+            // Tracer-10: while a reopen session is active, Escape
+            // walks the state back to Idle through the RevisionCancelled
+            // reason. The IPC layer pairs this with the
+            // `cancel_revision` command which releases the editor lock.
+            SessionState::Reopening => {
+                self.request_transition(SessionTransition {
+                    to: SessionState::Idle,
+                    reason: SessionTransitionReason::RevisionCancelled,
+                })?;
+                Ok(EscapeAction::SessionCancelled)
+            }
+            // A revision commit in flight is a brief terminal step —
+            // the IPC layer finishes the commit before the user can
+            // press Escape again. Treat any escape in this state as
+            // a no-op so the commit pipeline can complete cleanly.
+            SessionState::RevisionCommitting => Ok(EscapeAction::NoOp),
         }
     }
 
@@ -255,6 +271,87 @@ impl SessionOrchestrator {
                 })?;
                 Ok(())
             }
+            // Tracer-10: a reopen session is cancelled by walking
+            // straight back to Idle. The IPC layer is responsible for
+            // releasing the editor lock on the source entry — the
+            // session machine only owns the state transition.
+            SessionState::Reopening => {
+                self.request_transition(SessionTransition {
+                    to: SessionState::Idle,
+                    reason: SessionTransitionReason::RevisionCancelled,
+                })?;
+                Ok(())
+            }
+            // A revision commit is in flight: the IPC layer is the
+            // only owner. Force-reset to Idle so the tray does not
+            // stay stuck in a busy state on a backend failure.
+            SessionState::RevisionCommitting => {
+                self.request_transition(SessionTransition {
+                    to: SessionState::Idle,
+                    reason: SessionTransitionReason::Reset,
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Transition the session from `Idle` to `Reopening`. Called by
+    /// the `open_revision` IPC after the cache validates the entry
+    /// and acquires the `Editor` lock. Refuses when the session is
+    /// already busy (a capture or another reopen is in flight).
+    pub fn request_reopen(&self) -> PlatformResult<()> {
+        if self.is_busy() {
+            return Err(PlatformError::new(
+                PlatformErrorKind::InvalidSessionState,
+                format!(
+                    "cannot reopen: session is already {:?}",
+                    self.current_state()
+                ),
+            ));
+        }
+        self.request_transition(SessionTransition {
+            to: SessionState::Reopening,
+            reason: SessionTransitionReason::ReopenRequested,
+        })
+    }
+
+    /// Transition the session from `Reopening` to `RevisionCommitting`.
+    /// Called by `commit_revision` once the editor's final state is
+    /// ready to be flattened. The commit pipeline must run
+    /// `session.finish_revision()` exactly once after this call.
+    pub fn request_revision_commit(&self) -> PlatformResult<()> {
+        self.request_transition(SessionTransition {
+            to: SessionState::RevisionCommitting,
+            reason: SessionTransitionReason::RevisionCommitRequested,
+        })
+    }
+
+    /// Finish the revision commit pipeline. Walks the session from
+    /// `RevisionCommitting` back to `Idle`. Always succeeds (matches
+    /// the existing `session.finish()` contract for the regular
+    /// commit path).
+    pub fn finish_revision(&self) -> PlatformResult<()> {
+        let state = self.current_state();
+        match state {
+            SessionState::RevisionCommitting => {
+                self.request_transition(SessionTransition {
+                    to: SessionState::Cleanup,
+                    reason: SessionTransitionReason::CleanupComplete,
+                })?;
+                self.request_transition(SessionTransition {
+                    to: SessionState::Idle,
+                    reason: SessionTransitionReason::CleanupComplete,
+                })?;
+                Ok(())
+            }
+            // Already cleaned up — treat as a no-op so the commit
+            // pipeline's `session.finish()` wrapper is idempotent
+            // (the same shape the regular commit path uses).
+            SessionState::Idle => Ok(()),
+            other => Err(PlatformError::new(
+                PlatformErrorKind::InvalidSessionState,
+                format!("cannot finish revision from {other:?}"),
+            )),
         }
     }
 
