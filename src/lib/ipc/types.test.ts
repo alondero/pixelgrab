@@ -16,7 +16,6 @@ import type {
   PhysicalBounds,
   RequestCaptureIntent,
   RequestCommitIntent,
-  RequestOverlayIntent,
   SecondaryLaunchIntent,
   SessionSnapshot,
   SessionState,
@@ -42,15 +41,6 @@ describe("IPC type contract", () => {
     expect(json.toShelf).toBe(true);
     expect(json.toClipboard).toBe(false);
     expect(json.crop.size.width).toBe(100);
-  });
-
-  it("RequestOverlayIntent serialises to camelCase", () => {
-    const intent: RequestOverlayIntent = {
-      selection: { origin: { x: 5, y: 10 }, size: { width: 50, height: 60 } },
-    };
-    const json = JSON.parse(JSON.stringify(intent));
-    expect(json.selection.origin.x).toBe(5);
-    expect(json.selection.size.width).toBe(50);
   });
 
   it("CommitRequest serialises to camelCase", () => {

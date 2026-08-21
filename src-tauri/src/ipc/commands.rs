@@ -15,10 +15,10 @@ use pixelgrab_contracts::{
         CommitRevisionIntent, CommitRevisionResult, DismissCacheEntryRequest,
         DismissCacheEntryResponse, HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse,
         OpenRevisionIntent, OpenRevisionResult, RequestCaptureIntent, RequestCommitIntent,
-        RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest, SaveCaptureAsResponse,
-        SessionSnapshot, ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult,
-        UpdateCacheMetadataRequest, UpdateCachePolicyRequest, UpdateRevisionIntent,
-        UpdateRevisionResult, UpdateShelfPreferencesRequest,
+        SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot,
+        StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
+        UpdateCachePolicyRequest, UpdateRevisionIntent, UpdateRevisionResult,
+        UpdateShelfPreferencesRequest,
     },
     revision::{RevisionContext, RevisionLoaderStatus, RevisionMetadata, REVISION_SCHEMA_VERSION},
     shelf_queue::{
@@ -124,6 +124,11 @@ fn snapshot_with_position(app: &PixelGrabApp) -> ShelfQueueSnapshot {
 /// region). `intent.full_screen` resolves the target monitor (primary by
 /// default, or the monitor under the pointer when the platform provides
 /// cursor coordinates) and captures that monitor at native resolution.
+///
+/// The overlay reveal contract (issue #60) is collapsed into the single
+/// `show_over_virtual_desktop` seam: positioning, showing, and the
+/// `Ready -> Selecting` transition happen here so the frontend's
+/// `OverlayApp.svelte` only has to render the freeze frame.
 #[tauri::command]
 pub fn request_capture(
     app: AppState<'_>,
@@ -153,20 +158,26 @@ pub fn request_capture(
             return IpcResponse::from_result(Err(err));
         }
     };
-    // Position the overlay over the captured bounds. The tray menu
-    // doesn't open the overlay directly; the frontend asks for it via
-    // `request_overlay` after the user has acknowledged the freeze frame.
-    // We still position the window here so the next reveal is instantaneous.
-    if let Ok(layout) = app.platform().monitor_layout() {
+    // Reveal the overlay over the captured bounds. The single seam does
+    // the full job — position, show, and walk `Ready -> Selecting` —
+    // so the frontend never has to call a separate overlay IPC. A
+    // monitor-layout failure falls back to positioning over the captured
+    // bounds directly (single-monitor captures don't have a full virtual
+    // desktop to span).
+    let position_fallback = |reason: &str| {
         if let Err(err) = crate::overlay::position_over_bounds(&handle, &capture.bounds) {
-            log::warn!("overlay positioning failed: {err}");
-            // Recompute from the full layout if the captured bounds
-            // (e.g. a single-monitor capture) is not the full virtual
-            // desktop.
-            if let Err(err) = crate::overlay::position_over_virtual_desktop(&handle, &layout) {
-                log::warn!("overlay virtual-desktop positioning failed: {err}");
-            }
+            log::warn!("overlay {reason} failed: {err}");
         }
+    };
+    if let Ok(layout) = app.platform().monitor_layout() {
+        if let Err(err) =
+            crate::overlay::show_over_virtual_desktop(&handle, &layout, &app.session())
+        {
+            log::warn!("overlay reveal failed: {err}; falling back to bounds");
+            position_fallback("bounds positioning");
+        }
+    } else {
+        position_fallback("positioning");
     }
     let monitor_id = monitor_id_for(&capture);
     let diag =
@@ -229,27 +240,6 @@ fn monitor_id_for_format(format: CaptureFormat) -> &'static str {
         CaptureFormat::SingleMonitor => "single-monitor",
         CaptureFormat::PhysicalRegion => "physical-region",
     }
-}
-
-/// The overlay calls this when it has finished showing the freeze frame.
-/// Transitions to `Selecting` and stamps the overlay-visible timestamp
-/// onto the stored diagnostics record.
-#[tauri::command]
-pub fn request_overlay(
-    app: AppState<'_>,
-    payload: RequestOverlayIntent,
-) -> IpcResponse<RequestOverlayResult> {
-    let result = match app.session().overlay_visible() {
-        Ok(()) => app
-            .session()
-            .report_selection(payload.selection)
-            .map(|_| RequestOverlayResult {
-                snapshot: app.session().snapshot(),
-                diagnostics: app.session().last_diagnostics(),
-            }),
-        Err(err) => Err(err),
-    };
-    IpcResponse::from_result(result)
 }
 
 /// Cancel the active session. Honours the staged Escape behaviour.

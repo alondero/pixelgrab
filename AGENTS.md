@@ -87,6 +87,14 @@ The architecture is documented in detail in
 synthetic capture end-to-end trace is documented in
 [`docs/adr/0001-tauri-svelte-konva-stack.md`](docs/adr/0001-tauri-svelte-konva-stack.md).
 
+The overlay reveal contract is collapsed into one backend seam —
+`crate::overlay::show_over_virtual_desktop(app, layout, session)` —
+which positions the window, shows it, and walks the orchestrator from
+`Ready` to `Selecting` in a single call. See
+[ADR-0010](docs/adr/0010-overlay-reveal-seam.md) for the rationale
+behind the collapse and the deletion of the legacy `request_overlay`
+IPC.
+
 ## 4. Platform boundaries
 
 - **Windows-specific code** lives behind `src-tauri/src/platform/`. The
@@ -107,6 +115,14 @@ adds the two new states for the non-destructive revision flow.
 Transitions are validated by the `SessionOrchestrator::request_transition`
 method. The allowed edges are defined in `SessionState::allowed_next()`.
 Out-of-order transitions are rejected with `InvalidSessionState`.
+
+The `Ready → Selecting` edge has exactly one trigger — the
+`SessionOrchestrator::overlay_mounted` helper called by
+`crate::overlay::show_over_virtual_desktop` after the overlay window
+is positioned and shown. `overlay_mounted` is a no-op from any state
+other than `Ready`; the orchestrator never loses its place on a
+duplicate or out-of-order reveal call. See
+[ADR-0010](docs/adr/0010-overlay-reveal-seam.md).
 
 The lifecycle is exercised end-to-end by the test in
 `src-tauri/tests/session_lifecycle.rs` and the TypeScript test in

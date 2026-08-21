@@ -505,7 +505,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::request_capture,
-            ipc::request_overlay,
             ipc::request_commit,
             ipc::request_cancel,
             ipc::get_session_snapshot,

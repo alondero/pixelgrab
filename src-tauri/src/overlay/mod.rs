@@ -8,6 +8,13 @@
 //! the window, and the frontend converts client coordinates to physical
 //! pixels via the same scale factor the orchestrator computed for the
 //! captured framebuffer.
+//!
+//! `show_over_virtual_desktop` is the single backend seam for the overlay
+//! reveal contract (issue #60): it positions the window, shows it, and
+//! tells the [`SessionOrchestrator`](crate::session::SessionOrchestrator)
+//! the overlay has been mounted. The frontend's `OverlayApp.svelte` only
+//! has to render the freeze frame — it no longer needs to know that
+//! mounting the overlay implies a state-machine step.
 
 use pixelgrab_contracts::{
     coordinate::PhysicalBounds, monitor::MonitorLayout, PlatformError, PlatformErrorKind,
@@ -16,6 +23,8 @@ use pixelgrab_contracts::{
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
 };
+
+use crate::session::SessionOrchestrator;
 
 /// Pre-allocate the overlay window and hide it. Subsequent captures reuse
 /// the same window and only toggle visibility.
@@ -90,12 +99,17 @@ pub fn position_over_bounds<R: Runtime>(
     Ok(())
 }
 
-/// Show the overlay window over the virtual desktop. Combines the
-/// positioning and the visibility toggle so the IPC layer has a single
-/// call site to wire.
+/// Show the overlay window over the virtual desktop. **Single backend
+/// seam for the overlay reveal contract** (issue #60): positions the
+/// window, makes it visible, and walks the orchestrator from `Ready` to
+/// `Selecting` via [`SessionOrchestrator::overlay_mounted`]. The
+/// frontend's `OverlayApp.svelte` no longer has to drive any of those
+/// steps — it just renders the freeze frame the orchestrator already
+/// has.
 pub fn show_over_virtual_desktop<R: Runtime>(
     app: &AppHandle<R>,
     layout: &MonitorLayout,
+    session: &SessionOrchestrator,
 ) -> PlatformResult<()> {
     position_over_virtual_desktop(app, layout)?;
     let window = app.get_webview_window("overlay").ok_or_else(|| {
@@ -105,6 +119,14 @@ pub fn show_over_virtual_desktop<R: Runtime>(
         )
     })?;
     window.show().map_err(overlay_err)?;
+    // The overlay window is already on screen — a state-machine
+    // rejection here would mean an in-flight cancel raced the
+    // transition, which is observable in logs but not fatal. The
+    // overlay stays visible; the orchestrator just stays in its
+    // current state.
+    if let Err(err) = session.overlay_mounted() {
+        log::warn!("overlay_mounted rejected after show: {err}");
+    }
     Ok(())
 }
 

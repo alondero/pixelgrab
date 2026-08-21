@@ -11,7 +11,6 @@ vi.mock("$lib/ipc/commands", async () => {
   const shell = await import("$lib/ipc/shell.svelte");
   return {
     requestCapture: shell.mockRequestCapture,
-    requestOverlay: shell.mockRequestOverlay,
     requestCommit: shell.mockRequestCommit,
     requestCancel: shell.mockRequestCancel,
     getSessionSnapshot: shell.mockGetSessionSnapshot,
