@@ -21,6 +21,7 @@ pub mod hotkey;
 pub mod ipc;
 pub mod monitor;
 pub mod pin;
+pub mod revision;
 pub mod session;
 pub mod shelf_preferences;
 pub mod shelf_queue;
@@ -53,20 +54,27 @@ pub use hotkey::{
     SUPPORTED_KEYS,
 };
 pub use ipc::{
-    CachePolicyDto, CacheStatsResponse, CancelOutcome, CaptureDiagnostics, CaptureIntent,
-    CaptureResponse, ClearCacheResponse, CommitOutcome, CommitRequest, CommitResponse,
+    CachePolicyDto, CacheStatsResponse, CancelOutcome, CancelRevisionIntent, CancelRevisionResult,
+    CaptureDiagnostics, CaptureIntent, CaptureResponse, ClearCacheResponse, CommitOutcome,
+    CommitRequest, CommitResponse, CommitRevisionIntent, CommitRevisionResult,
     DismissCacheEntryRequest, DismissCacheEntryResponse, HotkeyBindingsDto,
-    HotkeyRegistryStatusDto, IpcError, IpcResponse, OverlaySelection, RequestCaptureIntent,
-    RequestCommitIntent, RequestOverlayIntent, RequestOverlayResult, SaveCaptureAsRequest,
-    SaveCaptureAsResponse, SecondaryLaunchIntent, SessionSnapshot, ShelfPreferencesDto,
-    ShelfSnapshot, StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
-    UpdateCachePolicyRequest, UpdateHotkeyBindingsRequest, UpdateShelfPreferencesRequest,
+    HotkeyRegistryStatusDto, IpcError, IpcResponse, OpenRevisionIntent, OpenRevisionResult,
+    OverlaySelection, RequestCaptureIntent, RequestCommitIntent, RequestOverlayIntent,
+    RequestOverlayResult, SaveCaptureAsRequest, SaveCaptureAsResponse, SecondaryLaunchIntent,
+    SessionSnapshot, ShelfPreferencesDto, ShelfSnapshot, StartShelfDragIntent,
+    StartShelfDragResult, UpdateCacheMetadataRequest, UpdateCachePolicyRequest,
+    UpdateHotkeyBindingsRequest, UpdateRevisionIntent, UpdateRevisionResult,
+    UpdateShelfPreferencesRequest,
 };
 pub use monitor::{MonitorDescriptor, MonitorLayout};
 pub use pin::{
     clamp_opacity, clamp_zoom, cursor_centered_zoom, limits as pin_limits, reanchor, scaled,
     OpenPinRequest, PinAction, PinActionOutcome, PinCommand, PinId, PinLifecycle, PinLockProvider,
     PinSource, PinTransform, PinViewModel,
+};
+pub use revision::{
+    AnnotationTool, RevisionContext, RevisionLoaderStatus, RevisionMetadata,
+    REVISION_SCHEMA_VERSION,
 };
 pub use session::{SessionState, SessionTransition};
 pub use shelf_preferences::{

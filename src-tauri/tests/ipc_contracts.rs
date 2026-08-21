@@ -13,6 +13,7 @@ use pixelgrab_contracts::ipc::{
 };
 use pixelgrab_contracts::pin::{OpenPinRequest, PinCommand, PinSource, PinTransform, PinViewModel};
 use pixelgrab_contracts::session::SessionState;
+use pixelgrab_contracts::LockOwner;
 
 #[test]
 fn capture_resolution_dto_round_trips() {
@@ -290,6 +291,211 @@ fn capture_resolution_known_format() {
     assert!(json.contains("\"assetUrl\""));
     assert!(json.contains("\"captureId\""));
     assert!(json.contains("\"capturedAtMs\""));
+}
+
+// ---------------------------------------------------------------------------
+// Tracer-10 contract pair tests for the reopen / revision IPC payloads.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn open_revision_intent_serialises_camel_case() {
+    use pixelgrab_contracts::ipc::OpenRevisionIntent;
+    let intent = OpenRevisionIntent {
+        shelf_id: "shelf-1".to_string(),
+    };
+    let json = serde_json::to_string(&intent).expect("serialize");
+    assert!(json.contains("\"shelfId\":\"shelf-1\""));
+    let parsed: OpenRevisionIntent = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed.shelf_id, "shelf-1");
+}
+
+#[test]
+fn revision_metadata_dto_round_trips() {
+    use pixelgrab_contracts::annotation::{AnnotationColor, AnnotationStroke};
+    use pixelgrab_contracts::revision::{
+        AnnotationTool, RevisionMetadata, REVISION_SCHEMA_VERSION,
+    };
+    let meta = RevisionMetadata {
+        schema_version: REVISION_SCHEMA_VERSION,
+        source_shelf_id: "shelf-1".to_string(),
+        source_capture_id: "cap-1".to_string(),
+        crop: PhysicalBounds::from_xywh(0, 0, 100, 100),
+        size: PhysicalSize::new(100, 100),
+        annotations: vec![],
+        badge_counter: 5,
+        draft: None,
+        active_tool: AnnotationTool::Rectangle,
+        active_color: AnnotationColor::Green,
+        active_stroke: AnnotationStroke::Thick,
+        metadata: pixelgrab_contracts::CacheEntryMetadata::default(),
+    };
+    let json = serde_json::to_string(&meta).expect("serialize");
+    assert!(json.contains("\"schemaVersion\":1"));
+    assert!(json.contains("\"badgeCounter\":5"));
+    assert!(json.contains("\"activeTool\":\"rectangle\""));
+    let parsed: RevisionMetadata = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed, meta);
+}
+
+#[test]
+fn revision_context_dto_round_trips() {
+    use pixelgrab_contracts::revision::{
+        RevisionContext, RevisionLoaderStatus, REVISION_SCHEMA_VERSION,
+    };
+    let context = RevisionContext {
+        shelf_id: "shelf-1".to_string(),
+        capture_id: "cap-1".to_string(),
+        png_path: "/tmp/cap-1/capture.png".to_string(),
+        revision: pixelgrab_contracts::RevisionMetadata::empty(
+            "shelf-1".to_string(),
+            "cap-1".to_string(),
+            PhysicalBounds::from_xywh(0, 0, 100, 100),
+            PhysicalSize::new(100, 100),
+        ),
+        locks: vec![LockOwner::Shelf, LockOwner::Editor],
+        loader_status: RevisionLoaderStatus::Full,
+    };
+    let json = serde_json::to_string(&context).expect("serialize");
+    assert!(json.contains("\"shelfId\":\"shelf-1\""));
+    assert!(json.contains("\"captureId\":\"cap-1\""));
+    assert!(json.contains("\"pngPath\":"));
+    assert!(json.contains("\"loaderStatus\":\"full\""));
+    assert!(json.contains("\"locks\":[\"shelf\",\"editor\"]"));
+    let parsed: RevisionContext = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed, context);
+    // The schema version is pinned even after the round-trip.
+    assert_eq!(parsed.revision.schema_version, REVISION_SCHEMA_VERSION);
+}
+
+#[test]
+fn commit_revision_intent_carrying_annotations_serialises() {
+    use pixelgrab_contracts::annotation::{AnnotationColor, AnnotationStroke};
+    use pixelgrab_contracts::ipc::CommitRevisionIntent;
+    use pixelgrab_contracts::revision::AnnotationTool;
+    let intent = CommitRevisionIntent {
+        shelf_id: "shelf-1".to_string(),
+        annotations: vec![pixelgrab_contracts::annotation::Annotation::arrow(
+            pixelgrab_contracts::annotation::AnnotationId(1),
+            pixelgrab_contracts::PhysicalPoint::new(0, 0),
+            pixelgrab_contracts::PhysicalPoint::new(50, 50),
+            AnnotationColor::Red,
+            AnnotationStroke::Medium,
+            0,
+        )],
+        badge_counter: 3,
+        active_tool: AnnotationTool::Arrow,
+        active_color: AnnotationColor::Red,
+        active_stroke: AnnotationStroke::Medium,
+        metadata: pixelgrab_contracts::CacheEntryMetadata {
+            title: "edited".to_string(),
+            note: "note".to_string(),
+            tags: vec!["a".to_string()],
+        },
+        to_clipboard: true,
+    };
+    let json = serde_json::to_string(&intent).expect("serialize");
+    assert!(json.contains("\"shelfId\":\"shelf-1\""));
+    assert!(json.contains("\"badgeCounter\":3"));
+    assert!(json.contains("\"activeTool\":\"arrow\""));
+    assert!(json.contains("\"toClipboard\":true"));
+    let parsed: CommitRevisionIntent = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed.shelf_id, "shelf-1");
+    assert_eq!(parsed.annotations.len(), 1);
+    assert_eq!(parsed.metadata.title, "edited");
+}
+
+#[test]
+fn cancel_revision_intent_serialises_camel_case() {
+    use pixelgrab_contracts::ipc::{CancelRevisionIntent, CancelRevisionResult};
+    let intent = CancelRevisionIntent {
+        shelf_id: "shelf-1".to_string(),
+    };
+    let json = serde_json::to_string(&intent).expect("serialize");
+    assert!(json.contains("\"shelfId\":\"shelf-1\""));
+    let parsed: CancelRevisionIntent = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed.shelf_id, "shelf-1");
+    let result = CancelRevisionResult {
+        cancelled: true,
+        reason: "cancelled".to_string(),
+    };
+    let json = serde_json::to_string(&result).expect("serialize");
+    assert!(json.contains("\"cancelled\":true"));
+    assert!(json.contains("\"reason\":\"cancelled\""));
+}
+
+#[test]
+fn update_revision_intent_serialises_camel_case() {
+    use pixelgrab_contracts::ipc::{UpdateRevisionIntent, UpdateRevisionResult};
+    let meta = pixelgrab_contracts::RevisionMetadata::empty(
+        "shelf-1".to_string(),
+        "cap-1".to_string(),
+        PhysicalBounds::from_xywh(0, 0, 100, 100),
+        PhysicalSize::new(100, 100),
+    );
+    let intent = UpdateRevisionIntent {
+        shelf_id: "shelf-1".to_string(),
+        revision: meta.clone(),
+    };
+    let json = serde_json::to_string(&intent).expect("serialize");
+    assert!(json.contains("\"shelfId\":\"shelf-1\""));
+    assert!(json.contains("\"revision\":"));
+    let parsed: UpdateRevisionIntent = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed.shelf_id, "shelf-1");
+    let result = UpdateRevisionResult { revision: meta };
+    let json = serde_json::to_string(&result).expect("serialize");
+    assert!(json.contains("\"revision\":"));
+}
+
+#[test]
+fn revision_metadata_tolerates_unknown_fields_on_wire() {
+    let json = r#"{
+        "schemaVersion": 1,
+        "sourceShelfId": "shelf-1",
+        "sourceCaptureId": "cap-1",
+        "crop": {"origin": {"x": 0, "y": 0}, "size": {"width": 100, "height": 100}},
+        "size": {"width": 100, "height": 100},
+        "annotations": [],
+        "badgeCounter": 3,
+        "activeTool": "select",
+        "activeColor": "red",
+        "activeStroke": "medium",
+        "metadata": {"title": "x", "note": "", "tags": []},
+        "futureField": "ignored"
+    }"#;
+    let parsed: pixelgrab_contracts::RevisionMetadata = serde_json::from_str(json).expect("parse");
+    assert_eq!(parsed.badge_counter, 3);
+    assert!(parsed.draft.is_none());
+}
+
+#[test]
+fn loader_status_serialises_snake_case() {
+    use pixelgrab_contracts::revision::RevisionLoaderStatus;
+    let json = serde_json::to_string(&RevisionLoaderStatus::Full).expect("serialize");
+    assert_eq!(json, "\"full\"");
+    let json = serde_json::to_string(&RevisionLoaderStatus::FlatFallback).expect("serialize");
+    assert_eq!(json, "\"flat_fallback\"");
+}
+
+#[test]
+fn commit_revision_result_carries_commit_outcome() {
+    use pixelgrab_contracts::ipc::{CommitOutcome, CommitRevisionResult};
+    let result = CommitRevisionResult {
+        outcome: CommitOutcome {
+            capture_id: "new-cap".to_string(),
+            shelf_id: Some("new-shelf".to_string()),
+            png_path: Some("/tmp/new.png".to_string()),
+            png_bytes: 4096,
+            size_bytes: 8192,
+            created_at_ms: 1_700_000_000_000,
+        },
+    };
+    let json = serde_json::to_string(&result).expect("serialize");
+    assert!(json.contains("\"outcome\":"));
+    assert!(json.contains("\"captureId\":\"new-cap\""));
+    assert!(json.contains("\"shelfId\":\"new-shelf\""));
+    let parsed: CommitRevisionResult = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed.outcome.capture_id, "new-cap");
+    assert_eq!(parsed.outcome.shelf_id.as_deref(), Some("new-shelf"));
 }
 
 #[test]

@@ -101,11 +101,12 @@ synthetic capture end-to-end trace is documented in
 
 ## 5. Capture-session lifecycle
 
-The lifecycle has six states: `idle`, `capturing`, `ready`, `selecting`,
-`committing`, `cleanup`. Transitions are validated by the
-`SessionOrchestrator::request_transition` method. The allowed edges are
-defined in `SessionState::allowed_next()`. Out-of-order transitions are
-rejected with `InvalidSessionState`.
+The lifecycle has eight states: `idle`, `capturing`, `ready`, `selecting`,
+`committing`, `cleanup`, `reopening`, `revision_committing`. Tracer-10
+adds the two new states for the non-destructive revision flow.
+Transitions are validated by the `SessionOrchestrator::request_transition`
+method. The allowed edges are defined in `SessionState::allowed_next()`.
+Out-of-order transitions are rejected with `InvalidSessionState`.
 
 The lifecycle is exercised end-to-end by the test in
 `src-tauri/tests/session_lifecycle.rs` and the TypeScript test in
@@ -224,6 +225,8 @@ ADRs are:
 - 0005 — Cache and one-card shelf (tracer-07)
 - 0006 — External drag (tracer-09)
 - 0007 — Cache bounds + recovery (tracer-13)
+- 0008 — Text, blur, and Save As (tracer-05)
+- 0009 — Reopen / non-destructive revision metadata (tracer-10)
 
 Additions and revisions must follow the template in
 [`docs/adr/README.md`](docs/adr/README.md). When a change supersedes a prior
@@ -668,7 +671,148 @@ pipeline used by `save_capture_as`: a blur + a text annotation,
 both visible in the output, the blur region's secret pixels
 redacted.
 
+## 18. Reopen and non-destructive revision (tracer-10)
+
+Tracer-10 lets the user click a shelf card to restore its crop,
+vector annotations, badge counter, and tool / style state, then
+cancel safely or commit a distinct revised capture. The source
+entry's assets remain untouched on every outcome.
+
+The relevant code lives in:
+
+- `crates/pixelgrab-contracts/src/revision.rs` — `RevisionMetadata`,
+  `RevisionContext`, `AnnotationTool`, `RevisionLoaderStatus`,
+  `REVISION_SCHEMA_VERSION`. Mirrored in `src/lib/ipc/types.ts`.
+- `src-tauri/src/cache/store.rs` — `Cache::read_revision`,
+  `Cache::write_revision`, `Cache::acquire_editor_lock`,
+  `Cache::release_editor_lock`, `Cache::has_editor_lock`. The
+  cache owns the `Editor` lock guards for the duration of the
+  reopen session so the sweeper and the manual `clear_cache`
+  cannot evict the user's work-in-progress.
+- `src-tauri/src/session/state.rs` — `SessionOrchestrator::request_reopen`,
+  `SessionOrchestrator::request_revision_commit`,
+  `SessionOrchestrator::finish_revision`. The session is the
+  source of truth for "is an editor open?".
+- `src-tauri/src/ipc/commands.rs` — `open_revision`,
+  `update_revision`, `commit_revision`, `cancel_revision`.
+
+### The revision sidecar
+
+Every cache entry now carries a `revision.json` sidecar next to
+the existing `metadata.json` and `manifest.json`. The schema is
+versioned (`REVISION_SCHEMA_VERSION = 1`); the loader rejects any
+other version with a `revision_unsupported_version` fall-back.
+Additive field changes are tolerated without a version bump.
+
+The sidecar persists:
+
+- The annotation list (arrows, rectangles, text, blur, badges).
+- The badge counter (`badgeCounter`).
+- The active tool, color, and stroke at the moment of the last
+  commit.
+- The in-flight draft (optional).
+- The user-authored metadata (title / note / tags).
+- The source `shelf_id` and `capture_id` for analytics.
+
+`Cache::commit` writes the initial empty sidecar at commit time
+so a fresh entry has a baseline to round-trip on first reopen.
+
+### Flat-PNG fallback
+
+When the sidecar is missing, unparseable, or carries an
+unsupported version, the loader returns `None` and the IPC
+layer builds a `RevisionContext` with `loaderStatus: FlatFallback`.
+The frontend opens the editor with the flattened PNG as the
+canvas and no annotations — the acceptance criterion
+"Unsupported or missing metadata degrades safely to
+flattened-image editing".
+
+### Lock ownership
+
+| State                | Locks on source entry                          |
+| -------------------- | ---------------------------------------------- |
+| Idle (card on shelf) | `Shelf`                                        |
+| Editing (reopen)     | `Shelf` + `Editor`                             |
+| Commit in flight     | `Shelf` + `Editor`                             |
+| Commit success       | `Shelf` (old) + `Shelf` (new) + Editor dropped |
+| Cancel               | `Shelf` (Editor dropped)                       |
+
+The `Editor` lock is the marker that prevents the periodic
+sweeper (tracer-13) and the manual `clear_cache` from evicting
+the user's work-in-progress. The `Shelf` lock keeps the original
+card visible on the shelf throughout.
+
+The lock guard is owned by the cache (`Cache::editor_guards`,
+mirroring `Cache::shelf_guards`) so its lifetime is tied to the
+cache's mutex. The `Cache::dismiss` path drops the editor guard
+alongside the shelf guard so a manual dismissal cannot leak an
+editor lock until the next restart.
+
+### Revision commit
+
+The `commit_revision` IPC reuses `Cache::commit` for the new entry:
+
+1. Decode the source entry's PNG bytes.
+2. Apply `flatten_annotations` to produce the new entry's RGBA.
+3. Re-encode to PNG via the cache's two-phase commit.
+4. Persist the in-progress scene to the source entry's
+   `revision.json` so a future reopen starts from the same point.
+5. Update the source entry's `metadata.json` via the existing
+   `Cache::update_metadata` path.
+6. Release the source entry's `Editor` lock.
+7. Walk the session back to `Idle` via `session.finish_revision()`.
+
+The new entry's `capture_id` and `shelf_id` are fresh UUIDs; the
+source entry's identity is preserved on disk. The source entry's
+PNG, metadata, and manifest are never touched by the commit path.
+
+The IPC body wraps every side effect in a closure so
+`session.finish_revision()` runs exactly once — mirroring the
+existing tracer-07 round-2 fix for the "wedged session" bug.
+
+### Session state machine
+
+Two new states are added to `SessionState`:
+
+- `Reopening` — the source entry is locked and the editor is
+  active. Transitions: `Idle -> Reopening` (via `open_revision`),
+  `Reopening -> RevisionCommitting` (via `commit_revision`),
+  `Reopening -> Idle` (via `cancel_revision`).
+- `RevisionCommitting` — the commit pipeline is in flight.
+  Transitions: `RevisionCommitting -> Cleanup -> Idle` (on
+  commit success), `RevisionCommitting -> Idle` (on commit failure).
+
+A second capture request is rejected with `InvalidSessionState`
+when the session is in `Reopening` or `RevisionCommitting`,
+matching the existing overlap guard.
+
+### IPC surface
+
+New IPC commands (registered in `src-tauri/src/lib.rs`):
+
+- `open_revision` — input is `OpenRevisionIntent { shelf_id }`,
+  output is `OpenRevisionResult { context: RevisionContext }`.
+  Acquires the `Editor` lock, reads the sidecar, and returns the
+  restored editor scene. Falls back to `FlatFallback` when the
+  sidecar is missing / unparseable / unsupported.
+- `update_revision` — input is `UpdateRevisionIntent { shelf_id,
+revision }`, output is `UpdateRevisionResult { revision }`.
+  Persists the in-progress editor scene to the source entry's
+  `revision.json` without committing. The frontend drives this
+  from a debounced handler on every annotation change.
+- `commit_revision` — input is `CommitRevisionIntent { shelf_id,
+annotations, badge_counter, active_tool, active_color,
+active_stroke, metadata, to_clipboard }`, output is
+  `CommitRevisionResult { outcome: CommitOutcome }`. The
+  `CommitOutcome` carries the **new** entry's `shelf_id`.
+- `cancel_revision` — input is `CancelRevisionIntent { shelf_id }`,
+  output is `CancelRevisionResult { cancelled, reason }`. The
+  `reason` is a stable diagnostic label: `"cancelled"` when the
+  `Editor` lock was released, `"no_active_revision"` when no
+  reopen session was active.
+
 ## ADRs
 
 - 0007 — Cache bounds + recovery (tracer-13)
 - 0008 — Text, blur, and Save As (tracer-05)
+- 0009 — Reopen / non-destructive revision metadata (tracer-10)

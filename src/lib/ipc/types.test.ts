@@ -453,3 +453,194 @@ describe("IPC type contract — hotkey bindings (tracer 14)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tracer-10: reopen / non-destructive revision IPC payloads.
+// ---------------------------------------------------------------------------
+
+describe("IPC type contract — revision (tracer-10)", () => {
+  it("OpenRevisionIntent serialises to camelCase", () => {
+    const intent: import("./types").OpenRevisionIntent = { shelfId: "shelf-1" };
+    const json = JSON.parse(JSON.stringify(intent));
+    expect(json.shelfId).toBe("shelf-1");
+  });
+
+  it("OpenRevisionResult wraps the context", () => {
+    const result: import("./types").OpenRevisionResult = {
+      context: {
+        shelfId: "shelf-1",
+        captureId: "cap-1",
+        pngPath: "/tmp/cap-1/capture.png",
+        revision: {
+          schemaVersion: 1,
+          sourceShelfId: "shelf-1",
+          sourceCaptureId: "cap-1",
+          crop: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
+          size: { width: 100, height: 100 },
+          annotations: [],
+          badgeCounter: 1,
+          activeTool: "select",
+          activeColor: "red",
+          activeStroke: "medium",
+          metadata: { title: "", note: "", tags: [] },
+        },
+        locks: ["shelf", "editor"],
+        loaderStatus: "full",
+      },
+    };
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.context.shelfId).toBe("shelf-1");
+    expect(json.context.revision.schemaVersion).toBe(1);
+    expect(json.context.locks).toEqual(["shelf", "editor"]);
+    expect(json.context.loaderStatus).toBe("full");
+  });
+
+  it("CommitRevisionIntent carries annotations + style + metadata", () => {
+    const intent: import("./types").CommitRevisionIntent = {
+      shelfId: "shelf-1",
+      annotations: [],
+      badgeCounter: 3,
+      activeTool: "arrow",
+      activeColor: "red",
+      activeStroke: "medium",
+      metadata: { title: "edited", note: "", tags: [] },
+      toClipboard: true,
+    };
+    const json = JSON.parse(JSON.stringify(intent));
+    expect(json.shelfId).toBe("shelf-1");
+    expect(json.badgeCounter).toBe(3);
+    expect(json.activeTool).toBe("arrow");
+    expect(json.toClipboard).toBe(true);
+  });
+
+  it("CommitRevisionResult wraps the new entry's outcome", () => {
+    const result: import("./types").CommitRevisionResult = {
+      outcome: {
+        captureId: "new-cap",
+        shelfId: "new-shelf",
+        pngPath: "/tmp/new.png",
+        pngBytes: 4096,
+        sizeBytes: 8192,
+        createdAtMs: 1_700_000_000_000,
+      },
+    };
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.outcome.captureId).toBe("new-cap");
+    expect(json.outcome.shelfId).toBe("new-shelf");
+  });
+
+  it("CancelRevisionIntent and CancelRevisionResult serialise", () => {
+    const intent: import("./types").CancelRevisionIntent = { shelfId: "shelf-1" };
+    const result: import("./types").CancelRevisionResult = {
+      cancelled: true,
+      reason: "cancelled",
+    };
+    expect(JSON.parse(JSON.stringify(intent)).shelfId).toBe("shelf-1");
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.cancelled).toBe(true);
+    expect(json.reason).toBe("cancelled");
+  });
+
+  it("UpdateRevisionIntent and UpdateRevisionResult serialise", () => {
+    const meta: import("./types").RevisionMetadata = {
+      schemaVersion: 1,
+      sourceShelfId: "shelf-1",
+      sourceCaptureId: "cap-1",
+      crop: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
+      size: { width: 100, height: 100 },
+      annotations: [],
+      badgeCounter: 1,
+      activeTool: "select",
+      activeColor: "red",
+      activeStroke: "medium",
+      metadata: { title: "", note: "", tags: [] },
+    };
+    const intent: import("./types").UpdateRevisionIntent = {
+      shelfId: "shelf-1",
+      revision: meta,
+    };
+    const result: import("./types").UpdateRevisionResult = { revision: meta };
+    const intentJson = JSON.parse(JSON.stringify(intent));
+    expect(intentJson.shelfId).toBe("shelf-1");
+    expect(intentJson.revision.schemaVersion).toBe(1);
+    const resultJson = JSON.parse(JSON.stringify(result));
+    expect(resultJson.revision.schemaVersion).toBe(1);
+  });
+
+  it("RevisionMetadata carries every annotation field", () => {
+    const meta: import("./types").RevisionMetadata = {
+      schemaVersion: 1,
+      sourceShelfId: "shelf-1",
+      sourceCaptureId: "cap-1",
+      crop: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
+      size: { width: 100, height: 100 },
+      annotations: [
+        {
+          id: 1,
+          geometry: { kind: "arrow", tail: { x: 0, y: 0 }, tip: { x: 50, y: 50 } },
+          color: "red",
+          stroke: "medium",
+          zOrder: 0,
+        },
+        {
+          id: 2,
+          geometry: {
+            kind: "rectangle",
+            origin: { x: 10, y: 10 },
+            size: { width: 20, height: 20 },
+          },
+          color: "blue",
+          stroke: "thin",
+          zOrder: 1,
+        },
+        {
+          id: 3,
+          geometry: { kind: "numbered_badge", center: { x: 80, y: 80 }, radius: 18 },
+          color: "yellow",
+          stroke: "thin",
+          zOrder: 2,
+          number: 1,
+        },
+        {
+          id: 4,
+          geometry: {
+            kind: "text",
+            origin: { x: 0, y: 0 },
+            size: { width: 50, height: 14 },
+            text: "label",
+          },
+          color: "white",
+          stroke: "thin",
+          zOrder: 3,
+        },
+        {
+          id: 5,
+          geometry: {
+            kind: "blur",
+            origin: { x: 0, y: 0 },
+            size: { width: 20, height: 20 },
+            radius: 2,
+          },
+          color: "white",
+          stroke: "medium",
+          zOrder: 4,
+        },
+      ],
+      badgeCounter: 4,
+      activeTool: "rectangle",
+      activeColor: "blue",
+      activeStroke: "thick",
+      metadata: { title: "x", note: "y", tags: ["a"] },
+    };
+    const json = JSON.parse(JSON.stringify(meta));
+    expect(json.annotations).toHaveLength(5);
+    expect(json.badgeCounter).toBe(4);
+    expect(json.activeTool).toBe("rectangle");
+    expect(json.metadata.tags).toEqual(["a"]);
+  });
+
+  it("RevisionLoaderStatus is a closed union", () => {
+    const statuses: import("./types").RevisionLoaderStatus[] = ["full", "flat_fallback"];
+    expect(statuses).toHaveLength(2);
+  });
+});

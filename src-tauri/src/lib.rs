@@ -537,6 +537,11 @@ pub fn run() {
             ipc::update_hotkey_bindings,
             ipc::get_hotkey_status,
             ipc::set_hotkey_paused,
+            // Tracer-10: reopen / non-destructive revision flow.
+            ipc::open_revision,
+            ipc::update_revision,
+            ipc::commit_revision,
+            ipc::cancel_revision,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PixelGrab")
