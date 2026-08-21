@@ -131,9 +131,26 @@ impl SessionOrchestrator {
         self.request_capture(request)
     }
 
-    /// Mark the overlay as visible to the user. Transitions to `Selecting`
-    /// and computes the capture-to-overlay latency on the stored diagnostics.
-    pub fn overlay_visible(&self) -> PlatformResult<()> {
+    /// Mark the overlay as mounted by the backend. Single seam for the
+    /// overlay reveal contract: walks `Ready -> Selecting` and stamps the
+    /// capture-to-overlay latency on the stored diagnostics. A no-op
+    /// from any other state — the overlay window can still be shown,
+    /// but the state machine is left alone so the orchestrator never
+    /// loses its place on a duplicate or out-of-order reveal call. See
+    /// ADR-0010 for the rationale.
+    ///
+    /// Returns `Ok(())` from the no-op branch (intentional, the overlay
+    /// window is already on screen) and propagates any `request_transition`
+    /// error from the Ready branch (a state-machine violation that the
+    /// caller should see).
+    pub fn overlay_mounted(&self) -> PlatformResult<()> {
+        if self.inner.lock().state != SessionState::Ready {
+            log::debug!(
+                "overlay_mounted: state is {:?}; skipping Ready->Selecting",
+                self.inner.lock().state
+            );
+            return Ok(());
+        }
         self.request_transition(SessionTransition {
             to: SessionState::Selecting,
             reason: SessionTransitionReason::OverlayShown,
@@ -144,12 +161,6 @@ impl SessionOrchestrator {
             inner.last_diagnostics = Some(diag.overlay_visible(overlay_at_ms));
         }
         Ok(())
-    }
-
-    /// Move the overlay into the selecting state (legacy alias for
-    /// `overlay_visible` - kept so the tracer-01 surface still compiles).
-    pub fn begin_selecting(&self) -> PlatformResult<()> {
-        self.overlay_visible()
     }
 
     /// Record the user's selection. Empty bounds cancel the session.
@@ -396,7 +407,7 @@ impl SessionOrchestrator {
     }
 
     /// Replace the stored diagnostics record. The IPC layer stamps the
-    /// overlay-visible timestamp onto this value via `overlay_visible`.
+    /// overlay-visible timestamp onto this value via `overlay_mounted`.
     pub fn store_diagnostics(&self, diagnostics: CaptureDiagnostics) {
         self.inner.lock().last_diagnostics = Some(diagnostics);
     }
@@ -535,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_visible_stamps_diagnostics() {
+    fn overlay_mounted_walks_ready_to_selecting_and_stamps_diagnostics() {
         let session = make_session();
         let capture_id = "abc".to_string();
         let bounds = PhysicalBounds::from_xywh(0, 0, 100, 100);
@@ -544,18 +555,92 @@ mod tests {
         session.store_diagnostics(diag);
         session.run_capture(&capture_request()).expect("capture");
         // Capture re-stores diagnostics in the IPC layer; simulate by
-        // storing again so the overlay_visible path has something to stamp.
+        // storing again so the overlay_mounted path has something to stamp.
         let diag =
             CaptureDiagnostics::started(&capture_id, "primary", bounds, 1_000).completed(1_010);
         session.store_diagnostics(diag);
-        // Now trigger the overlay.
-        session.overlay_visible().expect("overlay visible");
+        // Trigger the overlay.
+        session.overlay_mounted().expect("overlay mounted");
+        assert_eq!(session.current_state(), SessionState::Selecting);
         let stamped = session.last_diagnostics().expect("diagnostics");
         assert!(stamped.capture_to_overlay_ms.is_some());
         let latency = stamped.capture_to_overlay_ms.unwrap();
         assert!(latency >= 0, "latency must be non-negative");
         // Capture size sanity check.
         assert_eq!(stamped.bounds.size, PhysicalSize::new(100, 100),);
+    }
+
+    /// Issue #60: the overlay reveal contract is collapsed into one backend
+    /// seam (`overlay_mounted`). The helper is a no-op from any state other
+    /// than `Ready` so a duplicate or out-of-order reveal never fails the
+    /// pipeline — the overlay window stays visible while the orchestrator
+    /// keeps its place.
+    #[test]
+    fn overlay_mounted_is_noop_from_non_ready_states() {
+        let session = make_session();
+        // Idle: nothing to reveal over.
+        session.overlay_mounted().expect("idle is a no-op");
+        assert_eq!(session.current_state(), SessionState::Idle);
+        // Capturing: also a no-op (overlay window cannot transition
+        // while a capture is still in flight).
+        session
+            .request_transition(SessionTransition {
+                to: SessionState::Capturing,
+                reason: SessionTransitionReason::CaptureRequested,
+            })
+            .expect("to capturing");
+        session.overlay_mounted().expect("capturing is a no-op");
+        assert_eq!(session.current_state(), SessionState::Capturing);
+        // Walk to Ready -> Selecting (the legal edge) and ensure
+        // overlay_mounted is a no-op from Selecting.
+        session
+            .request_transition(SessionTransition {
+                to: SessionState::Ready,
+                reason: SessionTransitionReason::CaptureComplete,
+            })
+            .expect("to ready");
+        session
+            .request_transition(SessionTransition {
+                to: SessionState::Selecting,
+                reason: SessionTransitionReason::OverlayShown,
+            })
+            .expect("to selecting");
+        session.overlay_mounted().expect("selecting is a no-op");
+        assert_eq!(session.current_state(), SessionState::Selecting);
+        // Cleanup / Idle: also no-op.
+        session.finish().expect("finish");
+        session
+            .overlay_mounted()
+            .expect("idle-after-finish is a no-op");
+        assert_eq!(session.current_state(), SessionState::Idle);
+    }
+
+    /// Issue #60 acceptance: overlay_mounted() covers the regression PR #58
+    /// left behind. After a successful capture the helper must transition
+    /// to Selecting and leave the diagnostics latency stamped.
+    #[test]
+    fn overlay_mounted_after_capture_does_not_corrupt_state() {
+        let session = make_session();
+        let capture_id = "regression".to_string();
+        let bounds = PhysicalBounds::from_xywh(10, 20, 640, 480);
+        let diag =
+            CaptureDiagnostics::started(&capture_id, "primary", bounds, 1_000).completed(1_005);
+        session.store_diagnostics(diag);
+        session.run_capture(&capture_request()).expect("capture");
+        assert_eq!(session.current_state(), SessionState::Ready);
+        // No diagnostics field touched yet.
+        assert!(
+            session
+                .last_diagnostics()
+                .unwrap()
+                .capture_to_overlay_ms
+                .is_none(),
+            "fresh capture must not stamp the overlay latency yet",
+        );
+        session.overlay_mounted().expect("overlay mounted");
+        assert_eq!(session.current_state(), SessionState::Selecting);
+        let stamped = session.last_diagnostics().unwrap();
+        assert!(stamped.capture_to_overlay_ms.is_some());
     }
 
     #[test]

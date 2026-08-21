@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import {
     getSessionSnapshot,
-    requestOverlay,
     requestCommit,
     requestCancel,
     saveCaptureAs,
@@ -25,17 +24,11 @@
   const STAGE_HEIGHT = 1080;
 
   onMount(async () => {
-    // Advance the session from `ready` (set by the backend after
-    // the capture completes) to `selecting` so the commit pipeline
-    // (which requires `Selecting`) can accept the user's crop. The
-    // backend's `request_overlay` handler also stamps the
-    // `overlay_visible` timestamp onto the stored diagnostics
-    // record — the `(n/a)` placeholder the main window shows when
-    // this never fires is the user-visible signal that the overlay
-    // never reached the Selecting state.
-    await requestOverlay({
-      selection: { origin: { x: 0, y: 0 }, size: { width: 0, height: 0 } },
-    });
+    // Issue #60: the overlay reveal contract is collapsed into one
+    // backend seam (`show_over_virtual_desktop` → `overlay_mounted`),
+    // so the frontend never has to drive the `Ready -> Selecting`
+    // transition. We just read the snapshot the orchestrator already
+    // stamped.
     const response = await getSessionSnapshot();
     if (response.status === "ok" && response.data.lastCapture) {
       capture = response.data.lastCapture;

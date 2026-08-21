@@ -126,15 +126,6 @@ pub struct RequestCaptureIntent {
     pub intent: CaptureIntent,
 }
 
-/// Wire shape for `RequestOverlay` IPC - the overlay tells the Rust core
-/// what the user selected and asks for a commit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestOverlayIntent {
-    /// Physical-pixel selection. Empty bounds cancel the session.
-    pub selection: PhysicalBounds,
-}
-
 /// Wire shape for `RequestCommit` IPC - the frontend confirms the commit
 /// policy (clipboard, shelf, save-as) and the Rust core returns the
 /// `CommitOutcome`.
@@ -278,20 +269,6 @@ pub struct CaptureResponse {
     pub diagnostics: Option<CaptureDiagnostics>,
 }
 
-/// Wire shape for the `request_overlay` response. Includes the snapshot
-/// the UI uses to render and the diagnostics record (now with the
-/// capture-to-overlay latency populated).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestOverlayResult {
-    /// Updated session snapshot after the overlay has acknowledged its
-    /// selection.
-    pub snapshot: SessionSnapshot,
-    /// Diagnostics record with the overlay-visible timestamp stamped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostics: Option<CaptureDiagnostics>,
-}
-
 /// Wire shape for the `request_cancel` response. The `action` field is a
 /// stable string the frontend uses to drive the visual state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,17 +279,6 @@ pub struct CancelOutcome {
     pub action: String,
     /// Updated session snapshot after the cancel has been processed.
     pub snapshot: SessionSnapshot,
-}
-
-/// The overlay's view of the user's selection. Mirrors `RequestOverlayIntent`
-/// but is the *outcome* sent back to the core.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OverlaySelection {
-    /// Final physical crop.
-    pub crop: PhysicalBounds,
-    /// Whether the user confirmed the selection (vs cancelled).
-    pub confirmed: bool,
 }
 
 /// Wire shape for the `start_shelf_drag` IPC. The frontend assembles the

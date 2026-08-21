@@ -8,8 +8,7 @@ use pixelgrab_contracts::drag::{
 };
 use pixelgrab_contracts::ipc::{
     CaptureResolutionDto, CommitRequest, CommitResponse, IpcResponse, RequestCaptureIntent,
-    RequestCommitIntent, RequestOverlayIntent, SessionSnapshot, StartShelfDragIntent,
-    StartShelfDragResult,
+    RequestCommitIntent, SessionSnapshot, StartShelfDragIntent, StartShelfDragResult,
 };
 use pixelgrab_contracts::pin::{OpenPinRequest, PinCommand, PinSource, PinTransform, PinViewModel};
 use pixelgrab_contracts::session::SessionState;
@@ -86,16 +85,6 @@ fn session_snapshot_serialises_state() {
     let json = serde_json::to_string(&snapshot).expect("serialize");
     assert!(json.contains("\"state\":\"selecting\""));
     assert!(json.contains("\"width\":30"));
-}
-
-#[test]
-fn overlay_intent_carries_selection() {
-    let intent = RequestOverlayIntent {
-        selection: PhysicalBounds::from_xywh(0, 0, 100, 200),
-    };
-    let json = serde_json::to_string(&intent).expect("serialize");
-    assert!(json.contains("\"selection\""));
-    assert!(json.contains("\"width\":100"));
 }
 
 #[test]

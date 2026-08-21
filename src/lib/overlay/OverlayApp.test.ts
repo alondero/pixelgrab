@@ -1,11 +1,7 @@
-// Verify the overlay window's mount behaviour: it must advance the
-// session from `ready` to `selecting` by calling `requestOverlay` so
-// the commit pipeline (which requires `Selecting`) can accept the
-// user's crop. Without this call the session stays in `Ready` and
-// every subsequent capture request is rejected with
-// "cannot start capture: session is already Ready" — a regression
-// that surfaced when the user pressed the hotkey and got a silent
-// no-op, then tried the tray menu.
+// Verify the overlay window's mount behaviour. Issue #60 collapsed the
+// reveal contract into one backend seam (`show_over_virtual_desktop`
+// → `overlay_mounted`), so the frontend's only job on mount is to read
+// the snapshot — it never has to drive a `Ready -> Selecting` transition.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor } from "@testing-library/svelte";
@@ -41,27 +37,14 @@ describe("OverlayApp", () => {
     requestCommit.mockReset();
     requestCancel.mockReset();
     saveCaptureAs.mockReset();
-    // The backend's `request_overlay` handler advances the session
-    // from `ready` to `selecting` and stores the reported selection
-    // bounds. The mock mirrors that contract.
-    requestOverlay.mockResolvedValue({
-      status: "ok",
-      data: {
-        snapshot: {
-          state: "selecting",
-          lastCapture: undefined,
-          selection: {
-            origin: { x: 0, y: 0 },
-            size: { width: 0, height: 0 },
-          },
-        },
-        diagnostics: null,
-      },
-    });
+    // The backend's `show_over_virtual_desktop` already walks
+    // `Ready -> Selecting` before the overlay webview mounts, so the
+    // session snapshot the frontend sees on mount is already in
+    // `Selecting`.
     getSessionSnapshot.mockResolvedValue({
       status: "ok",
       data: {
-        state: "ready",
+        state: "selecting",
         lastCapture: {
           format: "virtual_desktop",
           bounds: {
@@ -77,16 +60,14 @@ describe("OverlayApp", () => {
     });
   });
 
-  it("calls requestOverlay on mount so the session advances to selecting", async () => {
+  it("reads the session snapshot on mount without driving the state machine", async () => {
     render(OverlayApp);
     await waitFor(() => {
-      expect(requestOverlay).toHaveBeenCalledTimes(1);
+      expect(getSessionSnapshot).toHaveBeenCalled();
     });
-    // The selection passed to requestOverlay must have zero size —
-    // the overlay reports the empty selection on mount and the user
-    // updates it once they drag a region.
-    const [intent] = requestOverlay.mock.calls[0];
-    expect(intent.selection.size.width).toBe(0);
-    expect(intent.selection.size.height).toBe(0);
+    // Issue #60 acceptance criterion: the overlay must not call
+    // `requestOverlay`. The backend's `show_over_virtual_desktop`
+    // seam advances the session before the webview mounts.
+    expect(requestOverlay).not.toHaveBeenCalled();
   });
 });

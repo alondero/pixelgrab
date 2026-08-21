@@ -23,8 +23,6 @@ import type {
   OpenRevisionResult,
   RequestCaptureIntent,
   RequestCommitIntent,
-  RequestOverlayIntent,
-  RequestOverlayResult,
   SaveCaptureAsRequest,
   SaveCaptureAsResponse,
   SaveShelfCardAsRequest,
@@ -47,12 +45,6 @@ export async function requestCapture(
   intent: RequestCaptureIntent,
 ): Promise<IpcResponse<CaptureResponse>> {
   return invoke<IpcResponse<CaptureResponse>>("request_capture", { payload: intent });
-}
-
-export async function requestOverlay(
-  payload: RequestOverlayIntent,
-): Promise<IpcResponse<RequestOverlayResult>> {
-  return invoke<IpcResponse<RequestOverlayResult>>("request_overlay", { payload });
 }
 
 export async function requestCommit(

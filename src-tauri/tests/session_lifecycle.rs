@@ -26,7 +26,7 @@ fn capture_session_walks_full_lifecycle() {
     assert_eq!(capture.format, CaptureFormat::VirtualDesktop);
     assert_eq!(session.current_state(), SessionState::Ready);
 
-    session.begin_selecting().expect("begin_selecting");
+    session.overlay_mounted().expect("overlay mounted");
     assert_eq!(session.current_state(), SessionState::Selecting);
 
     let bounds = PhysicalBounds::from_xywh(100, 100, 800, 600);

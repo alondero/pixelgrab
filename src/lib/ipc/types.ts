@@ -71,11 +71,6 @@ export interface SessionSnapshot {
   selection?: PhysicalBounds;
 }
 
-export interface RequestOverlayResult {
-  snapshot: SessionSnapshot;
-  diagnostics?: CaptureDiagnostics;
-}
-
 export interface CancelOutcome {
   action: "selection_cleared" | "session_cancelled" | "noop";
   snapshot: SessionSnapshot;
@@ -272,10 +267,6 @@ export type SecondaryLaunchIntent =
 
 export interface RequestCaptureIntent {
   intent: "region" | "full_screen";
-}
-
-export interface RequestOverlayIntent {
-  selection: PhysicalBounds;
 }
 
 export interface RequestCommitIntent {

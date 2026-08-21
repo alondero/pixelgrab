@@ -13,8 +13,6 @@ import type {
   PhysicalBounds,
   RequestCaptureIntent,
   RequestCommitIntent,
-  RequestOverlayIntent,
-  RequestOverlayResult,
   SessionSnapshot,
   SessionState,
   ShelfPreferencesDto,
@@ -89,17 +87,10 @@ export async function mockRequestCapture(
     monitorId: "virtual-desktop",
     bounds,
   };
-  sessionState.value = "ready";
-  return ok({ capture, diagnostics: lastDiagnostics });
-}
-
-export async function mockRequestOverlay(
-  payload: RequestOverlayIntent,
-): Promise<IpcResponse<RequestOverlayResult>> {
-  if (sessionState.value !== "ready" && sessionState.value !== "selecting") {
-    return err("overlay not ready");
-  }
-  selection = payload.selection;
+  // Issue #60: the overlay reveal contract is collapsed into one backend
+  // seam. The mock mirrors that shape — a successful capture walks the
+  // session from `Idle` to `Selecting` in a single call, so the frontend
+  // never has to drive a separate overlay IPC to land on `Selecting`.
   sessionState.value = "selecting";
   if (lastDiagnostics) {
     lastDiagnostics = {
@@ -108,20 +99,7 @@ export async function mockRequestOverlay(
       captureToOverlayMs: Date.now() - lastDiagnostics.captureCompletedAtMs,
     };
   }
-  const snapshot: SessionSnapshot = {
-    state: sessionState.value,
-    lastCapture: lastCapture
-      ? {
-          format: "virtual_desktop",
-          bounds: lastCapture.bounds,
-          assetUrl: `data:image/png;base64,${syntheticPngBase64("region")}`,
-          captureId: lastCapture.captureId,
-          capturedAtMs: Date.now(),
-        }
-      : undefined,
-    selection,
-  };
-  return ok({ snapshot, diagnostics: lastDiagnostics });
+  return ok({ capture, diagnostics: lastDiagnostics });
 }
 
 export async function mockRequestCommit(

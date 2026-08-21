@@ -1,5 +1,8 @@
 // Synthetic end-to-end test that drives the frontend mock through the
-// tray-intent -> IPC -> overlay -> commit flow without a Tauri runtime.
+// tray-intent -> IPC -> commit flow without a Tauri runtime. Issue #60
+// collapsed the overlay reveal contract into one backend seam, so a
+// successful capture lands in `Selecting` directly — there is no
+// separate overlay IPC to call.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
@@ -7,7 +10,6 @@ import {
   mockRequestCancel,
   mockRequestCapture,
   mockRequestCommit,
-  mockRequestOverlay,
   mockSessionState,
 } from "./shell.svelte";
 
@@ -16,7 +18,7 @@ describe("synthetic capture end-to-end", () => {
     __resetMock();
   });
 
-  it("walks idle -> capturing -> ready -> selecting -> idle", async () => {
+  it("walks idle -> capturing -> selecting -> idle via the single reveal seam", async () => {
     expect(mockSessionState()).toBe("idle");
 
     const capture = await mockRequestCapture({ intent: "region" });
@@ -24,15 +26,9 @@ describe("synthetic capture end-to-end", () => {
     if (capture.status === "ok") {
       expect(capture.data.capture.captureId).toBeTruthy();
       expect(capture.data.diagnostics?.captureId).toBe(capture.data.capture.captureId);
-    }
-    expect(mockSessionState()).toBe("ready");
-
-    const overlay = await mockRequestOverlay({
-      selection: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
-    });
-    expect(overlay.status).toBe("ok");
-    if (overlay.status === "ok") {
-      expect(overlay.data.diagnostics?.captureToOverlayMs).toBeTypeOf("number");
+      // Issue #60: the capture response now carries the overlay latency
+      // because the overlay reveal contract is collapsed into one seam.
+      expect(capture.data.diagnostics?.captureToOverlayMs).toBeTypeOf("number");
     }
     expect(mockSessionState()).toBe("selecting");
 
@@ -66,24 +62,14 @@ describe("synthetic capture end-to-end", () => {
     expect(commit.status).toBe("err");
   });
 
-  it("Escape clears a selection then cancels the session", async () => {
+  it("Escape cancels a session in progress", async () => {
     await mockRequestCapture({ intent: "region" });
-    await mockRequestOverlay({
-      selection: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
-    });
     expect(mockSessionState()).toBe("selecting");
 
-    const first = await mockRequestCancel();
-    expect(first.status).toBe("ok");
-    if (first.status === "ok") {
-      expect(first.data.action).toBe("selection_cleared");
-    }
-    expect(mockSessionState()).toBe("selecting");
-
-    const second = await mockRequestCancel();
-    expect(second.status).toBe("ok");
-    if (second.status === "ok") {
-      expect(second.data.action).toBe("session_cancelled");
+    const result = await mockRequestCancel();
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.data.action).toBe("session_cancelled");
     }
     expect(mockSessionState()).toBe("idle");
   });
