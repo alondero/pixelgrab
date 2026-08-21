@@ -5,6 +5,15 @@
 // error feedback for Copy and Save As is provided by an aria-live
 // region inside the ShelfQueue component, fed by a `feedback`
 // reactive store.
+//
+// Tracer 15 (closes #34): on startup the shelf is **event-only**,
+// so a restart while the cache already holds entries renders an
+// empty queue until the next commit fires an event. We now seed
+// `currentSnapshot` from `get_shelf_queue_snapshot` during init
+// and let subsequent events overwrite it. The rehydration runs as
+// a fire-and-forget async so the mount remains synchronous; the
+// promise is intentionally not awaited on the module path so an
+// IPC failure cannot block the shelf window from appearing.
 
 import { mount } from "svelte";
 import { listen } from "@tauri-apps/api/event";
@@ -12,6 +21,7 @@ import ShelfQueue from "./lib/shelf/ShelfQueue.svelte";
 import {
   copyShelfCard,
   dismissCacheEntry,
+  getShelfQueueSnapshot,
   hoverShelfCard,
   saveShelfCardAs,
   tickShelfQueue,
@@ -78,6 +88,27 @@ mount(ShelfQueue, {
     },
   },
 });
+
+// Rehydrate the queue from the authoritative server state on
+// startup so a restart while the cache already holds entries
+// renders cards immediately, instead of waiting for the next
+// `pixelgrab://shelf-queue-updated` event. The fire-and-forget
+// pattern keeps the mount synchronous; a failing IPC is logged
+// (the shelf window stays usable — the live event still fires on
+// every subsequent update) but never blocks the window from
+// appearing.
+void (async () => {
+  const response = await getShelfQueueSnapshot();
+  if (response.status === "ok" && response.data) {
+    currentSnapshot = response.data;
+  } else if (response.status === "err") {
+    // Tracer-15 review (Standards axis): the shelf must remain
+    // visible even when rehydration fails, but the failure should
+    // be observable so a regression in the IPC layer shows up in
+    // devtools instead of an empty window with no diagnostic.
+    console.warn("shelf rehydrate failed", response.error);
+  }
+})();
 
 listen<ShelfQueueSnapshot>("pixelgrab://shelf-queue-updated", (event) => {
   currentSnapshot = event.payload;

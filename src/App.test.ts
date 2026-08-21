@@ -59,4 +59,19 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: /cancel/i }));
     expect(screen.getByTestId("session-state")).toHaveTextContent("idle");
   });
+
+  // Tracer 15 closes the documentation-vs-implementation gap from
+  // `docs/ACCESSIBILITY.md`: every <button> in the main window
+  // must have either visible text content or an aria-label so a
+  // screen reader can announce a name for it.
+  it("every button has either visible text or an aria-label", () => {
+    const { container } = render(App);
+    const buttons = container.querySelectorAll("button");
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const button of buttons) {
+      const text = (button.textContent ?? "").trim();
+      const ariaLabel = button.getAttribute("aria-label")?.trim() ?? "";
+      expect(text.length + ariaLabel.length).toBeGreaterThan(0);
+    }
+  });
 });
