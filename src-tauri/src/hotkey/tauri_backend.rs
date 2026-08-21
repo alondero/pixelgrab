@@ -194,6 +194,15 @@ impl GlobalShortcutBackend for TauriGlobalShortcutBackend {
         // matching intent on the existing event channel.
         let state = self.state.clone();
         let handler = move |_app: &AppHandle<Wry>, shortcut: &Shortcut, event: ShortcutEvent| {
+            // Use eprintln! (not log::info!) — log strings get
+            // stripped by release-mode LTO when the closure is
+            // behind a `Box<dyn Fn>`. eprintln! keeps the format
+            // string in the binary so the diagnostic survives.
+            eprintln!(
+                "[HOTKEY] handler fired: id={} state={:?}",
+                shortcut.id(),
+                event.state()
+            );
             if event.state() != ShortcutState::Pressed {
                 // Ignore the release event; the press is what
                 // the user perceives as "the shortcut fired".
@@ -206,7 +215,10 @@ impl GlobalShortcutBackend for TauriGlobalShortcutBackend {
                 (action, handle)
             };
             if let (Some(action), Some(handle)) = (action, handle) {
+                eprintln!("[HOTKEY] resolving to action {:?}", action);
                 emit_secondary_launch(&handle, action);
+            } else {
+                eprintln!("[HOTKEY] no action/handle for id={}", shortcut.id());
             }
         };
 

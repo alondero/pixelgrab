@@ -334,8 +334,16 @@ impl HotkeyRegistry {
                 continue;
             };
             match self.inner.backend.register(*action, raw) {
-                Ok(()) => registered_now.push(*action),
+                Ok(()) => {
+                    log::info!("hotkey: registered {action:?} -> {raw}");
+                    registered_now.push(*action);
+                }
                 Err(err) => {
+                    log::warn!(
+                        "hotkey: registration FAILED for {action:?} -> {raw}: kind={:?} msg={}",
+                        err.kind,
+                        err
+                    );
                     // Rollback the bindings we managed to register
                     // so a half-applied state cannot keep OS handles
                     // out of sync with the configured bindings.
@@ -354,6 +362,12 @@ impl HotkeyRegistry {
                 }
             }
         }
+        log::info!(
+            "hotkey: all {} bindings registered; active={} paused={}",
+            registered_now.len(),
+            status.active,
+            status.paused
+        );
         status.active = true;
         status.paused = false;
         status.last_error = None;

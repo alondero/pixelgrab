@@ -1412,6 +1412,18 @@
     };
   });
 
+  // Keep the Konva stage and the frozen-frame image in sync with the
+  // host's stage dimensions — the overlay refits the stage whenever
+  // the window resizes or a new capture with different bounds arrives.
+  $effect(() => {
+    void stageWidth;
+    void stageHeight;
+    if (!stage) return;
+    stage.size({ width: stageWidth, height: stageHeight });
+    imageNode?.size({ width: stageWidth, height: stageHeight });
+    stage.batchDraw();
+  });
+
   // Refresh the annotation + selection chrome whenever the store
   // changes (after a draw, undo, batch style, etc.).
   $effect(() => {

@@ -21,7 +21,8 @@ use pixelgrab_contracts::{
     PlatformResult,
 };
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl,
+    WebviewWindowBuilder,
 };
 
 use crate::session::SessionOrchestrator;
@@ -119,6 +120,28 @@ pub fn show_over_virtual_desktop<R: Runtime>(
         )
     })?;
     window.show().map_err(overlay_err)?;
+    // The overlay's keyboard shortcuts (Enter / Esc) only work when
+    // the window actually owns keyboard focus; a borderless window
+    // shown via `show()` does not steal focus by itself.
+    let _ = window.set_focus();
+    // The overlay window's WebView is created eagerly by
+    // `preallocate` (so its onMount may fire while the window is
+    // still hidden, BEFORE any capture exists). Pushing the freeze
+    // frame through the event payload races the frontend listener
+    // (a cold WebView2 start can register listeners late) and ships
+    // a multi-megabyte base64 data URL through the IPC bridge.
+    // Instead, emit a lightweight reveal *ping*; the overlay pulls
+    // the full capture via `get_session_snapshot`, which cannot
+    // race — the snapshot is only read after the ping arrives.
+    if session.last_capture_dto().is_some() {
+        log::info!("show_over_virtual_desktop: capture present, emitting reveal ping");
+    } else {
+        log::warn!("show_over_virtual_desktop: no capture in session at reveal time");
+    }
+    match app.emit_to("overlay", "pixelgrab://overlay-revealed", ()) {
+        Ok(()) => log::info!("show_over_virtual_desktop: reveal ping emitted"),
+        Err(err) => log::warn!("show_over_virtual_desktop: reveal ping failed: {err}"),
+    }
     // The overlay window is already on screen — a state-machine
     // rejection here would mean an in-flight cancel raced the
     // transition, which is observable in logs but not fatal. The
