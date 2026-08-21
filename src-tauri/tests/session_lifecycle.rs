@@ -81,3 +81,46 @@ fn snapshot_reflects_capture_resolution() {
     assert!(snapshot.last_capture.is_some());
     assert!(snapshot.selection.is_none());
 }
+
+/// Regression: when a previous capture left the session stuck in
+/// `Ready` (e.g. the overlay window never reached `Selecting`
+/// because the WebView failed to mount), the user's next hotkey
+/// press was rejected with "session is already Ready". The
+/// `request_capture` IPC now resets a stuck `Ready` state back to
+/// `Idle` before proceeding, so the retry can complete. This test
+/// pins the orchestrator half of that contract: a `reset()` call
+/// from `Ready` must clear the last-capture record so the new
+/// capture starts with a clean slate.
+#[test]
+fn reset_from_ready_clears_stale_capture_record() {
+    let platform: Arc<dyn PixelGrabPlatform> = Arc::new(SyntheticPlatform::new());
+    let session = SessionOrchestrator::new(platform);
+
+    let request = CaptureRequest {
+        format: CaptureFormat::VirtualDesktop,
+        monitor_id: None,
+        region: None,
+    };
+    session.run_capture(&request).expect("first capture");
+    assert_eq!(session.current_state(), SessionState::Ready);
+    assert!(session.last_capture().is_some());
+
+    // Simulate the defensive recovery path the IPC layer uses
+    // when a previous capture left the session stuck.
+    session.reset();
+    assert_eq!(session.current_state(), SessionState::Idle);
+    assert!(
+        session.last_capture().is_none(),
+        "reset must clear the stale last-capture record",
+    );
+
+    // The retry now succeeds; the session walks back to Ready
+    // with a fresh capture id.
+    let second = session.run_capture(&request).expect("retry capture");
+    assert_eq!(session.current_state(), SessionState::Ready);
+    assert!(session.last_capture().is_some());
+    assert_eq!(
+        session.last_capture().unwrap().capture_id,
+        second.capture_id
+    );
+}

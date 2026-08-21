@@ -136,6 +136,23 @@ pub fn request_capture(
             return IpcResponse::from_result(Err(err));
         }
     };
+    // Defensive recovery: if a previous capture left the session
+    // stuck in `Ready` (e.g. the overlay window never reached the
+    // `Selecting` state because the WebView failed to mount), the
+    // user's next attempt would be rejected with "session is
+    // already Ready". Force the orchestrator back to `Idle` so the
+    // retry can proceed. The previous capture was never committed
+    // to the shelf, so it is safe to drop. The `Ready` state is
+    // the only one we recover from here: `Capturing` /
+    // `Selecting` / `Committing` / `Cleanup` all imply an active
+    // pipeline that we must not interrupt.
+    if matches!(
+        app.session().current_state(),
+        pixelgrab_contracts::session::SessionState::Ready
+    ) {
+        log::info!("request_capture: recovering from stuck Ready state");
+        app.session().reset();
+    }
     let started_at = now_ms();
     let result = app.session().request_capture(&request);
     let capture = match result {
@@ -153,10 +170,13 @@ pub fn request_capture(
             return IpcResponse::from_result(Err(err));
         }
     };
-    // Position the overlay over the captured bounds. The tray menu
-    // doesn't open the overlay directly; the frontend asks for it via
-    // `request_overlay` after the user has acknowledged the freeze frame.
-    // We still position the window here so the next reveal is instantaneous.
+    // Position the overlay over the captured bounds, then show it.
+    // The overlay is pre-allocated during setup and starts hidden;
+    // without the explicit `show` call the user would see nothing
+    // after a capture and the session would stay in `Ready`
+    // forever. The frontend advances the state from `Ready` to
+    // `Selecting` via `request_overlay` on mount; this is the
+    // matching backend half that makes the freeze frame visible.
     if let Ok(layout) = app.platform().monitor_layout() {
         if let Err(err) = crate::overlay::position_over_bounds(&handle, &capture.bounds) {
             log::warn!("overlay positioning failed: {err}");
@@ -166,6 +186,9 @@ pub fn request_capture(
             if let Err(err) = crate::overlay::position_over_virtual_desktop(&handle, &layout) {
                 log::warn!("overlay virtual-desktop positioning failed: {err}");
             }
+        }
+        if let Err(err) = crate::overlay::show_over_virtual_desktop(&handle, &layout) {
+            log::warn!("overlay show failed: {err}");
         }
     }
     let monitor_id = monitor_id_for(&capture);
