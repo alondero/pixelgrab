@@ -93,13 +93,20 @@ mount(ShelfQueue, {
 // startup so a restart while the cache already holds entries
 // renders cards immediately, instead of waiting for the next
 // `pixelgrab://shelf-queue-updated` event. The fire-and-forget
-// pattern keeps the mount synchronous; a failing IPC will log
-// through the existing diagnostics surface but never block the
-// shelf window from appearing.
+// pattern keeps the mount synchronous; a failing IPC is logged
+// (the shelf window stays usable — the live event still fires on
+// every subsequent update) but never blocks the window from
+// appearing.
 void (async () => {
   const response = await getShelfQueueSnapshot();
   if (response.status === "ok" && response.data) {
     currentSnapshot = response.data;
+  } else if (response.status === "err") {
+    // Tracer-15 review (Standards axis): the shelf must remain
+    // visible even when rehydration fails, but the failure should
+    // be observable so a regression in the IPC layer shows up in
+    // devtools instead of an empty window with no diagnostic.
+    console.warn("shelf rehydrate failed", response.error);
   }
 })();
 

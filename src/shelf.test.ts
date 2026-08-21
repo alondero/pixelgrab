@@ -12,26 +12,25 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mocks must be declared before the import under test.
+// Mocks must be declared before the import under test. The
+// bootstrap only touches `getShelfQueueSnapshot` and the
+// `shelf-queue-updated` event, so we mock exactly those surfaces
+// (and a no-op for the other IPC commands the shelf module
+// imports) — keeping the test surface as small as possible so
+// future additions to `$lib/ipc/commands` don't require mock
+// edits here.
 const mockGetShelfQueueSnapshot = vi.fn();
-const mockCopyShelfCard = vi.fn();
-const mockSaveShelfCardAs = vi.fn();
-const mockDismissCacheEntry = vi.fn();
-const mockHoverShelfCard = vi.fn();
-const mockUnhoverShelfCard = vi.fn();
-const mockTickShelfQueue = vi.fn();
+const mockListen = vi.fn();
 
 vi.mock("$lib/ipc/commands", () => ({
   getShelfQueueSnapshot: mockGetShelfQueueSnapshot,
-  copyShelfCard: mockCopyShelfCard,
-  saveShelfCardAs: mockSaveShelfCardAs,
-  dismissCacheEntry: mockDismissCacheEntry,
-  hoverShelfCard: mockHoverShelfCard,
-  unhoverShelfCard: mockUnhoverShelfCard,
-  tickShelfQueue: mockTickShelfQueue,
+  copyShelfCard: vi.fn(),
+  saveShelfCardAs: vi.fn(),
+  dismissCacheEntry: vi.fn(),
+  hoverShelfCard: vi.fn(),
+  unhoverShelfCard: vi.fn(),
+  tickShelfQueue: vi.fn(),
 }));
-
-const mockListen = vi.fn();
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mockListen,
