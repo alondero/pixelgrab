@@ -689,11 +689,12 @@ pub fn test_app() -> PixelGrabApp {
 /// fallback for non-Windows builds and for CI runs with the `synthetic`
 /// feature enabled.
 fn default_platform() -> Arc<dyn platform::PixelGrabPlatform> {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "synthetic"))]
     {
-        if cfg!(feature = "synthetic") {
-            return Arc::new(platform::synthetic::SyntheticPlatform::new());
-        }
+        return Arc::new(platform::synthetic::SyntheticPlatform::new());
+    }
+    #[cfg(all(target_os = "windows", not(feature = "synthetic")))]
+    {
         return Arc::new(platform::windows::WindowsPlatform::new());
     }
     #[cfg(not(target_os = "windows"))]
