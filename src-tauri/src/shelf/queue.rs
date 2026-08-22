@@ -45,9 +45,11 @@ struct QueueEntry {
 
 #[derive(Debug)]
 struct QueueInner {
-    /// Cards ordered newest-first. The first `MAX_VISIBLE_CARDS` are
-    /// "visible"; the rest are overflow.
+    /// Cards ordered newest-first. The first `visible_limit` are visible;
+    /// the rest are overflow.
     cards: Vec<QueueEntry>,
+    /// User-configured number of cards in the main row.
+    visible_limit: usize,
     /// Lookup index from shelf id to the position in `cards`. Maintained
     /// alongside `cards` so hover/unhover/dismiss are O(1) instead of
     /// scanning the list. The vector is small (≤ ~10 cards in
@@ -62,7 +64,7 @@ struct QueueInner {
 
 impl QueueInner {
     fn snapshot(&self, now_ms: i64) -> ShelfQueueSnapshot {
-        let mut cards = Vec::with_capacity(self.cards.len().min(MAX_VISIBLE_CARDS));
+        let mut cards = Vec::with_capacity(self.cards.len().min(self.visible_limit));
         let mut overflow = Vec::new();
         for (idx, entry) in self.cards.iter().enumerate() {
             let card = ShelfQueueCard {
@@ -75,7 +77,7 @@ impl QueueInner {
                 metadata: entry.entry.metadata.clone(),
                 timer: entry.timer.clone(),
             };
-            if idx < MAX_VISIBLE_CARDS {
+            if idx < self.visible_limit {
                 cards.push(card);
             } else {
                 overflow.push(card);
@@ -138,6 +140,7 @@ impl ShelfQueueEngine {
         Self {
             inner: Arc::new(Mutex::new(QueueInner {
                 cards: Vec::new(),
+                visible_limit: MAX_VISIBLE_CARDS,
                 index: HashMap::new(),
                 last_clock_ms: 0,
             })),
@@ -162,6 +165,15 @@ impl ShelfQueueEngine {
     /// existing cards).
     pub fn apply_timer_config(&self, config: ShelfTimerConfig) {
         *self.config.lock() = config;
+    }
+
+    /// Apply the persisted maximum number of cards in the main row. Existing
+    /// entries are repartitioned on the next snapshot without being removed.
+    pub fn apply_visible_card_count(&self, count: u32) {
+        self.inner.lock().visible_limit = (count as usize).clamp(
+            pixelgrab_contracts::shelf_preferences::MIN_VISIBLE_CARDS as usize,
+            pixelgrab_contracts::shelf_preferences::MAX_VISIBLE_CARDS as usize,
+        );
     }
 
     /// Number of cards currently in the queue (visible + overflow).
@@ -382,6 +394,18 @@ mod tests {
         assert_eq!(snap.overflow.len(), 1);
         assert_eq!(snap.cards[0].shelf_id, "e");
         assert_eq!(snap.overflow[0].shelf_id, "a");
+    }
+
+    #[test]
+    fn visible_card_preference_repartitions_existing_queue() {
+        let q = ShelfQueueEngine::default();
+        for id in ["a", "b", "c", "d"] {
+            q.add(entry(id, &format!("cap-{id}")), 0);
+        }
+        q.apply_visible_card_count(2);
+        let snapshot = q.snapshot(1);
+        assert_eq!(snapshot.cards.len(), 2);
+        assert_eq!(snapshot.overflow.len(), 2);
     }
 
     #[test]

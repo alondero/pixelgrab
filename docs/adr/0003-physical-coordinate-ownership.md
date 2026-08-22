@@ -3,7 +3,9 @@
 ## Status
 
 Accepted (tracer-01). Extended in tracer-02 with the four conversion boundaries
-introduced by the real Windows capture pipeline.
+introduced by the real Windows capture pipeline. Clarified in the 2026-08-22
+v1 hardening pass to distinguish desktop-physical coordinates (which may have
+negative origins) from capture-buffer coordinates.
 
 ## Context
 
@@ -11,8 +13,9 @@ PixelGrab deals with multiple coordinate systems:
 
 - **Client coordinates** — coordinates relative to the WebView's CSS
   origin. Used by Konva and the pointer event system.
-- **Physical coordinates** — positions in actual desktop pixels. Always
-  non-negative. The canonical wire format.
+- **Physical coordinates** — positions in actual desktop pixels. Desktop
+  positions may be negative when a monitor is left of or above the primary.
+  The canonical wire format.
 - **Virtual desktop coordinates** — the union of every monitor's
   framebuffer, including negative origins.
 - **Capture buffer coordinates** — physical coordinates relative to the
@@ -35,27 +38,31 @@ core uses the same physical bounds to:
 - Compute the export dimensions.
 - Drive the cross-monitor logic.
 
-Conversions only happen at the Rust / frontend boundary:
+Rust owns the conversion formula, rounding policy, validation, and final crop.
+The frontend applies a direct mirror of the client-to-physical formula so its
+interactive annotation entities and selection reports use the canonical wire
+shape. The Rust boundary then validates and projects those values into the
+capture buffer; frontend values are never trusted as buffer offsets.
 
-| From                | To          | Where                        |
-| ------------------- | ----------- | ---------------------------- |
-| Client (CSS pixels) | Physical    | Rust core, on overlay commit |
-| Physical            | Capture buf | Rust core, on commit flatten |
-| Capture buf         | Export      | Rust core, on commit flatten |
-| Capture buf         | Physical    | Rust core, when cropping     |
+| From                | To          | Where                                  |
+| ------------------- | ----------- | -------------------------------------- |
+| Client (CSS pixels) | Physical    | Frontend, using Rust-defined transform |
+| Physical            | Capture buf | Rust core, on commit flatten           |
+| Capture buf         | Export      | Rust core, on commit flatten           |
+| Capture buf         | Physical    | Rust core, when cropping               |
 
-The frontend never infers a physical coordinate from a CSS coordinate.
-Every selection report is in physical coordinates, and the overlay
-recomputes the on-screen crop from the physical bounds it received.
+The frontend never infers monitor topology or capture-buffer offsets. Every
+selection report is in physical coordinates, and the overlay recomputes the
+on-screen crop from those physical bounds.
 
 ### Conversion boundaries (tracer-02)
 
 1. **Client → Physical (`client_to_physical`).** The overlay drags a
-   rectangle in CSS pixels; on commit, the Rust core converts to
-   physical pixels using `capture_bounds.size / stage_size` as the
-   scale factor and `capture_bounds.origin` as the translation. Both
-   axes use `round-half-away-from-zero` so a click that lands on a
-   half-pixel rounds consistently.
+   rectangle in CSS pixels and applies the Rust-defined
+   `capture_bounds.size / stage_size` scale plus `capture_bounds.origin`
+   translation. The Rust core owns the canonical helper and repeats the
+   validation/projection before reading pixels. Both axes use
+   round-half-away-from-zero semantics.
 2. **Physical → Capture buffer (`physical_to_capture_buffer`).** The
    commit pipeline translates the physical crop into the frozen
    framebuffer's local coordinate space by subtracting the capture
@@ -105,9 +112,9 @@ conditions (NaN, infinity, exact half, overflow).
 
 ## Alternatives
 
-- **Frontend owns physical coordinates.** Rejected. The frontend does
-  not know the monitor layout; it would have to ask the Rust core for
-  every transform.
+- **Frontend owns monitor/DPI topology.** Rejected. The frontend receives
+  captured physical bounds and stage dimensions; it does not discover monitor
+  layout or derive per-monitor scale factors.
 - **Single global scale factor.** Rejected. Per-monitor DPI is real
   and varies between monitors on the same machine.
 - **WebView client coordinates are physical.** Rejected. The WebView

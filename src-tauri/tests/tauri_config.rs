@@ -60,3 +60,27 @@ fn tauri_config_declares_no_plugin_entries() {
         );
     }
 }
+
+/// The preallocated overlay must load the overlay entrypoint rather than the
+/// default main document. Without this URL the hidden configured window wins
+/// over `overlay::preallocate`, and the first capture reveals the wrong page.
+#[test]
+fn tauri_config_points_overlay_at_overlay_entrypoint() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config_path = manifest_dir.join("tauri.conf.json");
+    let raw = std::fs::read_to_string(config_path).expect("read tauri config");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("valid tauri config");
+    let windows = value
+        .get("app")
+        .and_then(|app| app.get("windows"))
+        .and_then(serde_json::Value::as_array)
+        .expect("app.windows array");
+    let overlay = windows
+        .iter()
+        .find(|window| window.get("label").and_then(serde_json::Value::as_str) == Some("overlay"))
+        .expect("overlay window");
+    assert_eq!(
+        overlay.get("url").and_then(serde_json::Value::as_str),
+        Some("overlay.html")
+    );
+}

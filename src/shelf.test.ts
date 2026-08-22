@@ -20,10 +20,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // future additions to `$lib/ipc/commands` don't require mock
 // edits here.
 const mockGetShelfQueueSnapshot = vi.fn();
+const mockGetShelfPreferences = vi.fn();
 const mockListen = vi.fn();
 
 vi.mock("$lib/ipc/commands", () => ({
   getShelfQueueSnapshot: mockGetShelfQueueSnapshot,
+  getShelfPreferences: mockGetShelfPreferences,
   copyShelfCard: vi.fn(),
   saveShelfCardAs: vi.fn(),
   dismissCacheEntry: vi.fn(),
@@ -64,6 +66,10 @@ describe("shelf window bootstrap", () => {
     mockGetShelfQueueSnapshot
       .mockReset()
       .mockResolvedValue({ status: "ok", data: rehydratedSnapshot });
+    mockGetShelfPreferences.mockReset().mockResolvedValue({
+      status: "ok",
+      data: { showCountdown: true },
+    });
     vi.resetModules();
   });
 
@@ -103,5 +109,55 @@ describe("shelf window bootstrap", () => {
       "pixelgrab://shelf-queue-updated",
       expect.any(Function),
     );
+  });
+
+  it("does not hide the remaining queue when cleared follows an update", async () => {
+    await import("./shelf.svelte");
+    await Promise.resolve();
+
+    const queueListener = mockListen.mock.calls.find(
+      ([name]) => name === "pixelgrab://shelf-queue-updated",
+    )?.[1] as ((event: { payload: ShelfQueueSnapshot }) => void) | undefined;
+    const clearedListener = mockListen.mock.calls.find(
+      ([name]) => name === "pixelgrab://shelf-cleared",
+    )?.[1] as ((event: { payload: { shelfId: string } }) => void) | undefined;
+    expect(queueListener).toBeDefined();
+    expect(clearedListener).toBeDefined();
+
+    const remaining = makeCard("shelf-remaining", "Still visible");
+    queueListener?.({
+      payload: { cards: [remaining], overflow: [], snapshotAtMs: 2 },
+    });
+    clearedListener?.({ payload: { shelfId: "shelf-dismissed" } });
+    await Promise.resolve();
+
+    expect(document.querySelectorAll('[data-testid="shelf-card"]')).toHaveLength(1);
+    expect(document.querySelector('[data-shelf-id="shelf-remaining"]')).not.toBeNull();
+  });
+
+  it("does not let a slow startup preference overwrite a live update", async () => {
+    type PreferenceResponse = {
+      status: "ok";
+      data: { showCountdown: boolean };
+    };
+    let resolvePreferences: ((value: PreferenceResponse) => void) | undefined;
+    mockGetShelfPreferences.mockReturnValueOnce(
+      new Promise<PreferenceResponse>((resolve) => {
+        resolvePreferences = resolve;
+      }),
+    );
+
+    await import("./shelf.svelte");
+    const preferenceListener = mockListen.mock.calls.find(
+      ([name]) => name === "pixelgrab://shelf-preferences-updated",
+    )?.[1] as ((event: { payload: { showCountdown: boolean } }) => void) | undefined;
+    expect(preferenceListener).toBeDefined();
+
+    preferenceListener?.({ payload: { showCountdown: false } });
+    resolvePreferences?.({ status: "ok", data: { showCountdown: true } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.querySelector('[data-testid="shelf-countdown"]')).toBeNull();
   });
 });

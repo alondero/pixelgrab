@@ -27,7 +27,7 @@ use parking_lot::Mutex;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{TrayIcon, TrayIconBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Runtime, Wry,
 };
 
@@ -118,6 +118,21 @@ impl TrayState {
                 "exit" => app.exit(0),
                 _ => log::debug!("tray menu ignored: {:?}", event.id),
             })
+            .on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click {
+                    button,
+                    button_state,
+                    ..
+                } = event
+                {
+                    if should_capture_from_tray_click(button, button_state) {
+                        // Left-click is the pointer equivalent of the global
+                        // region shortcut. Route it through the same intent
+                        // event so capture lifecycle stays single-sourced.
+                        forward_intent(tray.app_handle(), SecondaryLaunchIntent::CaptureRegion);
+                    }
+                }
+            })
             .build(app)?;
         // Render labels for the first time so the user sees the
         // configured shortcuts before the first status update.
@@ -190,6 +205,19 @@ impl TrayState {
         // observable to tests.
         *self.inner.last_bindings.lock() = bindings.clone();
     }
+}
+
+/// Return whether a native tray click should start a region capture. Keeping
+/// this predicate separate makes the pointer contract testable without a
+/// live Windows notification-area icon.
+pub(crate) fn should_capture_from_tray_click(
+    button: MouseButton,
+    button_state: MouseButtonState,
+) -> bool {
+    matches!(
+        (button, button_state),
+        (MouseButton::Left, MouseButtonState::Down)
+    )
 }
 
 fn set_item_text<R: Runtime>(item: &MenuItem<R>, text: &str) {
@@ -469,5 +497,21 @@ mod tests {
             assert!(known_menu_id(id), "{id} must be accepted");
         }
         assert!(!known_menu_id("nope"));
+    }
+
+    #[test]
+    fn left_tray_press_starts_region_capture_only() {
+        assert!(should_capture_from_tray_click(
+            MouseButton::Left,
+            MouseButtonState::Down
+        ));
+        assert!(!should_capture_from_tray_click(
+            MouseButton::Right,
+            MouseButtonState::Down
+        ));
+        assert!(!should_capture_from_tray_click(
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
     }
 }

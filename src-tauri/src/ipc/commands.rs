@@ -69,8 +69,13 @@ fn queue_position(app: &PixelGrabApp) -> Result<pixelgrab_contracts::ShelfPositi
             "no monitor available for shelf placement",
         )
     })?;
-    let visible = app.shelf_queue().snapshot(now_ms()).cards.len();
-    Ok(pixelgrab_contracts::placement_for(&prefs, monitor, visible))
+    let queue = app.shelf_queue().snapshot(now_ms());
+    Ok(pixelgrab_contracts::placement_for_overflow(
+        &prefs,
+        monitor,
+        queue.cards.len(),
+        !queue.overflow.is_empty(),
+    ))
 }
 
 /// Resolve the monitor the shelf should anchor to. Honours the user's
@@ -104,6 +109,24 @@ fn emit_shelf_queue_updated<R: tauri::Runtime>(
     snapshot: ShelfQueueSnapshot,
 ) {
     let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
+}
+
+/// Keep the native shelf window's bounds in lockstep with the queue event.
+/// The webview can render a new card count, but its native outer window must
+/// also be resized and moved or cards are clipped / left at the old anchor.
+pub(crate) fn sync_shelf_window<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
+    snapshot: &ShelfQueueSnapshot,
+) {
+    if snapshot.is_empty() {
+        if let Err(err) = crate::shelf::hide_card(handle) {
+            log::warn!("shelf hide failed: {err}");
+        }
+    } else if let Some(position) = snapshot.position.as_ref() {
+        if let Err(err) = crate::shelf::show_queue(handle, position) {
+            log::warn!("shelf reposition failed: {err}");
+        }
+    }
 }
 
 /// Build a snapshot with the position field populated. Used by every
@@ -182,20 +205,36 @@ pub fn request_capture(
     // bounds directly (single-monitor captures don't have a full virtual
     // desktop to span). The defensive `reset()` above already recovered
     // any stuck `Ready` state from a previous capture.
-    let position_fallback = |reason: &str| {
-        if let Err(err) = crate::overlay::position_over_bounds(&handle, &capture.bounds) {
-            log::warn!("overlay {reason} failed: {err}");
+    match capture.format {
+        CaptureFormat::VirtualDesktop => {
+            if let Ok(layout) = app.platform().monitor_layout() {
+                if let Err(err) =
+                    crate::overlay::show_over_virtual_desktop(&handle, &layout, &app.session())
+                {
+                    log::warn!("overlay reveal failed: {err}; falling back to bounds");
+                    if let Err(fallback_err) =
+                        crate::overlay::show_over_bounds(&handle, &capture.bounds, &app.session())
+                    {
+                        log::warn!("overlay bounds reveal failed: {fallback_err}");
+                    }
+                }
+            } else if let Err(err) =
+                crate::overlay::show_over_bounds(&handle, &capture.bounds, &app.session())
+            {
+                log::warn!("overlay bounds reveal failed: {err}");
+            }
         }
-    };
-    if let Ok(layout) = app.platform().monitor_layout() {
-        if let Err(err) =
-            crate::overlay::show_over_virtual_desktop(&handle, &layout, &app.session())
-        {
-            log::warn!("overlay reveal failed: {err}; falling back to bounds");
-            position_fallback("bounds positioning");
+        // A single-monitor/full-screen capture has no pixels for the other
+        // displays. Keep its overlay and stage aligned with the captured
+        // monitor instead of stretching that image across the virtual
+        // desktop.
+        CaptureFormat::SingleMonitor | CaptureFormat::PhysicalRegion => {
+            if let Err(err) =
+                crate::overlay::show_over_bounds(&handle, &capture.bounds, &app.session())
+            {
+                log::warn!("overlay bounds reveal failed: {err}");
+            }
         }
-    } else {
-        position_fallback("positioning");
     }
     let monitor_id = monitor_id_for(&capture);
     let diag =
@@ -206,6 +245,12 @@ pub fn request_capture(
         capture: pixelgrab_contracts::ipc::CaptureResolutionDto::from(capture),
         diagnostics: app.session().last_diagnostics(),
     };
+    // The overlay webview is preallocated and mounted before a capture is
+    // requested. Publish the completed capture after the native reveal so
+    // the already-mounted page can replace its placeholder immediately;
+    // it also makes the response/event ordering explicit for packaged-app
+    // acceptance tests.
+    let _ = handle.emit("pixelgrab://capture-ready", &response);
     IpcResponse::from_result(Ok(response))
 }
 
@@ -262,7 +307,7 @@ fn monitor_id_for_format(format: CaptureFormat) -> &'static str {
 
 /// Cancel the active session. Honours the staged Escape behaviour.
 #[tauri::command]
-pub fn request_cancel(app: AppState<'_>) -> IpcResponse<CancelOutcome> {
+pub fn request_cancel(app: AppState<'_>, handle: AppHandle) -> IpcResponse<CancelOutcome> {
     let action = match app.session().handle_escape() {
         Ok(action) => action,
         Err(err) => return IpcResponse::from_result(Err(err)),
@@ -272,10 +317,15 @@ pub fn request_cancel(app: AppState<'_>) -> IpcResponse<CancelOutcome> {
             action: "selection_cleared".into(),
             snapshot: app.session().snapshot(),
         },
-        crate::session::state::EscapeAction::SessionCancelled => CancelOutcome {
-            action: "session_cancelled".into(),
-            snapshot: app.session().snapshot(),
-        },
+        crate::session::state::EscapeAction::SessionCancelled => {
+            if let Err(err) = crate::overlay::hide(&handle) {
+                log::warn!("overlay hide after cancellation failed: {err}");
+            }
+            CancelOutcome {
+                action: "session_cancelled".into(),
+                snapshot: app.session().snapshot(),
+            }
+        }
         crate::session::state::EscapeAction::NoOp => CancelOutcome {
             action: "noop".into(),
             snapshot: app.session().snapshot(),
@@ -689,6 +739,7 @@ pub fn dismiss_cache_entry(
     // (main view + overflow). Remove the card from the queue first,
     // then dismiss from the cache so the lock release coincides with
     // (rather than precedes) the user-visible disappearance.
+    let queue_entry = app.cache().entry(&payload.shelf_id);
     app.shelf_queue().dismiss(&payload.shelf_id, now_ms());
     let result = match app.cache().dismiss(&payload.shelf_id) {
         Ok(outcome) => {
@@ -696,9 +747,7 @@ pub fn dismiss_cache_entry(
             // event so listeners that don't care about queue ordering
             // still learn about the removal.
             let snapshot = snapshot_with_position(&app);
-            if snapshot.is_empty() {
-                let _ = crate::shelf::hide_card(&handle);
-            }
+            sync_shelf_window(&handle, &snapshot);
             emit_shelf_queue_updated(&handle, snapshot);
             if outcome.removed {
                 let event = crate::shelf::ShelfClearedEvent {
@@ -711,7 +760,18 @@ pub fn dismiss_cache_entry(
                 reason: outcome.reason.to_string(),
             })
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            // Keep the queue/cache mirror intact if a future cache backend
+            // surfaces an I/O failure. A partial shelf mutation would hide a
+            // still-live capture until restart.
+            if let Some(entry) = queue_entry {
+                app.shelf_queue().add(entry, now_ms());
+                let snapshot = snapshot_with_position(&app);
+                sync_shelf_window(&handle, &snapshot);
+                emit_shelf_queue_updated(&handle, snapshot);
+            }
+            Err(err)
+        }
     };
     IpcResponse::from_result(result)
 }
@@ -976,6 +1036,7 @@ pub fn hover_shelf_card(
     let result = match app.shelf_queue().hover(&payload.shelf_id, now_ms()) {
         Some(snapshot) => {
             let snapshot = with_position(snapshot, &app);
+            sync_shelf_window(&handle, &snapshot);
             emit_shelf_queue_updated(&handle, snapshot.clone());
             Ok(snapshot)
         }
@@ -999,6 +1060,7 @@ pub fn unhover_shelf_card(
     let result = match app.shelf_queue().unhover(&payload.shelf_id, now_ms()) {
         Some(snapshot) => {
             let snapshot = with_position(snapshot, &app);
+            sync_shelf_window(&handle, &snapshot);
             emit_shelf_queue_updated(&handle, snapshot.clone());
             Ok(snapshot)
         }
@@ -1017,7 +1079,7 @@ pub fn unhover_shelf_card(
 /// `PixelGrabApp::install_shelf_ticker` so a hidden or throttled
 /// webview cannot strand the shelf lock.
 #[tauri::command]
-pub fn tick_shelf_queue(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
+pub fn tick_shelf_queue(app: AppState<'_>, handle: AppHandle) -> IpcResponse<ShelfQueueSnapshot> {
     let outcome = app.shelf_queue().tick(now_ms());
     for shelf_id in &outcome.expired {
         // Privacy: only the shelf id is logged. The cache dismiss
@@ -1028,6 +1090,8 @@ pub fn tick_shelf_queue(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
         }
     }
     let snapshot = with_position(outcome.snapshot, &app);
+    sync_shelf_window(&handle, &snapshot);
+    emit_shelf_queue_updated(&handle, snapshot.clone());
     IpcResponse::from_result(Ok(snapshot))
 }
 
@@ -1051,7 +1115,9 @@ pub struct UnhoverShelfCardRequest {
 /// so the hover / unhover / tick handlers can stay focused on their
 /// event semantics.
 fn with_position(mut snapshot: ShelfQueueSnapshot, app: &PixelGrabApp) -> ShelfQueueSnapshot {
-    if let Ok(position) = queue_position(app) {
+    if snapshot.is_empty() {
+        snapshot.position = None;
+    } else if let Ok(position) = queue_position(app) {
         snapshot.position = Some(position);
     }
     snapshot
@@ -1129,6 +1195,8 @@ pub fn update_shelf_preferences(
     let prefs_for_apply = sanitized.clone();
     // Update the in-memory state + schedule the debounced disk write.
     app.preferences().update(sanitized.clone(), None);
+    app.shelf_queue()
+        .apply_visible_card_count(prefs_for_apply.visible_card_count);
     if payload.commit {
         // Apply the new timer config to the queue. Cards already in
         // the queue keep their original deadlines; only future cards
@@ -1146,9 +1214,12 @@ pub fn update_shelf_preferences(
         // Re-emit the queue snapshot with the new position so the
         // shelf window repositions itself immediately.
         let snapshot = snapshot_with_position(&app);
+        sync_shelf_window(&handle, &snapshot);
         let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
     }
-    IpcResponse::from_result(Ok(sanitized.into()))
+    let dto: pixelgrab_contracts::ShelfPreferencesDto = sanitized.into();
+    let _ = handle.emit("pixelgrab://shelf-preferences-updated", &dto);
+    IpcResponse::from_result(Ok(dto))
 }
 
 /// Return the current cache policy. The frontend loads this on
@@ -1232,6 +1303,21 @@ pub fn start_shelf_drag(
 }
 
 fn commit(
+    app: &PixelGrabApp,
+    handle: &AppHandle,
+    request: &CommitRequest,
+) -> Result<pixelgrab_contracts::ipc::CommitOutcome, PlatformError> {
+    let result = commit_body(app, handle, request);
+    if let Err(err) = app.session().finish() {
+        log::warn!("session.finish failed: {err}");
+    }
+    if let Err(err) = crate::overlay::hide(handle) {
+        log::warn!("overlay hide after commit failed: {err}");
+    }
+    result
+}
+
+fn commit_body(
     app: &PixelGrabApp,
     handle: &AppHandle,
     request: &CommitRequest,
@@ -1367,9 +1453,6 @@ fn commit(
         Ok(())
     })();
 
-    if let Err(err) = app.session().finish() {
-        log::warn!("session.finish failed: {err}");
-    }
     commit_result.map(|_| outcome)
 }
 
