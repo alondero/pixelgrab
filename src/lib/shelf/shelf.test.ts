@@ -1,4 +1,4 @@
-import { render } from "@testing-library/svelte";
+import { render, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import ShelfCard from "./ShelfCard.svelte";
 import ShelfQueue from "./ShelfQueue.svelte";
@@ -50,6 +50,15 @@ describe("ShelfCard", () => {
     const card = makeCard("shelf-1", "");
     const { getByTestId } = render(ShelfCard, { card, nowMs: 0 });
     expect(getByTestId("shelf-title").textContent).toBe("Untitled capture");
+  });
+
+  it("hides countdown text when the shelf preference disables it", () => {
+    const { queryByTestId } = render(ShelfCard, {
+      card: makeCard("shelf-1"),
+      nowMs: 0,
+      showCountdown: false,
+    });
+    expect(queryByTestId("shelf-countdown")).toBeNull();
   });
 
   it("invokes the dismiss callback with the shelf id", async () => {
@@ -164,6 +173,16 @@ describe("ShelfQueue", () => {
     expect(toggle).toBeTruthy();
     // Overflow cards are not rendered until the toggle is clicked.
     expect(toggle.querySelectorAll('[data-testid="shelf-card"]')).toHaveLength(0);
+  });
+
+  it("keeps expanded overflow cards in a reachable bounded panel", async () => {
+    const { getByTestId } = render(ShelfQueue, {
+      snapshot: makeSnapshot([makeCard("a")], [makeCard("b"), makeCard("c")]),
+    });
+    (getByTestId("shelf-overflow").querySelector("button") as HTMLButtonElement).click();
+    const panel = await waitFor(() => getByTestId("shelf-overflow-panel"));
+    expect(panel.getAttribute("role")).toBe("region");
+    expect(panel.querySelectorAll('[data-testid="shelf-card"]')).toHaveLength(2);
   });
 
   it("does not render an overflow toggle when there is no overflow", () => {

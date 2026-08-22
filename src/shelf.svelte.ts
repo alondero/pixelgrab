@@ -21,13 +21,14 @@ import ShelfQueue from "./lib/shelf/ShelfQueue.svelte";
 import {
   copyShelfCard,
   dismissCacheEntry,
+  getShelfPreferences,
   getShelfQueueSnapshot,
   hoverShelfCard,
   saveShelfCardAs,
   tickShelfQueue,
   unhoverShelfCard,
 } from "./lib/ipc/commands";
-import type { ShelfQueueSnapshot } from "./lib/ipc/types";
+import type { ShelfPreferencesDto, ShelfQueueSnapshot } from "./lib/ipc/types";
 import type { ShelfClearedEvent } from "./lib/shelf/types";
 import { createFeedbackStore } from "./lib/shelf/feedback.svelte";
 
@@ -39,11 +40,28 @@ if (!target) {
 // Runes-mode reactive state: the component re-renders whenever
 // `currentSnapshot` is reassigned.
 let currentSnapshot = $state<ShelfQueueSnapshot | null>(null);
+let showCountdown = $state(true);
+let preferenceEventReceived = false;
 
 // Visible feedback for quick actions. The ShelfQueue renders an
 // `aria-live="polite"` region; the store is fed by the onCopy /
 // onSaveAs callbacks below.
 const feedback = createFeedbackStore();
+
+function removeFromSnapshot(shelfId: string) {
+  if (!currentSnapshot) return;
+  const cards = currentSnapshot.cards.filter((card) => card.shelfId !== shelfId);
+  const overflow = currentSnapshot.overflow.filter((card) => card.shelfId !== shelfId);
+  // Keep the snapshot object when the id was not present. A stale cleared
+  // event must never blank a queue that has already received a newer event.
+  if (
+    cards.length === currentSnapshot.cards.length &&
+    overflow.length === currentSnapshot.overflow.length
+  ) {
+    return;
+  }
+  currentSnapshot = { ...currentSnapshot, cards, overflow };
+}
 
 mount(ShelfQueue, {
   target,
@@ -53,6 +71,9 @@ mount(ShelfQueue, {
     },
     get feedback() {
       return feedback.message;
+    },
+    get showCountdown() {
+      return showCountdown;
     },
     onCopy: async (shelfId: string) => {
       const response = await copyShelfCard({ shelfId });
@@ -74,8 +95,17 @@ mount(ShelfQueue, {
         feedback.flash(`Save failed: ${response.error.message}`, "error");
       }
     },
-    onDismiss: (shelfId: string) => {
-      void dismissCacheEntry({ shelfId });
+    onDismiss: async (shelfId: string) => {
+      // Hide the card immediately for responsive dismissal. The backend
+      // event remains authoritative and rehydrates the queue if the delete
+      // fails. A still-locked result is successful shelf dismissal: another
+      // owner deliberately keeps the underlying cache entry alive.
+      removeFromSnapshot(shelfId);
+      const response = await dismissCacheEntry({ shelfId });
+      if (response.status === "err") {
+        const snapshot = await getShelfQueueSnapshot();
+        if (snapshot.status === "ok") currentSnapshot = snapshot.data;
+      }
     },
     onHover: (shelfId: string) => {
       void hoverShelfCard({ shelfId });
@@ -98,20 +128,34 @@ mount(ShelfQueue, {
 // every subsequent update) but never blocks the window from
 // appearing.
 void (async () => {
-  const response = await getShelfQueueSnapshot();
-  if (response.status === "ok" && response.data) {
-    currentSnapshot = response.data;
-  } else if (response.status === "err") {
+  const [queueResponse, preferencesResponse] = await Promise.all([
+    getShelfQueueSnapshot(),
+    getShelfPreferences(),
+  ]);
+  if (queueResponse.status === "ok" && queueResponse.data) {
+    currentSnapshot = queueResponse.data;
+  } else if (queueResponse.status === "err") {
     // Tracer-15 review (Standards axis): the shelf must remain
     // visible even when rehydration fails, but the failure should
     // be observable so a regression in the IPC layer shows up in
     // devtools instead of an empty window with no diagnostic.
-    console.warn("shelf rehydrate failed", response.error);
+    console.warn("shelf rehydrate failed", queueResponse.error);
+  }
+  // A live preference event is newer than a bootstrap response that may have
+  // been captured before the update. Never let the slow startup read roll it
+  // back.
+  if (preferencesResponse.status === "ok" && !preferenceEventReceived) {
+    showCountdown = preferencesResponse.data.showCountdown;
   }
 })();
 
 listen<ShelfQueueSnapshot>("pixelgrab://shelf-queue-updated", (event) => {
   currentSnapshot = event.payload;
+});
+
+listen<ShelfPreferencesDto>("pixelgrab://shelf-preferences-updated", (event) => {
+  preferenceEventReceived = true;
+  showCountdown = event.payload.showCountdown;
 });
 
 // When the backend signals that the shelf is empty (e.g. after a
@@ -126,8 +170,8 @@ listen<ShelfClearedEvent>("pixelgrab://shelf-cleared", (event) => {
   // event to bind the wire shape (see `ShelfClearedEvent` in
   // `$lib/shelf/types` and the contract pair tests).
   void event.payload.shelfId;
-  // A cleared event is followed (or preceded) by a queue snapshot
-  // update. Drop the local copy so the queue UI hides itself; the
-  // authoritative state comes from the next snapshot.
-  currentSnapshot = null;
+  // The queue-updated event carries the authoritative remaining cards, and
+  // the cleared event may arrive after it. Remove only the matching card;
+  // clearing the whole snapshot made dismissing one card hide every card.
+  removeFromSnapshot(event.payload.shelfId);
 });

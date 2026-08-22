@@ -1,7 +1,7 @@
 # PixelGrab
 
 > Local-first Windows desktop capture and annotation utility.
-> Tracer-02: real Windows region capture with structured diagnostics.
+> Windows v1 implementation in active hardening; not yet release-ready.
 
 PixelGrab lets you turn anything visible on a Windows desktop into precise
 visual context for an agent, browser, IDE, or collaborator. Capture a region,
@@ -10,8 +10,13 @@ application. All processing happens locally.
 
 ## Status
 
-This is the **tracer-02** build. It extends the tracer-01 foundation with the
-real Windows capture pipeline:
+The tracer implementation is present through tracer 15, but a 2026-08-22
+production-wiring review found release-blocking gaps that isolated unit and
+contract tests did not expose. See
+[`docs/validation/2026-08-22-v1-gap-review.md`](docs/validation/2026-08-22-v1-gap-review.md)
+for the current readiness assessment.
+
+Implemented foundations include:
 
 - `xcap`-backed Windows capture engine (`src-tauri/src/platform/windows/`)
   implementing the `PixelGrabPlatform` trait behind Windows Graphics Capture.
@@ -30,9 +35,9 @@ real Windows capture pipeline:
 - Session orchestrator that rejects overlapping capture requests and
   returns to `Idle` deterministically on every exit path.
 
-Subsequent tracers (issues #15 through #27) deliver multi-monitor
-overlay, the annotation experience, the shelf, the OLE drag, and the pin
-references.
+Multi-monitor capture, annotation, shelf, OLE drag, pin, cache, and settings
+contracts exist, but some are not yet connected into complete packaged-app user
+flows. Treat the gap review—not tracer issue state—as the release authority.
 
 ## Quickstart (Windows)
 

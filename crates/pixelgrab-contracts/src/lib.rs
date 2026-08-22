@@ -77,8 +77,9 @@ pub use revision::{
 };
 pub use session::{SessionState, SessionTransition};
 pub use shelf_preferences::{
-    placement_for, ShelfCorner, ShelfPreferences, ShelfTimerConfigLike, MAX_LIFETIME_SECONDS,
-    MAX_MARGIN_PX, MIN_LIFETIME_SECONDS, MIN_MARGIN_PX, MIN_VISIBLE_CARDS, SETTINGS_SCHEMA_VERSION,
+    placement_for, placement_for_overflow, ShelfCorner, ShelfPreferences, ShelfTimerConfigLike,
+    MAX_LIFETIME_SECONDS, MAX_MARGIN_PX, MIN_LIFETIME_SECONDS, MIN_MARGIN_PX, MIN_VISIBLE_CARDS,
+    SETTINGS_SCHEMA_VERSION,
 };
 pub use shelf_queue::{
     CopyShelfCardRequest, CopyShelfCardResponse, SaveShelfCardAsRequest, SaveShelfCardAsResponse,

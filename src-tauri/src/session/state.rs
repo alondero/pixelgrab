@@ -227,15 +227,17 @@ impl SessionOrchestrator {
                     Ok(EscapeAction::SessionCancelled)
                 }
             }
-            // Capturing / Ready / Committing / Cleanup: any Escape cancels
-            // the session and force-resets back to Idle.
-            SessionState::Capturing
-            | SessionState::Ready
-            | SessionState::Committing
-            | SessionState::Cleanup => {
+            // Capturing / Ready / Cleanup: Escape cancels the session and
+            // force-resets back to Idle.
+            SessionState::Capturing | SessionState::Ready | SessionState::Cleanup => {
                 self.cancel_session()?;
                 Ok(EscapeAction::SessionCancelled)
             }
+            // A commit owns terminal cleanup. Resetting to Idle while its I/O
+            // is still running lets a new capture start, after which the stale
+            // commit can hide that new overlay. Ignore Escape until the
+            // in-flight commit finishes, matching RevisionCommitting.
+            SessionState::Committing => Ok(EscapeAction::NoOp),
             // Tracer-10: while a reopen session is active, Escape
             // walks the state back to Idle through the RevisionCancelled
             // reason. The IPC layer pairs this with the
@@ -494,6 +496,27 @@ mod tests {
         let action = session.handle_escape().expect("escape");
         assert_eq!(action, EscapeAction::NoOp);
         assert_eq!(session.current_state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn escape_is_noop_while_commit_owns_terminal_cleanup() {
+        let session = make_session();
+        session.run_capture(&capture_request()).expect("capture");
+        session
+            .request_transition(SessionTransition {
+                to: SessionState::Selecting,
+                reason: SessionTransitionReason::OverlayShown,
+            })
+            .expect("selecting");
+        session
+            .request_transition(SessionTransition {
+                to: SessionState::Committing,
+                reason: SessionTransitionReason::CommitRequested,
+            })
+            .expect("committing");
+
+        assert_eq!(session.handle_escape().expect("escape"), EscapeAction::NoOp);
+        assert_eq!(session.current_state(), SessionState::Committing);
     }
 
     #[test]

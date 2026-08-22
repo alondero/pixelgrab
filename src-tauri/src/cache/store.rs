@@ -307,6 +307,7 @@ impl Cache {
             None => return Ok(()),
         };
         inner.entries.clear();
+        inner.shelf_guards.clear();
         if !root.exists() {
             return Ok(());
         }
@@ -332,7 +333,12 @@ impl Cache {
             if manifest_path.exists() {
                 match load_manifest(&path) {
                     Ok(public) => {
-                        inner.entries.insert(public.shelf_id.clone(), public);
+                        let shelf_id = public.shelf_id.clone();
+                        inner.entries.insert(shelf_id.clone(), public);
+                        let guard = inner
+                            .locks
+                            .acquire(shelf_id.clone(), pixelgrab_contracts::LockOwner::Shelf);
+                        inner.shelf_guards.insert(shelf_id, guard);
                     }
                     Err(err) => {
                         log::warn!(
@@ -1421,6 +1427,10 @@ mod tests {
         let entry = cache2.entry(&committed.entry.shelf_id).expect("entry");
         assert_eq!(entry.metadata.title, "before restart");
         assert_eq!(entry.capture_id, committed.entry.capture_id);
+        assert_eq!(
+            cache2.locks().owners_of(&committed.entry.shelf_id),
+            vec![pixelgrab_contracts::LockOwner::Shelf]
+        );
     }
 
     #[test]

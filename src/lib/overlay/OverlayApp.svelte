@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
     getSessionSnapshot,
     requestCommit,
@@ -9,7 +10,8 @@
   import KonvaStage from "./KonvaStage.svelte";
   import AnnotationToolbar from "$lib/annotation/AnnotationToolbar.svelte";
   import { annotationStore } from "$lib/annotation/store.svelte";
-  import type { CaptureResolutionDto, PhysicalBounds } from "$lib/ipc/types";
+  import { commitOptions, type CommitTarget } from "./commitIntent";
+  import type { CaptureResponse, CaptureResolutionDto, PhysicalBounds } from "$lib/ipc/types";
 
   let capture = $state<CaptureResolutionDto | null>(null);
   let selection = $state<PhysicalBounds | null>(null);
@@ -17,23 +19,65 @@
   let commitError = $state<string | null>(null);
   let saveAsError = $state<string | null>(null);
   let lastSaveAsPath = $state<string | null>(null);
-  // The overlay spans the entire primary monitor. Values are tuned for the
-  // tracer-02 default layout; the real multi-monitor sizing arrives in
-  // tracer-04.
-  const STAGE_WIDTH = 1920;
-  const STAGE_HEIGHT = 1080;
+  let committing = $state(false);
+  // Konva uses CSS-pixel stage dimensions. The native overlay window is
+  // sized in physical pixels, so using a fixed 1920×1080 stage silently
+  // breaks mixed-DPI and non-1080p desktops. Track the actual webview
+  // viewport and let Konva's layer transform map it to physical capture
+  // pixels.
+  let stageWidth = $state(1920);
+  let stageHeight = $state(1080);
 
-  onMount(async () => {
+  function loadCapture(next: CaptureResolutionDto | null) {
+    if (next?.captureId === capture?.captureId) return;
+    capture = next;
+    lastDiagnosticsId = next?.captureId ?? null;
+    selection = null;
+    commitError = null;
+    saveAsError = null;
+    lastSaveAsPath = null;
+    annotationStore.reset();
+  }
+
+  onMount(() => {
+    function syncViewport() {
+      stageWidth = Math.max(1, window.innerWidth);
+      stageHeight = Math.max(1, window.innerHeight);
+    }
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
     // Issue #60: the overlay reveal contract is collapsed into one
     // backend seam (`show_over_virtual_desktop` → `overlay_mounted`),
     // so the frontend never has to drive the `Ready -> Selecting`
     // transition. We just read the snapshot the orchestrator already
     // stamped.
-    const response = await getSessionSnapshot();
-    if (response.status === "ok" && response.data.lastCapture) {
-      capture = response.data.lastCapture;
-      lastDiagnosticsId = response.data.lastCapture.captureId;
+    async function refreshCapture() {
+      const response = await getSessionSnapshot();
+      if (response.status !== "ok") return;
+      // The event is authoritative once one has arrived. An initial snapshot
+      // request can resolve after `capture-ready`; it must not overwrite that
+      // newer capture with the pre-capture snapshot it observed.
+      if (!capture) loadCapture(response.data.lastCapture ?? null);
     }
+
+    // The overlay is pre-allocated while the app is idle. Its Svelte tree
+    // therefore mounts before a capture exists; subscribe to the native
+    // capture-ready event so tray/global-shortcut captures hydrate the
+    // already-mounted overlay without a permanent polling loop.
+    const unlistenCapture: Promise<UnlistenFn> = listen<CaptureResponse>(
+      "pixelgrab://capture-ready",
+      (event) => {
+        loadCapture(event.payload.capture);
+      },
+    );
+    // Install the listener before reading the initial snapshot. Otherwise a
+    // capture can land between the read and listener registration, leaving
+    // the pre-warmed overlay permanently empty.
+    void unlistenCapture.then(() => refreshCapture());
+    return () => {
+      unlistenCapture.then((fn) => fn());
+      window.removeEventListener("resize", syncViewport);
+    };
   });
 
   function onSelectionChange(next: PhysicalBounds | null) {
@@ -43,8 +87,9 @@
     }
   }
 
-  async function onCommit() {
-    if (!selection) return;
+  async function onCommit(target: CommitTarget = "shelf") {
+    if (!selection || committing) return;
+    committing = true;
     commitError = null;
     // Tracer 04: ship the editor's annotations alongside the crop so
     // the Rust commit pipeline can flatten them onto the frozen
@@ -57,21 +102,24 @@
       zOrder: a.zOrder,
       ...(a.number !== undefined ? { number: a.number } : {}),
     }));
-    const result = await requestCommit({
-      crop: selection,
-      annotations,
-      toShelf: true,
-      toClipboard: true,
-      saveAs: false,
-    });
-    if (result.status === "err") {
-      commitError = result.error.message;
-      return;
+    try {
+      const result = await requestCommit({
+        crop: selection,
+        annotations,
+        ...commitOptions(target),
+        saveAs: false,
+      });
+      if (result.status === "err") {
+        commitError = result.error.message;
+        return;
+      }
+      // Successful commit cleans up the session so a fresh capture
+      // starts with no annotations, no badge counter, and no history.
+      selection = null;
+      annotationStore.reset();
+    } finally {
+      committing = false;
     }
-    // Successful commit cleans up the session so a fresh capture
-    // starts with no annotations, no badge counter, and no history.
-    selection = null;
-    annotationStore.reset();
   }
 
   async function onCancel() {
@@ -139,8 +187,8 @@
       <KonvaStage
         assetUrl={capture.assetUrl}
         bounds={capture.bounds}
-        stageWidth={STAGE_WIDTH}
-        stageHeight={STAGE_HEIGHT}
+        {stageWidth}
+        {stageHeight}
         {onSelectionChange}
         {onCommit}
         {onCancel}
@@ -176,19 +224,30 @@
 
 <style>
   .overlay {
+    position: fixed;
+    inset: 0;
     display: flex;
     flex-direction: column;
     height: 100vh;
     width: 100vw;
-    background: rgba(0, 0, 0, 0.65);
+    overflow: hidden;
+    background: #11131a;
     color: white;
     font-family: system-ui, sans-serif;
   }
   .header {
-    padding: 0.5rem 1rem;
+    position: absolute;
+    z-index: 20;
+    top: 0.75rem;
+    left: 0.75rem;
+    padding: 0.35rem 0.6rem;
     display: flex;
     gap: 0.75rem;
     align-items: center;
+    border-radius: 999px;
+    background: rgba(20, 20, 28, 0.78);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    pointer-events: none;
   }
   .pill {
     background: #4f46e5;
@@ -207,10 +266,8 @@
   }
   .stage-wrap {
     position: relative;
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    position: absolute;
+    inset: 0;
     overflow: hidden;
   }
   .toolbar-slot {
@@ -221,23 +278,43 @@
     pointer-events: auto;
   }
   .placeholder {
-    flex: 1;
+    position: absolute;
+    inset: 0;
     display: grid;
     place-items: center;
     opacity: 0.6;
   }
   .footer {
+    position: absolute;
+    z-index: 20;
+    left: 0.75rem;
+    bottom: 0.75rem;
     padding: 0.5rem 1rem;
+    border-radius: 6px;
+    background: rgba(20, 20, 28, 0.78);
     border-top: 1px solid rgba(255, 255, 255, 0.2);
     font-size: 0.85rem;
   }
   .error {
+    position: absolute;
+    z-index: 21;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    background: rgba(80, 20, 20, 0.92);
+    border-radius: 6px;
     color: #ffb3b3;
     padding: 0.5rem 1rem;
     border-top: 1px solid rgba(255, 80, 80, 0.4);
     font-size: 0.85rem;
   }
   .success {
+    position: absolute;
+    z-index: 21;
+    left: 0.75rem;
+    bottom: 0.75rem;
+    background: rgba(20, 70, 35, 0.92);
+    border-radius: 6px;
     color: #b6f0c8;
     padding: 0.5rem 1rem;
     border-top: 1px solid rgba(80, 200, 120, 0.4);

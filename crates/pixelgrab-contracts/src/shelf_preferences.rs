@@ -208,12 +208,31 @@ pub fn placement_for(
     monitor: &crate::monitor::MonitorDescriptor,
     visible_cards: usize,
 ) -> ShelfPosition {
+    placement_for_overflow(preferences, monitor, visible_cards, false)
+}
+
+/// Compute shelf placement when the queue has an expandable overflow group.
+/// The `+N older` control is part of the native window's height, not merely a
+/// WebView overlay: omitting it clips the control at the bottom edge and can
+/// make the shelf appear broken after the fifth capture.
+pub fn placement_for_overflow(
+    preferences: &ShelfPreferences,
+    monitor: &crate::monitor::MonitorDescriptor,
+    visible_cards: usize,
+    has_overflow: bool,
+) -> ShelfPosition {
     let count = visible_cards.clamp(1, preferences.visible_card_count as usize);
     let card_width = ShelfPosition::QUEUE_CARD_WIDTH;
     let card_height = ShelfPosition::QUEUE_CARD_HEIGHT;
     let gap = ShelfPosition::QUEUE_CARD_GAP;
-    let width = card_width * (count as u32) + gap * ((count as u32).saturating_sub(1));
-    let height = card_height;
+    let overflow_height = if has_overflow {
+        gap + ShelfPosition::QUEUE_OVERFLOW_HEIGHT
+    } else {
+        0
+    };
+    let width = card_width;
+    let height =
+        card_height * (count as u32) + gap * ((count as u32).saturating_sub(1)) + overflow_height;
     let margin = i64::from(preferences.margin_px);
     let work = monitor.work_area;
     let work_left = i64::from(work.origin.x);
@@ -400,10 +419,11 @@ mod tests {
         };
         let monitor = sample_monitor();
         let pos = placement_for(&p, &monitor, 4);
-        // Width should match two cards + one gap, regardless of how many
+        // Height should match two cards + one gap, regardless of how many
         // cards the queue actually has right now.
-        let expected_width = ShelfPosition::QUEUE_CARD_WIDTH * 2 + ShelfPosition::QUEUE_CARD_GAP;
-        assert_eq!(pos.width, expected_width);
+        let expected_height = ShelfPosition::QUEUE_CARD_HEIGHT * 2 + ShelfPosition::QUEUE_CARD_GAP;
+        assert_eq!(pos.height, expected_height);
+        assert_eq!(pos.width, ShelfPosition::QUEUE_CARD_WIDTH);
     }
 
     #[test]
@@ -411,8 +431,19 @@ mod tests {
         let p = ShelfPreferences::default(); // visible_card_count = 4
         let monitor = sample_monitor();
         let pos = placement_for(&p, &monitor, 1);
-        let expected_width = ShelfPosition::QUEUE_CARD_WIDTH;
-        assert_eq!(pos.width, expected_width);
+        assert_eq!(pos.height, ShelfPosition::QUEUE_CARD_HEIGHT);
+    }
+
+    #[test]
+    fn placement_includes_overflow_toggle_in_native_height() {
+        let p = ShelfPreferences::default();
+        let monitor = sample_monitor();
+        let pos = placement_for_overflow(&p, &monitor, 4, true);
+        let cards_height = ShelfPosition::QUEUE_CARD_HEIGHT * 4 + ShelfPosition::QUEUE_CARD_GAP * 3;
+        assert_eq!(
+            pos.height,
+            cards_height + ShelfPosition::QUEUE_CARD_GAP + ShelfPosition::QUEUE_OVERFLOW_HEIGHT
+        );
     }
 
     #[test]

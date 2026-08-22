@@ -66,9 +66,9 @@ pub fn hide_card<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 }
 
 /// Reposition the shelf window for the given queue snapshot. No-op
-/// when the window does not exist or the snapshot is empty. The width
+/// when the window does not exist or the snapshot is empty. The height
 /// of the window scales with the visible card count so all four cards
-/// fit side-by-side.
+/// fit in a newest-first vertical stack.
 pub fn show_queue<R: Runtime>(app: &AppHandle<R>, position: &ShelfPosition) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window("shelf") else {
         return Ok(());

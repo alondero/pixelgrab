@@ -5,6 +5,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 
+const stageSize = vi.hoisted(() => vi.fn());
+
 vi.mock("konva", () => {
   class FakeStage {
     add() {}
@@ -16,6 +18,9 @@ vi.mock("konva", () => {
     height() {
       return 100;
     }
+    size(value: { width: number; height: number }) {
+      stageSize(value);
+    }
     getPointerPosition() {
       return { x: 0, y: 0 };
     }
@@ -26,6 +31,7 @@ vi.mock("konva", () => {
     destroy() {}
     destroyChildren() {}
     position(_v?: { x: number; y: number }) {}
+    scale(_v?: { x: number; y: number }) {}
   }
   class FakeImage {
     _set = vi.fn();
@@ -94,5 +100,19 @@ describe("KonvaStage", () => {
     });
     const stage = container.querySelector('[data-testid="konva-stage"]');
     expect(stage).toBeInTheDocument();
+  });
+
+  it("resizes the Konva canvas when the native viewport changes", async () => {
+    stageSize.mockClear();
+    const props = {
+      assetUrl: "data:image/png;base64,AAAA",
+      bounds: { origin: { x: 0, y: 0 }, size: { width: 2560, height: 1440 } },
+      stageWidth: 1280,
+      stageHeight: 720,
+      onSelectionChange: () => {},
+    };
+    const { rerender } = render(KonvaStage, { props });
+    await rerender({ ...props, stageWidth: 1600, stageHeight: 900 });
+    expect(stageSize).toHaveBeenLastCalledWith({ width: 1600, height: 900 });
   });
 });

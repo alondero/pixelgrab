@@ -307,15 +307,17 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
                 if let Some(monitor) =
                     crate::ipc::commands::resolve_preferred_monitor(&prefs, &layout)
                 {
-                    snap.position = Some(pixelgrab_contracts::placement_for(
+                    snap.position = Some(pixelgrab_contracts::placement_for_overflow(
                         &prefs,
                         monitor,
                         snap.cards.len(),
+                        !snap.overflow.is_empty(),
                     ));
                 }
             }
             snap
         };
+        crate::ipc::commands::sync_shelf_window(&handle, &snapshot);
         let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
     }
 }
@@ -453,6 +455,9 @@ pub fn run() {
                 grace_ms: pixelgrab_contracts::DEFAULT_HOVER_GRACE_MS,
             };
             app_state.shelf_queue().apply_timer_config(cfg);
+            app_state
+                .shelf_queue()
+                .apply_visible_card_count(prefs.visible_card_count);
 
             // Rehydrate the queue from the durable cache so cards
             // surviving a process restart remain visible until their

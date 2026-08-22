@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A 2D point in physical desktop pixels. Always non-negative.
+/// A 2D point in physical desktop pixels. Virtual-desktop points may be
+/// negative when a monitor is positioned left of or above the primary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhysicalPoint {
@@ -81,13 +82,15 @@ impl PhysicalBounds {
         self.size.width == 0 || self.size.height == 0
     }
 
-    /// Validates that the bounds are non-degenerate and non-negative.
+    /// Validates that the bounds are non-degenerate.
+    ///
+    /// Origins may be negative because a virtual desktop can contain
+    /// monitors positioned left of or above the primary display. Callers
+    /// that require a local buffer rectangle should validate after applying
+    /// [`transform::project_to_capture_buffer`].
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.size.width == 0 || self.size.height == 0 {
             return Err("bounds must have non-zero width and height");
-        }
-        if self.origin.x < 0 || self.origin.y < 0 {
-            return Err("bounds origin must be non-negative");
         }
         Ok(())
     }
@@ -363,6 +366,12 @@ mod tests {
         assert_eq!(tl.origin.y, -100);
         assert_eq!(tl.size.width, 2320);
         assert_eq!(tl.size.height, 1340);
+    }
+
+    #[test]
+    fn physical_bounds_validation_accepts_negative_virtual_origins() {
+        let bounds = PhysicalBounds::from_xywh(-1910, -100, 400, 300);
+        assert!(bounds.validate().is_ok());
     }
 
     #[test]
