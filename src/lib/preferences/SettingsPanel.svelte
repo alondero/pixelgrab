@@ -74,6 +74,35 @@
   function onCommit() {
     void store.commitPreferences();
   }
+
+  // Issue #63: live placement preview. The mini monitor is drawn at a
+  // fixed 320x180 stage; the shelf rectangle mirrors the backend's
+  // `placement_for` semantics (anchor corner, margin inset from the
+  // work-area edges, width proportional to the visible-card count).
+  const PREVIEW_W = 320;
+  const PREVIEW_H = 180;
+  // Real card height ≈ 150px on a ≈1040px-tall work area; keep that
+  // proportion in the preview.
+  const SHELF_H = Math.round((150 / 1040) * PREVIEW_H);
+  const SHELF_CARD_W = 56;
+  let shelfRect = $derived.by(() => {
+    const scale = PREVIEW_W / 1920;
+    const margin = prefs.marginPx * scale;
+    const width = Math.min(
+      PREVIEW_W - margin * 2,
+      prefs.visibleCardCount * (SHELF_CARD_W * scale * 2) + 8,
+    );
+    switch (prefs.corner) {
+      case "top_left":
+        return { x: margin, y: margin, w: width };
+      case "top_right":
+        return { x: PREVIEW_W - margin - width, y: margin, w: width };
+      case "bottom_left":
+        return { x: margin, y: PREVIEW_H - margin - SHELF_H, w: width };
+      default:
+        return { x: PREVIEW_W - margin - width, y: PREVIEW_H - margin - SHELF_H, w: width };
+    }
+  });
 </script>
 
 <section class="panel" data-testid="shelf-settings-panel">
@@ -117,12 +146,40 @@
       }}
     >
       <option value="">Primary (follow)</option>
-      {#if prefs.targetMonitorId && prefs.targetMonitorId !== ""}
+      <!-- Issue #63: anchor to whichever monitor the pointer is over. -->
+      <option value="cursor" data-testid="display-option-cursor">Cursor monitor</option>
+      {#if prefs.targetMonitorId && prefs.targetMonitorId !== "" && prefs.targetMonitorId !== "cursor"}
         <option value={prefs.targetMonitorId}>
           Pinned: {prefs.targetMonitorId}
         </option>
       {/if}
     </select>
+  </fieldset>
+
+  <!-- Issue #63: live placement preview. -->
+  <fieldset>
+    <legend>Placement preview</legend>
+    <svg
+      data-testid="placement-preview"
+      role="img"
+      aria-label="Preview of where the shelf will appear on the selected monitor"
+      width={PREVIEW_W}
+      height={PREVIEW_H}
+    >
+      <rect x="0" y="0" width={PREVIEW_W} height={PREVIEW_H} fill="#1e1e24" stroke="#888"></rect>
+      <rect x="0" y={PREVIEW_H - 12} width={PREVIEW_W} height="12" fill="#2b2b33"></rect>
+      <rect
+        data-testid="placement-rect"
+        data-corner={prefs.corner}
+        data-margin={prefs.marginPx}
+        x={shelfRect.x}
+        y={shelfRect.y}
+        width={shelfRect.w}
+        height={SHELF_H}
+        fill="#4ea1ff"
+        opacity="0.85"
+      ></rect>
+    </svg>
   </fieldset>
 
   <fieldset>

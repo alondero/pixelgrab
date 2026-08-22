@@ -51,6 +51,10 @@ struct EngineState {
     /// authoritative — a stale layout could place pixels against the wrong
     /// monitor offsets.
     topology_dirty: bool,
+    /// Issue #63: when set, capture frames are persisted under this root
+    /// (bounded local asset transport) and the resolution carries the
+    /// file path instead of an inline base64 data URL.
+    frame_cache_root: Option<std::path::PathBuf>,
 }
 
 /// Maximum number of physical pixels the composite framebuffer is allowed
@@ -128,8 +132,16 @@ impl CaptureEngine {
                 frozen: None,
                 layout: None,
                 topology_dirty: true,
+                frame_cache_root: None,
             })),
         }
+    }
+
+    /// Configure the root under which capture frames are persisted for
+    /// the bounded local asset transport (issue #63). When unset the
+    /// engine falls back to inline data URLs (synthetic / CI paths).
+    pub fn set_frame_cache_root(&self, root: Option<std::path::PathBuf>) {
+        self.inner.lock().frame_cache_root = root;
     }
 
     /// Return the cached monitor layout, querying the OS if not yet cached.
@@ -248,7 +260,19 @@ impl CaptureEngine {
                 }
             }
         };
-        let asset_url = encode_png_data_url(&frame)?;
+        // Issue #63: bounded local asset transport — encode once, write
+        // the PNG under the frame cache root, and hand the webview a
+        // file path (loaded via the asset protocol) instead of a
+        // multi-megabyte base64 string crossing IPC.
+        let png_bytes = encode_png(&frame.rgba, frame.bounds.size)?;
+        let asset_url = {
+            let state = self.inner.lock();
+            crate::platform::asset::write_capture_asset(
+                state.frame_cache_root.as_deref(),
+                &capture_id,
+                &png_bytes,
+            )?
+        };
         let resolution = CaptureResolution {
             format: request.format,
             bounds: frame.bounds,
@@ -298,7 +322,10 @@ impl Default for CaptureEngine {
     }
 }
 
-/// Query the current monitor layout from Windows via `xcap`.
+/// Query the current monitor layout from Windows via `xcap`, then
+/// merge the real per-monitor work areas reported by `GetMonitorInfoW`
+/// (issue #63 — `xcap` does not report work-area insets, so the shelf
+/// placement math would otherwise treat the taskbar as usable space).
 fn query_monitor_layout() -> Result<MonitorLayout, xcap::XCapError> {
     let monitors = xcap::Monitor::all()?;
     let mut descriptors = Vec::with_capacity(monitors.len());
@@ -315,8 +342,8 @@ fn query_monitor_layout() -> Result<MonitorLayout, xcap::XCapError> {
         let height = monitor.height().unwrap_or(0);
         let scale_factor = monitor.scale_factor().unwrap_or(1.0);
         let bounds = PhysicalBounds::from_xywh(x, y, width, height);
-        // `xcap` does not currently report work-area insets; use the full
-        // bounds until a richer source becomes available.
+        // Placeholder until the `apply_work_areas` merge below replaces
+        // it with the real `rcWork` rect.
         let work_area = bounds;
         descriptors.push(MonitorDescriptor {
             id,
@@ -330,7 +357,12 @@ fn query_monitor_layout() -> Result<MonitorLayout, xcap::XCapError> {
     if descriptors.is_empty() {
         return Err(xcap::XCapError::new("no monitors returned by xcap"));
     }
-    Ok(MonitorLayout::new(descriptors))
+    let mut layout = MonitorLayout::new(descriptors);
+    let raw_work_areas = super::work_area::ffi::query_raw_work_areas();
+    if !raw_work_areas.is_empty() {
+        layout = super::work_area::apply_work_areas(&layout, &raw_work_areas);
+    }
+    Ok(layout)
 }
 
 /// Capture the pixels for the given physical bounds. Routes through the

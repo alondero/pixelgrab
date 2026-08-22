@@ -16,20 +16,24 @@
 // IPC failure cannot block the shelf window from appearing.
 
 import { mount } from "svelte";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import ShelfQueue from "./lib/shelf/ShelfQueue.svelte";
 import {
   copyShelfCard,
   dismissCacheEntry,
   getShelfQueueSnapshot,
   hoverShelfCard,
+  openRevision,
   saveShelfCardAs,
+  showMainWindow,
+  startShelfDrag,
   tickShelfQueue,
   unhoverShelfCard,
 } from "./lib/ipc/commands";
-import type { ShelfQueueSnapshot } from "./lib/ipc/types";
+import type { RevisionContext, ShelfQueueCard, ShelfQueueSnapshot } from "./lib/ipc/types";
 import type { ShelfClearedEvent } from "./lib/shelf/types";
 import { createFeedbackStore } from "./lib/shelf/feedback.svelte";
+import { pinStore } from "./lib/pin/pinStore.svelte";
 
 const target = document.getElementById("shelf");
 if (!target) {
@@ -44,6 +48,15 @@ let currentSnapshot = $state<ShelfQueueSnapshot | null>(null);
 // `aria-live="polite"` region; the store is fed by the onCopy /
 // onSaveAs callbacks below.
 const feedback = createFeedbackStore();
+
+function findCard(shelfId: string): ShelfQueueCard | undefined {
+  const snapshot = currentSnapshot;
+  if (!snapshot) return undefined;
+  return (
+    snapshot.cards.find((card) => card.shelfId === shelfId) ??
+    snapshot.overflow.find((card) => card.shelfId === shelfId)
+  );
+}
 
 mount(ShelfQueue, {
   target,
@@ -85,6 +98,55 @@ mount(ShelfQueue, {
     },
     onTickExpired: () => {
       void tickShelfQueue();
+    },
+    // Issue #63: pin the card into an independent TopMost reference
+    // window. The Rust core creates the native window and acquires
+    // the cache `Pin` lock; the frontend only supplies the source.
+    onPin: async (shelfId: string) => {
+      const card = findCard(shelfId);
+      if (!card) return;
+      const view = await pinStore.openPin({
+        captureId: card.captureId,
+        pngPath: card.pngPath,
+        bounds: card.bounds,
+      });
+      if (view) {
+        feedback.flash("Pinned to screen", "success");
+      } else {
+        feedback.flash("Pin failed", "error");
+      }
+    },
+    // Issue #63: reopen the card for non-destructive editing. On
+    // success the restored scene is forwarded to the main window via
+    // `pixelgrab://revision-opened` and the companion window is shown
+    // so the revision editor becomes visible.
+    onEdit: async (card: ShelfQueueCard) => {
+      const response = await openRevision({ shelfId: card.shelfId });
+      if (response.status === "ok") {
+        const context: RevisionContext = response.data.context;
+        await emit("pixelgrab://revision-opened", context);
+        await showMainWindow();
+      } else {
+        feedback.flash(`Reopen failed: ${response.error.message}`, "error");
+      }
+    },
+    // Issue #63: start the native OLE drag. Only `Accepted` dismisses
+    // the card, and the backend computes that policy — the frontend
+    // just follows the returned hint.
+    onDrag: async (card: ShelfQueueCard) => {
+      const response = await startShelfDrag({
+        shelfId: card.shelfId,
+        dismissOnAccepted: true,
+      });
+      if (response.status === "ok") {
+        if (response.data.shouldDismiss) {
+          void dismissCacheEntry({ shelfId: card.shelfId });
+        } else {
+          feedback.flash("Drop cancelled — card kept", "info");
+        }
+      } else {
+        feedback.flash(`Drag failed: ${response.error.message}`, "error");
+      }
     },
   },
 });

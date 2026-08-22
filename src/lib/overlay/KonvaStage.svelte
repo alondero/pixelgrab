@@ -17,9 +17,20 @@
 
   import { onMount } from "svelte";
   import Konva from "konva";
+  import { convertFileSrc } from "@tauri-apps/api/core";
   import type { Annotation, PhysicalBounds, PhysicalPoint } from "$lib/ipc/types";
   import { annotationStore, type TransformHandle } from "$lib/annotation/store.svelte";
   import type { AnnotationColor, AnnotationStroke } from "$lib/ipc/types";
+
+  // Issue #63: the capture asset may be a local file path (bounded
+  // transport) rather than an inline data URL. Local paths load via
+  // the Tauri asset protocol; data URLs pass through unchanged.
+  function resolveAssetUrl(url: string): string {
+    if (url.startsWith("data:") || url.startsWith("asset:") || url.startsWith("http")) {
+      return url;
+    }
+    return convertFileSrc(url);
+  }
 
   interface Props {
     assetUrl: string;
@@ -1124,7 +1135,7 @@
       imageLayer.add(imageNode);
       imageLayer.draw();
     };
-    img.src = assetUrl;
+    img.src = resolveAssetUrl(assetUrl);
 
     const dimAttrs = {
       fill: "rgba(0, 0, 0, 0.55)",

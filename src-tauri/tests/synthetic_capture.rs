@@ -15,7 +15,7 @@ use pixelgrab_lib::platform::{
 use pixelgrab_test_support::fs::IsolatedFilesystem;
 
 #[test]
-fn synthetic_capture_returns_data_url() {
+fn synthetic_capture_without_root_falls_back_to_data_url() {
     let platform: Arc<dyn PixelGrabPlatform> = Arc::new(SyntheticPlatform::new());
     let request = pixelgrab_contracts::capture::CaptureRequest {
         format: pixelgrab_contracts::capture::CaptureFormat::VirtualDesktop,
@@ -25,8 +25,36 @@ fn synthetic_capture_returns_data_url() {
     let resolution = platform.capture(&request).expect("capture");
     assert!(
         resolution.asset_url.starts_with("data:image/png;base64,"),
-        "synthetic capture should produce a data URL"
+        "without a cache root the transport falls back to a data URL"
     );
+}
+
+#[test]
+fn synthetic_capture_with_root_returns_local_asset_path() {
+    // Issue #63: with a configured cache root the freeze frame is
+    // persisted once and the resolution carries its file path — the
+    // multi-megabyte base64 payload never crosses IPC.
+    let fs = IsolatedFilesystem::new("synthetic-asset-transport").expect("fs");
+    let synthetic = Arc::new(SyntheticPlatform::new());
+    synthetic.set_cache_root(fs.root().to_path_buf());
+    let platform: Arc<dyn PixelGrabPlatform> = synthetic;
+
+    let request = pixelgrab_contracts::capture::CaptureRequest {
+        format: pixelgrab_contracts::capture::CaptureFormat::VirtualDesktop,
+        monitor_id: None,
+        region: None,
+    };
+    let resolution = platform.capture(&request).expect("capture");
+    assert!(
+        !resolution.asset_url.starts_with("data:"),
+        "asset url must not be an inline data URL when a root is configured"
+    );
+    let path = std::path::PathBuf::from(&resolution.asset_url);
+    assert!(path.exists(), "frame file exists under frames/");
+    assert!(path.starts_with(fs.root()));
+    // The frame decodes as a PNG.
+    let bytes = std::fs::read(&path).expect("read frame");
+    assert!(bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
 }
 
 #[test]

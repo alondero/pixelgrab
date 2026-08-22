@@ -5,6 +5,12 @@
   // One shelf card. Renders the thumbnail, the editable title, the
   // countdown, and the quick-action buttons. The parent component
   // (ShelfQueue) wires the `on*` callbacks to IPC commands.
+  //
+  // Issue #63: the card also exposes Pin (independent TopMost window),
+  // Edit (reopen for non-destructive revision), and a native drag
+  // gesture — a pointer press that moves past `DRAG_THRESHOLD_PX`
+  // fires `onDrag` exactly once per gesture; the backend owns the OLE
+  // drag loop from there.
   let {
     card,
     nowMs,
@@ -13,6 +19,9 @@
     onDismiss = () => {},
     onHover = () => {},
     onUnhover = () => {},
+    onPin = () => {},
+    onEdit = () => {},
+    onDrag = () => {},
   }: {
     card: ShelfQueueCard;
     nowMs: number;
@@ -21,7 +30,41 @@
     onDismiss?: (shelfId: string) => void;
     onHover?: (shelfId: string) => void;
     onUnhover?: (shelfId: string) => void;
+    onPin?: (shelfId: string) => void;
+    onEdit?: (card: ShelfQueueCard) => void;
+    onDrag?: (card: ShelfQueueCard) => void;
   } = $props();
+
+  const DRAG_THRESHOLD_PX = 8;
+
+  // Native drag gesture state. One gesture = one pointerdown → up
+  // sequence; only a movement past the threshold fires the callback.
+  let dragGestureActive = false;
+  let dragFired = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+
+  function onPointerDown(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    dragGestureActive = true;
+    dragFired = false;
+    dragStartX = event.clientX;
+    dragStartY = event.clientY;
+  }
+
+  function onPointerMove(event: PointerEvent): void {
+    if (!dragGestureActive || dragFired) return;
+    const dx = event.clientX - dragStartX;
+    const dy = event.clientY - dragStartY;
+    if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
+      dragFired = true;
+      onDrag(card);
+    }
+  }
+
+  function onPointerUp(): void {
+    dragGestureActive = false;
+  }
 
   type TauriGlobal = {
     core?: { convertFileSrc?: (p: string) => string };
@@ -54,24 +97,34 @@
   onfocusin={() => onHover(card.shelfId)}
   onfocusout={() => onUnhover(card.shelfId)}
 >
-  <div class="thumbnail" data-testid="shelf-thumbnail">
-    <img src={pngUrl} alt={titleText} />
-  </div>
-  <div class="meta">
-    <div class="title" data-testid="shelf-title">{titleText}</div>
-    <div class="row">
-      <span class="size" data-testid="shelf-size">
-        {Math.round(card.sizeBytes / 1024)} KB
-      </span>
-      <span
-        class="countdown"
-        class:paused
-        class:expired
-        data-testid="shelf-countdown"
-        aria-label={paused ? "Card timer paused" : "Card timer remaining"}
-      >
-        {countdownText}
-      </span>
+  <div
+    class="drag-surface"
+    data-testid="shelf-drag-surface"
+    role="presentation"
+    onpointerdown={onPointerDown}
+    onpointermove={onPointerMove}
+    onpointerup={onPointerUp}
+    onpointercancel={onPointerUp}
+  >
+    <div class="thumbnail" data-testid="shelf-thumbnail">
+      <img src={pngUrl} alt={titleText} draggable="false" />
+    </div>
+    <div class="meta">
+      <div class="title" data-testid="shelf-title">{titleText}</div>
+      <div class="row">
+        <span class="size" data-testid="shelf-size">
+          {Math.round(card.sizeBytes / 1024)} KB
+        </span>
+        <span
+          class="countdown"
+          class:paused
+          class:expired
+          data-testid="shelf-countdown"
+          aria-label={paused ? "Card timer paused" : "Card timer remaining"}
+        >
+          {countdownText}
+        </span>
+      </div>
     </div>
   </div>
   <div class="actions">
@@ -95,6 +148,24 @@
     </button>
     <button
       type="button"
+      class="action"
+      data-testid="shelf-pin"
+      aria-label="Pin card as reference window"
+      onclick={() => onPin(card.shelfId)}
+    >
+      Pin
+    </button>
+    <button
+      type="button"
+      class="action"
+      data-testid="shelf-edit"
+      aria-label="Reopen card for editing"
+      onclick={() => onEdit(card)}
+    >
+      Edit
+    </button>
+    <button
+      type="button"
       class="dismiss"
       data-testid="shelf-dismiss"
       aria-label="Dismiss shelf card"
@@ -113,11 +184,11 @@
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 8px;
     display: grid;
-    grid-template-columns: 56px 1fr;
+    grid-template-columns: 1fr;
     grid-template-rows: 1fr auto;
     grid-template-areas:
-      "thumbnail meta"
-      "actions actions";
+      "surface"
+      "actions";
     gap: 6px;
     padding: 6px 8px;
     color: #fff;
@@ -125,6 +196,17 @@
     box-sizing: border-box;
     overflow: hidden;
     transition: opacity 200ms ease;
+  }
+  .drag-surface {
+    grid-area: surface;
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    gap: 6px;
+    min-height: 0;
+    cursor: grab;
+  }
+  .drag-surface:active {
+    cursor: grabbing;
   }
   .card.paused {
     border-color: rgba(78, 161, 255, 0.6);

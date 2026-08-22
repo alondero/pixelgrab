@@ -1,11 +1,10 @@
 <!--
-  PinWindow - borderless TopMost reference window for a single captured
-  image. The window is drag-anywhere, cursor-centered zoom, Ctrl+wheel
-  opacity, and exposes Copy / Save As / Reset / Close context actions.
-
-  The component is data-driven: it never mutates `view` directly. Every
-  gesture becomes a `PinCommand` round-trip through the IPC; the Rust
-  registry is the single source of truth for the transform.
+  PinWindow - content of a borderless TopMost reference window (issue
+  #63). One native webview window exists per pin; the window itself
+  owns the on-screen position and size, so this component renders at
+  viewport scale and routes every gesture to the Rust registry as a
+  `PinCommand`. The IPC layer applies each updated transform back onto
+  the native window and re-emits the view model.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
@@ -22,9 +21,9 @@
   let contextMenuY = $state(0);
   let containerEl: HTMLDivElement | null = null;
 
-  // Computed physical-pixel size for the inner image. The window size
-  // rounds to whole pixels; the inner image displays whatever the
-  // browser interprets (it does not have to be pixel-perfect).
+  // The native window owns placement; this component fills it and
+  // applies the registry's zoom-derived size and opacity to its
+  // contents.
   let widthPx = $derived(view.transform.windowSize.width);
   let heightPx = $derived(view.transform.windowSize.height);
   let opacityPct = $derived(Math.round(view.transform.opacity * 100));
@@ -130,7 +129,6 @@
   style="
     width: {widthPx}px;
     height: {heightPx}px;
-    transform: translate({view.transform.position.x}px, {view.transform.position.y}px);
     opacity: {view.transform.opacity};
   "
   onpointerdown={onPointerDown}

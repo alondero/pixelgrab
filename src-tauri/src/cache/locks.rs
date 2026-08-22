@@ -10,14 +10,17 @@
 //!
 //! - `LockOwner` is a closed enum (see `pixelgrab_contracts::LockOwner`).
 //!   New owner kinds must be added as new variants.
-//! - A lock is identified by `(ShelfId, LockOwner)`. The same owner
-//!   double-locking the same entry is a no-op (the underlying set
-//!   already contains the owner) so the API is safe to call twice
-//!   without bookkeeping.
+//! - A lock is identified by `(ShelfId, LockOwner)`. Acquiring the same
+//!   `(shelf, owner)` pair more than once takes an additional
+//!   *reference* (issue #63): each `acquire` increments a per-owner
+//!   reference count and each guard drop decrements it, so N pins of
+//!   the same capture keep the `Pin` owner alive until the last pin
+//!   closes. The owner is only released when the count reaches zero.
 //! - A `LockGuard` releases on `Drop`. Callers that want to release
-//!   early can call `release()`.
+//!   early can call `release()`; a guard releases its reference at most
+//!   once even when both paths run.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use parking_lot::Mutex;
 use pixelgrab_contracts::{LockOwner, PlatformError, PlatformErrorKind, PlatformResult, ShelfId};
@@ -74,9 +77,11 @@ pub struct ActiveLockSet {
 
 #[derive(Debug, Default)]
 struct LocksInner {
-    /// Owner count per shelf id. Always >= 1 for an active entry;
-    /// dropping to zero removes the entry from the map.
-    entries: BTreeMap<ShelfId, BTreeSet<LockOwner>>,
+    /// Reference count per `(shelf id, owner)` pair. Always >= 1 for an
+    /// active owner; dropping to zero removes the owner from the map.
+    /// The shelf entry itself is kept (with an empty map) so
+    /// `try_cleanup` can return `Removed` rather than `Unknown`.
+    entries: BTreeMap<ShelfId, BTreeMap<LockOwner, usize>>,
 }
 
 impl ActiveLockSet {
@@ -85,22 +90,23 @@ impl ActiveLockSet {
         Self::default()
     }
 
-    /// Acquire a lock for `owner` on `shelf_id`. Returns an owned guard
-    /// that releases the lock when dropped.
+    /// Acquire a lock reference for `owner` on `shelf_id`. Returns an
+    /// owned guard that releases the reference when dropped.
     ///
-    /// Idempotent: if the same owner already holds the lock the call is
-    /// a no-op and the returned guard still releases on drop (without
-    /// changing the underlying count).
+    /// Re-entrant: each call takes an additional reference on the
+    /// `(shelf_id, owner)` pair (issue #63 pin refcounting). The owner
+    /// stays visible to `owners_of` until every guard has dropped.
     pub fn acquire(&self, shelf_id: ShelfId, owner: LockOwner) -> LockGuard {
         {
             let mut inner = self.inner.lock();
             let owners = inner.entries.entry(shelf_id.clone()).or_default();
-            owners.insert(owner);
+            *owners.entry(owner).or_insert(0) += 1;
         }
         LockGuard {
             registry: self.clone_handle(),
             shelf_id,
             owner,
+            released: false,
         }
     }
 
@@ -111,19 +117,25 @@ impl ActiveLockSet {
         inner
             .entries
             .get(shelf_id)
-            .map(|set| set.iter().copied().collect())
+            .map(|owners| owners.keys().copied().collect())
             .unwrap_or_default()
     }
 
-    /// Release a single owner from `shelf_id`. Internal helper used by
-    /// the `LockGuard::Drop` impl and by `try_cleanup` / `try_dismiss`.
-    /// Decrement-only — the entry is kept in the map (with an empty
-    /// owner set) so `try_cleanup` can return `Removed` rather than
-    /// `Unknown` for entries that have been fully unlocked.
+    /// Release a single lock reference from `shelf_id`'s `owner`.
+    /// Internal helper used by the `LockGuard::Drop` impl and by
+    /// `try_cleanup` / `try_dismiss`. Decrement-only — the owner is
+    /// removed when its reference count reaches zero, but the shelf
+    /// entry is kept in the map (with an empty owner map) so
+    /// `try_cleanup` can return `Removed` rather than `Unknown`.
     fn release(&self, shelf_id: &str, owner: LockOwner) {
         let mut inner = self.inner.lock();
         if let Some(owners) = inner.entries.get_mut(shelf_id) {
-            owners.remove(&owner);
+            if let Some(count) = owners.get_mut(&owner) {
+                *count -= 1;
+                if *count == 0 {
+                    owners.remove(&owner);
+                }
+            }
             // Intentionally do NOT remove the entry here — see the
             // function-level docs for why.
         }
@@ -180,7 +192,7 @@ impl ActiveLockSet {
         inner
             .entries
             .iter()
-            .map(|(id, set)| (id.clone(), set.iter().copied().collect()))
+            .map(|(id, owners)| (id.clone(), owners.keys().copied().collect()))
             .collect()
     }
 
@@ -205,6 +217,10 @@ pub struct LockGuard {
     registry: ActiveLockSet,
     shelf_id: ShelfId,
     owner: LockOwner,
+    /// `true` once this guard has released its reference (via the
+    /// explicit `release()` method). The `Drop` impl skips the release
+    /// when set, so a guard never decrements twice.
+    released: bool,
 }
 
 impl LockGuard {
@@ -218,18 +234,19 @@ impl LockGuard {
         self.owner
     }
 
-    /// Release the lock early. After this returns the `Drop` impl
-    /// runs the same `release` a second time, which is a no-op on
-    /// the registry's `BTreeSet` (`remove` on a missing element is a
-    /// no-op). The duplication is bounded and side-effect free.
-    pub fn release(self) {
+    /// Release the lock reference early. After this returns the `Drop`
+    /// impl is a no-op — each guard releases exactly one reference.
+    pub fn release(mut self) {
         self.registry.release(&self.shelf_id, self.owner);
+        self.released = true;
     }
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        self.registry.release(&self.shelf_id, self.owner);
+        if !self.released {
+            self.registry.release(&self.shelf_id, self.owner);
+        }
     }
 }
 
@@ -272,6 +289,33 @@ mod tests {
         let _a = locks.acquire("shelf-1".to_string(), LockOwner::Shelf);
         let _b = locks.acquire("shelf-1".to_string(), LockOwner::Shelf);
         assert_eq!(locks.owners_of("shelf-1"), vec![LockOwner::Shelf]);
+    }
+
+    #[test]
+    fn same_owner_guards_refcount_until_last_drop() {
+        // Issue #63: two pins of the same capture each hold a guard.
+        // The owner must stay visible until the LAST guard drops.
+        let locks = ActiveLockSet::new();
+        let a = locks.acquire("shelf-1".to_string(), LockOwner::Pin);
+        let b = locks.acquire("shelf-1".to_string(), LockOwner::Pin);
+        drop(a);
+        assert_eq!(
+            locks.owners_of("shelf-1"),
+            vec![LockOwner::Pin],
+            "one live reference must keep the owner"
+        );
+        drop(b);
+        assert!(locks.owners_of("shelf-1").is_empty());
+    }
+
+    #[test]
+    fn explicit_release_then_drop_decrements_once() {
+        let locks = ActiveLockSet::new();
+        let guard = locks.acquire("shelf-1".to_string(), LockOwner::Drag);
+        guard.release();
+        assert!(locks.owners_of("shelf-1").is_empty());
+        // Dropping after an explicit release must not underflow the
+        // reference count (the count is already at zero).
     }
 
     #[test]

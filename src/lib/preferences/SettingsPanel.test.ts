@@ -112,4 +112,38 @@ describe("SettingsPanel", () => {
     expect(screen.getByTestId("countdown-toggle")).toBeTruthy();
     expect(screen.getByTestId("auto-dismiss-toggle")).toBeTruthy();
   });
+
+  // Issue #63: cursor-monitor targeting.
+  it("offers a cursor-monitor option in the display picker", () => {
+    const { store } = fakeStore();
+    render(SettingsPanel, { store });
+    const option = screen.getByTestId("display-option-cursor") as HTMLOptionElement;
+    expect(option.value).toBe("cursor");
+  });
+
+  it("selecting the cursor option patches targetMonitorId to 'cursor'", async () => {
+    const user = userEvent.setup();
+    const { store, applyPatch } = fakeStore();
+    render(SettingsPanel, { store });
+    await user.selectOptions(screen.getByTestId("display-picker"), "cursor");
+    expect(applyPatch).toHaveBeenCalledWith({ targetMonitorId: "cursor" });
+  });
+
+  // Issue #63: live placement preview.
+  it("renders a placement preview whose shelf rect sits at the chosen corner", () => {
+    const { store } = fakeStore();
+    render(SettingsPanel, { store });
+    const preview = screen.getByTestId("placement-preview");
+    expect(preview).toBeTruthy();
+    const rect = screen.getByTestId("placement-rect");
+    expect(rect.getAttribute("data-corner")).toBe("bottom_right");
+    // Margin is reflected on the preview so the user sees the gap.
+    expect(rect.getAttribute("data-margin")).toBe("24");
+  });
+
+  it("moves the preview shelf rect when the corner changes in prefs", () => {
+    const { store } = fakeStore({ ...SAMPLE, corner: "top_left" });
+    render(SettingsPanel, { store });
+    expect(screen.getByTestId("placement-rect").getAttribute("data-corner")).toBe("top_left");
+  });
 });

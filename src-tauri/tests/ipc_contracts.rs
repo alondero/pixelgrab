@@ -558,23 +558,16 @@ fn shelf_cleared_event_round_trips() {
 
 #[test]
 fn start_shelf_drag_intent_serialises_camel_case() {
-    let req = DragRequest {
-        capture_id: "capture-1".into(),
-        shelf_id: Some("shelf-1".to_string()),
-        png_path: "C:/cache/capture.png".into(),
-        bgra_pixels: vec![0u8; 4 * 4 * 4],
-        width: 4,
-        height: 4,
-    };
+    // Issue #63: the frontend only names the shelf card; the Rust
+    // core builds the OLE payload from the committed cache entry so
+    // the heavy PNG / BGRA bytes never cross the IPC boundary.
     let intent = StartShelfDragIntent {
-        request: req,
+        shelf_id: "shelf-1".into(),
         dismiss_on_accepted: true,
     };
     let json = serde_json::to_string(&intent).expect("serialize");
+    assert!(json.contains("\"shelfId\":\"shelf-1\""));
     assert!(json.contains("\"dismissOnAccepted\":true"));
-    assert!(json.contains("\"pngPath\":"));
-    assert!(json.contains("\"bgraPixels\":"));
-    assert!(json.contains("\"captureId\":\"capture-1\""));
 }
 
 #[test]

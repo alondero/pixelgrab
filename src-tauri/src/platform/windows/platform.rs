@@ -65,9 +65,14 @@ impl WindowsPlatform {
     }
 
     /// Replace the cache root. The commit pipeline writes flattened PNGs
-    /// here when the user retains the capture on the shelf.
+    /// here when the user retains the capture on the shelf. The capture
+    /// engine also persists freeze frames under `<root>/frames` so the
+    /// overlay loads them through the asset protocol instead of inline
+    /// base64 (issue #63).
     pub fn set_cache_root(&self, cache_root: PathBuf) {
-        *self.inner.cache_root.lock() = Some(cache_root);
+        *self.inner.cache_root.lock() = Some(cache_root.clone());
+        // The asset layer appends `frames/` itself (issue #63).
+        self.inner.engine.set_frame_cache_root(Some(cache_root));
     }
 
     /// Read the configured cache root. Returns None if unset.
@@ -89,6 +94,11 @@ impl PixelGrabPlatform for WindowsPlatform {
 
     fn invalidate_layout(&self) {
         self.inner.engine.invalidate_layout();
+    }
+
+    fn cursor_position(&self) -> Option<pixelgrab_contracts::coordinate::PhysicalPoint> {
+        super::work_area::ffi::query_cursor_position()
+            .map(|(x, y)| pixelgrab_contracts::coordinate::PhysicalPoint::new(x, y))
     }
 
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution> {

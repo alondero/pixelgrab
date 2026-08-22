@@ -46,6 +46,9 @@ struct SyntheticPlatformState {
     /// `true` when the cached layout has been invalidated since the
     /// last query. Mirrors the Windows engine's `topology_dirty` flag.
     topology_dirty: Mutex<bool>,
+    /// Synthetic cursor position for cursor-monitor targeting tests
+    /// (issue #63). `None` mirrors "no interactive desktop".
+    cursor_position: Mutex<Option<pixelgrab_contracts::coordinate::PhysicalPoint>>,
 }
 
 impl SyntheticPlatform {
@@ -60,6 +63,7 @@ impl SyntheticPlatform {
                 drag: SyntheticDragSource::new(),
                 failing_monitors: Mutex::new(Vec::new()),
                 topology_dirty: Mutex::new(false),
+                cursor_position: Mutex::new(None),
             }),
         }
     }
@@ -103,9 +107,19 @@ impl SyntheticPlatform {
     }
 
     /// `true` when the cached topology has been invalidated since the
-    /// last layout query. Mirrors `CaptureEngine::is_topology_dirty`.
+    /// last query. Mirrors `CaptureEngine::is_topology_dirty`.
     pub fn is_topology_dirty(&self) -> bool {
         *self.inner.topology_dirty.lock()
+    }
+
+    /// Set the synthetic cursor position (issue #63). Tests use this to
+    /// exercise cursor-monitor shelf targeting; passing `None` restores
+    /// the "no interactive desktop" behaviour.
+    pub fn set_cursor_position(
+        &self,
+        position: Option<pixelgrab_contracts::coordinate::PhysicalPoint>,
+    ) {
+        *self.inner.cursor_position.lock() = position;
     }
 
     /// Borrow the synthetic drag source. Tests use this to install a
@@ -154,6 +168,10 @@ impl PixelGrabPlatform for SyntheticPlatform {
         self.mark_topology_changed();
     }
 
+    fn cursor_position(&self) -> Option<pixelgrab_contracts::coordinate::PhysicalPoint> {
+        *self.inner.cursor_position.lock()
+    }
+
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution> {
         let layout = self.inner.layout.lock().clone();
         let pattern = *self.inner.pattern.lock();
@@ -166,7 +184,6 @@ impl PixelGrabPlatform for SyntheticPlatform {
             )
         })?;
         let composite_bounds = virtual_bounds.as_top_left_bounds();
-        let buffer_size = composite_bounds.size;
 
         let capture_id = Uuid::new_v4().to_string();
         let captured_at_ms = 1_700_000_000_000;
@@ -210,10 +227,18 @@ impl PixelGrabPlatform for SyntheticPlatform {
             }
         };
 
-        let url = format!(
-            "data:image/png;base64,{}",
-            encode_rgba_as_data_url(&rgba, buffer_size)
-        );
+        // Issue #63: bounded local asset transport. With a cache root
+        // the resolution carries the frame file path; without one the
+        // shared helper falls back to an inline data URL so CI paths
+        // that never configure a root still work. The PNG encodes the
+        // *captured* region (`bounds.size`) — for SingleMonitor that is
+        // one monitor, not the whole composite buffer.
+        let png_bytes = encode_rgba_png(&rgba, bounds.size)?;
+        let url = crate::platform::asset::write_capture_asset(
+            self.inner.cache_root.lock().as_deref(),
+            &capture_id,
+            &png_bytes,
+        )?;
         let _ = captured_at_ms; // mirror Windows: not exposed via the synthetic data URL
         let _ = bounds.size;
         Ok(CaptureResolution {
@@ -471,10 +496,9 @@ fn blit_rgba(dst: &mut [u8], dst_size: PhysicalSize, offset: &PhysicalBounds, sr
     }
 }
 
-/// Encode an RGBA framebuffer as a PNG and wrap it in a data URL. Used by
-/// the synthetic capture path so the WebView can load the bytes without
-/// touching the filesystem.
-fn encode_rgba_as_data_url(rgba: &[u8], size: PhysicalSize) -> String {
+/// Encode an RGBA framebuffer as a PNG. Used by the synthetic capture
+/// path before the shared bounded-asset transport persists the bytes.
+fn encode_rgba_png(rgba: &[u8], size: PhysicalSize) -> PlatformResult<Vec<u8>> {
     let width = size.width;
     let height = size.height;
     let mut buf = Vec::with_capacity(((width as usize) * (height as usize) * 4) + 1024);
@@ -482,58 +506,23 @@ fn encode_rgba_as_data_url(rgba: &[u8], size: PhysicalSize) -> String {
         let mut encoder = png::Encoder::new(&mut buf, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = match encoder.write_header() {
-            Ok(w) => w,
-            Err(_) => return String::new(),
-        };
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| PlatformError::new(PlatformErrorKind::Io, format!("png header: {e}")))?;
         {
             use std::io::Write;
-            let mut stream = match writer.stream_writer() {
-                Ok(s) => s,
-                Err(_) => return String::new(),
-            };
-            if stream.write_all(rgba).is_err() {
-                return String::new();
-            }
-            if stream.finish().is_err() {
-                return String::new();
-            }
+            let mut stream = writer.stream_writer().map_err(|e| {
+                PlatformError::new(PlatformErrorKind::Io, format!("png stream: {e}"))
+            })?;
+            stream.write_all(rgba).map_err(|e| {
+                PlatformError::new(PlatformErrorKind::Io, format!("png write: {e}"))
+            })?;
+            stream.finish().map_err(|e| {
+                PlatformError::new(PlatformErrorKind::Io, format!("png finish: {e}"))
+            })?;
         }
     }
-    format!("data:image/png;base64,{}", base64_encode(&buf))
-}
-
-/// Minimal RFC 4648 base64 encoder. Avoids pulling a crate in just for this.
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let b = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
-        out.push(ALPHABET[((b >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((b >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((b >> 6) & 0x3F) as usize] as char);
-        out.push(ALPHABET[(b & 0x3F) as usize] as char);
-        i += 3;
-    }
-    match input.len() - i {
-        1 => {
-            let b = (input[i] as u32) << 16;
-            out.push(ALPHABET[((b >> 18) & 0x3F) as usize] as char);
-            out.push(ALPHABET[((b >> 12) & 0x3F) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            let b = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
-            out.push(ALPHABET[((b >> 18) & 0x3F) as usize] as char);
-            out.push(ALPHABET[((b >> 12) & 0x3F) as usize] as char);
-            out.push(ALPHABET[((b >> 6) & 0x3F) as usize] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-    out
+    Ok(buf)
 }
 
 #[cfg(test)]

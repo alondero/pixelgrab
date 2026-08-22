@@ -3,6 +3,7 @@
 //! code. The synthetic adapter lives here too so tests can drive the
 //! orchestrator without any OS dependency.
 
+pub mod asset;
 pub mod contract;
 pub mod drag_synthetic;
 

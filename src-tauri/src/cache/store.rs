@@ -214,6 +214,13 @@ struct CacheInner {
     /// session so the sweeper and the manual `clear_cache` cannot
     /// evict the user's work-in-progress.
     editor_guards: std::collections::BTreeMap<ShelfId, LockGuard>,
+    /// Issue #63: owned `Pin` lock guards, one per open pin reference.
+    /// The pin registry's cache-backed lock provider pushes a guard on
+    /// every `acquire(capture_id)` and pops one on every `release`, so
+    /// N pins of the same capture keep N references alive. While any
+    /// guard is held the sweeper and the manual `clear_cache` cannot
+    /// evict the pinned entry's PNG.
+    pin_guards: std::collections::BTreeMap<ShelfId, Vec<LockGuard>>,
     /// Optional one-shot fault for the next commit. `None` in
     /// production; tests set this to exercise a specific stage.
     pending_failure: Option<InjectedFailure>,
@@ -237,6 +244,7 @@ impl Cache {
                 locks: ActiveLockSet::new(),
                 shelf_guards: Default::default(),
                 editor_guards: Default::default(),
+                pin_guards: Default::default(),
                 pending_failure: None,
             })),
         }
@@ -787,6 +795,146 @@ impl Cache {
         self.inner.lock().editor_guards.contains_key(shelf_id)
     }
 
+    // ------------------------------------------------------------------
+    // Issue #63: pin + drag ownership on the shared lock registry.
+    // ------------------------------------------------------------------
+
+    /// Resolve a committed entry by its capture id. The pin registry's
+    /// cache-backed lock provider keys its `PinLockProvider` contract
+    /// on `capture_id`, so the mapping from pin source → shelf entry
+    /// lives here (capture ids are UUIDv4 strings and are unique per
+    /// committed entry).
+    pub fn entry_by_capture(&self, capture_id: &str) -> Option<PublicCacheEntry> {
+        let inner = self.inner.lock();
+        inner
+            .entries
+            .values()
+            .find(|entry| entry.capture_id == capture_id)
+            .cloned()
+    }
+
+    /// Reap orphaned capture-frame assets written by the bounded
+    /// transport (issue #63). Frames live under `<root>/frames/` and
+    /// are outside the entry enumeration, so without this pass they
+    /// would grow unboundedly past the cache's TTL.
+    ///
+    /// - `None`: reap every frame regardless of age (startup recovery
+    ///   — no frozen frame can survive a process restart).
+    /// - `Some(max_age_ms)`: reap only frames whose mtime is older
+    ///   than the bound (periodic sweep; a live capture session
+    ///   finishes in seconds, so anything older is debris).
+    ///
+    /// Returns the bytes reclaimed. Per-file failures are skipped so
+    /// one locked file cannot strand the rest.
+    pub fn reap_frame_assets(&self, max_age_ms: Option<i64>, now_ms: i64) -> u64 {
+        let Some(root) = self.inner.lock().root.clone() else {
+            return 0;
+        };
+        let frames_dir = root.join("frames");
+        let Ok(entries) = fs::read_dir(&frames_dir) else {
+            return 0;
+        };
+        let mut reclaimed = 0u64;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(max_age) = max_age_ms {
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                let Ok(modified) = metadata.modified() else {
+                    continue;
+                };
+                let modified_ms = modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                if now_ms.saturating_sub(modified_ms) < max_age {
+                    continue;
+                }
+            }
+            if let Ok(size) = remove_file_with_size(&path) {
+                reclaimed = reclaimed.saturating_add(size);
+            }
+        }
+        // The directory itself is removed when empty so a fully reaped
+        // frames dir leaves no residue.
+        let _ = fs::remove_dir(&frames_dir);
+        reclaimed
+    }
+
+    /// is stored inside the cache so it lives until the matching
+    /// [`Cache::release_pin_guard`] pops it. Multiple pins of the same
+    /// capture each hold their own reference; the entry stays protected
+    /// from the sweeper and from dismissal until the last one drops.
+    ///
+    /// Returns `Err` with `InvalidPayload` when the entry is unknown.
+    pub fn acquire_pin_guard(&self, shelf_id: &str) -> PlatformResult<()> {
+        let mut inner = self.inner.lock();
+        if !inner.entries.contains_key(shelf_id) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                format!("unknown shelf id: {shelf_id}"),
+            ));
+        }
+        let guard = inner.locks.acquire(shelf_id.to_string(), LockOwner::Pin);
+        inner
+            .pin_guards
+            .entry(shelf_id.to_string())
+            .or_default()
+            .push(guard);
+        Ok(())
+    }
+
+    /// Release one `Pin` lock reference previously acquired with
+    /// [`Cache::acquire_pin_guard`]. Returns `true` when a live
+    /// reference was popped and `false` when the entry held none
+    /// (mirrors the `PinLockProvider::release` refcount semantics).
+    pub fn release_pin_guard(&self, shelf_id: &str) -> bool {
+        let mut inner = self.inner.lock();
+        match inner.pin_guards.get_mut(shelf_id) {
+            Some(guards) => {
+                guards.pop().is_some()
+                // The popped `LockGuard` fires the underlying
+                // `registry.release` on Drop — outside the cache mutex,
+                // matching the editor-guard pattern above.
+            }
+            None => false,
+        }
+    }
+
+    /// Number of live `Pin` lock references on the given entry. Used by
+    /// tests and by the provider's `active_locks` accounting.
+    pub fn pin_guard_count(&self, shelf_id: &str) -> usize {
+        self.inner
+            .lock()
+            .pin_guards
+            .get(shelf_id)
+            .map(|guards| guards.len())
+            .unwrap_or(0)
+    }
+
+    /// Acquire a short-lived `Drag` lock on the given entry for the
+    /// duration of a synchronous OLE drag loop. The returned RAII guard
+    /// releases the lock when dropped, so the IPC layer can wrap the
+    /// blocking `start_drag` call without a manual rollback path.
+    ///
+    /// While the guard is alive the sweeper cannot evict the dragged
+    /// PNG (AGENTS.md §14 invariant). Returns `Err` with
+    /// `InvalidPayload` when the entry is unknown.
+    pub fn acquire_drag_lock(&self, shelf_id: &str) -> PlatformResult<super::locks::LockGuard> {
+        let inner = self.inner.lock();
+        if !inner.entries.contains_key(shelf_id) {
+            return Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                format!("unknown shelf id: {shelf_id}"),
+            ));
+        }
+        Ok(inner.locks.acquire(shelf_id.to_string(), LockOwner::Drag))
+    }
+
     /// Read the absolute path of the entry's `revision.json` file.
     /// Used by the integration tests so the test can write a
     /// corrupt JSON to the sidecar and exercise the loader's
@@ -976,6 +1124,15 @@ impl Cache {
             // remove incomplete unindexed groups. Compute the bytes
             // before the recursive delete so the outcome reflects the
             // actual disk outcome even after the remove.
+            //
+            // Issue #63: the bounded transport's `frames/` directory is
+            // not an entry group — it has no manifest by design and is
+            // reaped on its own age policy (`reap_frame_assets`).
+            // Skipping it here stops the debris pass from deleting
+            // live capture frames.
+            if path.file_name().and_then(|s| s.to_str()) == Some("frames") {
+                continue;
+            }
             match remove_dir_with_size(&path) {
                 Ok(bytes) => {
                     outcome.unindexed_dirs_removed =
@@ -1421,6 +1578,113 @@ mod tests {
         let entry = cache2.entry(&committed.entry.shelf_id).expect("entry");
         assert_eq!(entry.metadata.title, "before restart");
         assert_eq!(entry.capture_id, committed.entry.capture_id);
+    }
+
+    fn commit_request(size: u32) -> CacheCommitRequest {
+        CacheCommitRequest {
+            bounds: PhysicalBounds::from_xywh(0, 0, size, size),
+            size: PhysicalSize::new(size, size),
+            rgba: filled_rgba(size, size),
+            metadata: CacheEntryMetadata::default(),
+            monitor_id: "primary".into(),
+        }
+    }
+
+    #[test]
+    fn pin_guards_refcount_and_block_dismiss() {
+        let fs = IsolatedFilesystem::new("cache-pin-lock").expect("fs");
+        let cache = Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        let committed = cache.commit(commit_request(4)).expect("commit");
+        let shelf_id = committed.entry.shelf_id.clone();
+
+        // Two pins on the same capture each hold one reference.
+        cache.acquire_pin_guard(&shelf_id).expect("first pin guard");
+        cache
+            .acquire_pin_guard(&shelf_id)
+            .expect("second pin guard");
+        assert_eq!(cache.pin_guard_count(&shelf_id), 2);
+
+        // A pinned entry is protected from the sweeper and cannot be
+        // dismissed while any pin guard is alive.
+        assert!(cache.is_protected_from_sweeper(&shelf_id));
+        let outcome = cache.dismiss(&shelf_id).expect("dismiss call");
+        assert!(!outcome.removed, "pinned entry must survive dismissal");
+        assert!(
+            fs.root().join(&committed.entry.capture_id).exists(),
+            "pinned entry assets must stay on disk"
+        );
+
+        // Release both refs; only the last release unlocks the entry.
+        assert!(cache.release_pin_guard(&shelf_id));
+        assert_eq!(cache.pin_guard_count(&shelf_id), 1);
+        assert!(cache.is_protected_from_sweeper(&shelf_id));
+        assert!(cache.release_pin_guard(&shelf_id));
+        assert_eq!(cache.pin_guard_count(&shelf_id), 0);
+        assert!(!cache.is_protected_from_sweeper(&shelf_id));
+
+        // Releasing without a live ref is a no-op returning false.
+        assert!(!cache.release_pin_guard(&shelf_id));
+
+        let outcome = cache.dismiss(&shelf_id).expect("dismiss call");
+        assert!(outcome.removed, "unpinned entry dismisses cleanly");
+    }
+
+    #[test]
+    fn pin_guard_unknown_shelf_id_is_rejected() {
+        let cache = Cache::new();
+        let err = cache.acquire_pin_guard("missing").unwrap_err();
+        assert_eq!(err.kind, PlatformErrorKind::InvalidPayload);
+    }
+
+    #[test]
+    fn drag_guard_blocks_dismiss_until_dropped() {
+        let fs = IsolatedFilesystem::new("cache-drag-lock").expect("fs");
+        let cache = Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        let committed = cache.commit(commit_request(4)).expect("commit");
+        let shelf_id = committed.entry.shelf_id.clone();
+
+        let guard = cache.acquire_drag_lock(&shelf_id).expect("drag lock");
+        assert!(cache.is_protected_from_sweeper(&shelf_id));
+        let outcome = cache.dismiss(&shelf_id).expect("dismiss call");
+        assert!(!outcome.removed, "entry under active drag survives");
+        assert!(
+            fs.root().join(&committed.entry.capture_id).exists(),
+            "dragged PNG stays on disk for the OLE loop"
+        );
+
+        drop(guard);
+        assert!(!cache.is_protected_from_sweeper(&shelf_id));
+        let outcome = cache.dismiss(&shelf_id).expect("dismiss call");
+        assert!(outcome.removed, "entry dismisses after the drag ends");
+    }
+
+    #[test]
+    fn drag_lock_unknown_shelf_id_is_rejected() {
+        let cache = Cache::new();
+        let err = cache.acquire_drag_lock("missing").unwrap_err();
+        assert_eq!(err.kind, PlatformErrorKind::InvalidPayload);
+    }
+
+    #[test]
+    fn entry_by_capture_resolves_committed_entry() {
+        let fs = IsolatedFilesystem::new("cache-by-capture").expect("fs");
+        let cache = Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        let committed = cache.commit(commit_request(4)).expect("commit");
+
+        let resolved = cache
+            .entry_by_capture(&committed.entry.capture_id)
+            .expect("entry resolves by capture id");
+        assert_eq!(resolved.shelf_id, committed.entry.shelf_id);
+        assert!(cache.entry_by_capture("no-such-capture").is_none());
     }
 
     #[test]

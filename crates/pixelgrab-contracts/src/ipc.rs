@@ -11,7 +11,7 @@ use crate::cache::{
 };
 use crate::capture::CaptureResolution;
 use crate::coordinate::PhysicalBounds;
-use crate::drag::{DragDiagnostics, DragOutcome, DragRequest};
+use crate::drag::{DragDiagnostics, DragOutcome};
 use crate::error::PlatformError;
 use crate::revision::{AnnotationTool, RevisionContext, RevisionMetadata};
 use crate::session::SessionState;
@@ -281,16 +281,18 @@ pub struct CancelOutcome {
     pub snapshot: SessionSnapshot,
 }
 
-/// Wire shape for the `start_shelf_drag` IPC. The frontend assembles the
-/// drag payload from the shelf card's stored capture and forwards it to
-/// the platform contract. The Rust side retains the file handle for the
-/// full synchronous OLE drag loop.
+/// Wire shape for the `start_shelf_drag` IPC. The frontend only names
+/// the shelf card being dragged (issue #63); the Rust core resolves the
+/// committed cache entry and builds the OLE `DragRequest` itself, so
+/// the heavy PNG / BGRA bytes never cross the IPC boundary. The Rust
+/// side retains the file handle for the full synchronous OLE drag loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartShelfDragIntent {
-    /// The drag payload. The platform contract owns the PNG bytes for
-    /// the duration of the drag.
-    pub request: DragRequest,
+    /// Shelf id of the card being dragged. Must reference a committed
+    /// cache entry; the entry holds a `Drag` lock for the duration of
+    /// the synchronous drag loop.
+    pub shelf_id: ShelfId,
     /// Whether to dismiss the originating shelf card on a successful
     /// drop. The default is `true` so the tray does not accumulate
     /// accepted cards.

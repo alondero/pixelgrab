@@ -81,6 +81,16 @@ impl PhysicalBounds {
         self.size.width == 0 || self.size.height == 0
     }
 
+    /// `true` when the point lies inside the bounds (left/top
+    /// inclusive, right/bottom exclusive). Used by cursor-monitor
+    /// targeting to resolve which monitor the pointer is over.
+    pub fn contains_point(&self, point: PhysicalPoint) -> bool {
+        point.x >= self.origin.x
+            && point.x < self.right()
+            && point.y >= self.origin.y
+            && point.y < self.bottom()
+    }
+
     /// Validates that the bounds are non-degenerate and non-negative.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.size.width == 0 || self.size.height == 0 {
@@ -235,6 +245,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn contains_point_is_left_top_inclusive_right_bottom_exclusive() {
+        let bounds = PhysicalBounds::from_xywh(10, 20, 100, 50);
+        assert!(bounds.contains_point(PhysicalPoint::new(10, 20)));
+        assert!(bounds.contains_point(PhysicalPoint::new(109, 69)));
+        assert!(!bounds.contains_point(PhysicalPoint::new(110, 70)));
+        assert!(!bounds.contains_point(PhysicalPoint::new(9, 20)));
+        assert!(!bounds.contains_point(PhysicalPoint::new(10, 19)));
+    }
+
+    #[test]
+    fn contains_point_handles_negative_origins() {
+        let bounds = PhysicalBounds::from_xywh(-1920, 0, 1920, 1080);
+        assert!(bounds.contains_point(PhysicalPoint::new(-1, 500)));
+        assert!(!bounds.contains_point(PhysicalPoint::new(0, 1080)));
+    }
+
+    #[test]
     fn round_to_i32_handles_non_finite() {
         assert_eq!(transform::round_to_i32(f64::NAN), 0);
         assert_eq!(transform::round_to_i32(f64::INFINITY), 0);
@@ -269,6 +296,40 @@ mod tests {
         let stage = ClientSize::new(0.0, 0.0);
         let client = ClientBounds::new(ClientPoint::new(10.0, 10.0), ClientSize::new(100.0, 100.0));
         assert!(transform::client_to_physical(&client, capture, stage).is_empty());
+    }
+
+    fn monitor(id: &str, x: i32, scale: f32, primary: bool) -> crate::monitor::MonitorDescriptor {
+        crate::monitor::MonitorDescriptor {
+            id: id.to_string(),
+            label: id.to_string(),
+            is_primary: primary,
+            bounds: PhysicalBounds::from_xywh(x, 0, 1920, 1080),
+            scale_factor: scale,
+            work_area: PhysicalBounds::from_xywh(x, 0, 1920, 1080),
+        }
+    }
+
+    #[test]
+    fn overlay_window_scale_prefers_primary_then_first() {
+        use crate::monitor::MonitorLayout;
+        // Mixed DPI: primary at 1.25 wins over the secondary's 2.0.
+        let layout = MonitorLayout::new(vec![
+            monitor("m0", -1920, 2.0, false),
+            monitor("m1", 0, 1.25, true),
+        ]);
+        assert!((transform::overlay_window_scale(&layout) - 1.25).abs() < f32::EPSILON);
+        // No primary flag → first monitor.
+        let no_primary = MonitorLayout::new(vec![
+            monitor("m0", -1920, 2.0, false),
+            monitor("m1", 0, 1.5, false),
+        ]);
+        assert!((transform::overlay_window_scale(&no_primary) - 2.0).abs() < f32::EPSILON);
+        // Empty layout → safe default.
+        let empty = MonitorLayout::new(vec![]);
+        assert!((transform::overlay_window_scale(&empty) - 1.0).abs() < f32::EPSILON);
+        // Non-positive scale factors fall back to 1.0.
+        let broken = MonitorLayout::new(vec![monitor("m0", 0, 0.0, true)]);
+        assert!((transform::overlay_window_scale(&broken) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -650,5 +711,33 @@ pub mod transform {
             round_to_u32(size.width as f64 / scale),
             round_to_u32(size.height as f64 / scale),
         )
+    }
+
+    /// Resolve the logical-to-physical scale factor for the overlay
+    /// window (issue #63, mixed-DPI hardware).
+    ///
+    /// A top-level OS window has exactly one DPI context — Windows
+    /// scales the whole window uniformly even when it spans monitors
+    /// with different scale factors. That single factor must therefore
+    /// be the DPI of the monitor the window is *anchored* on (the
+    /// virtual desktop's minimum origin typically sits on the primary).
+    /// Using the monitor-under-the-window's stale `current_monitor()`
+    /// value instead mis-sizes the overlay by the ratio of the two
+    /// factors and every selection lands off-target.
+    ///
+    /// Resolution order: primary monitor → first monitor → 1.0. The
+    /// fallbacks keep the function total so a degenerate layout can
+    /// never wedge the capture flow.
+    pub fn overlay_window_scale(layout: &crate::monitor::MonitorLayout) -> f32 {
+        let primary = layout
+            .primary()
+            .or_else(|| layout.monitors.first())
+            .map(|m| m.scale_factor)
+            .unwrap_or(1.0);
+        if primary > 0.0 {
+            primary
+        } else {
+            1.0
+        }
     }
 }

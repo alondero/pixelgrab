@@ -75,9 +75,27 @@ pub fn position_over_virtual_desktop<R: Runtime>(
 /// Public so the platform adapters can target a single monitor
 /// (`SingleMonitor` capture) without resizing the WebView beyond what
 /// the captured framebuffer can cover.
+///
+/// Issue #63 (mixed DPI): the logical conversion uses
+/// [`transform::overlay_window_scale`] — the anchored monitor's factor —
+/// instead of the WebView's stale `current_monitor` value, which on
+/// mixed-DPI hardware mis-sizes the overlay by the ratio of the two
+/// factors.
 pub fn position_over_bounds<R: Runtime>(
     app: &AppHandle<R>,
     bounds: &PhysicalBounds,
+) -> PlatformResult<()> {
+    position_over_bounds_with_scale(app, bounds, None)
+}
+
+/// Layout-aware variant used by the reveal seam. When `layout` is
+/// supplied the scale comes from the layout's primary monitor; the
+/// no-layout fallback keeps the legacy `current_monitor` behaviour for
+/// single-monitor captures that skip the layout query.
+pub fn position_over_bounds_with_scale<R: Runtime>(
+    app: &AppHandle<R>,
+    bounds: &PhysicalBounds,
+    layout: Option<&MonitorLayout>,
 ) -> PlatformResult<()> {
     let window = app.get_webview_window("overlay").ok_or_else(|| {
         PlatformError::new(
@@ -85,7 +103,10 @@ pub fn position_over_bounds<R: Runtime>(
             "overlay window is not pre-allocated",
         )
     })?;
-    let scale = primary_scale_factor(app);
+    let scale = match layout {
+        Some(layout) => pixelgrab_contracts::coordinate::transform::overlay_window_scale(layout),
+        None => primary_scale_factor(app),
+    };
     let origin =
         pixelgrab_contracts::coordinate::transform::physical_to_logical(&bounds.origin, scale);
     let size =
@@ -111,7 +132,19 @@ pub fn show_over_virtual_desktop<R: Runtime>(
     layout: &MonitorLayout,
     session: &SessionOrchestrator,
 ) -> PlatformResult<()> {
-    position_over_virtual_desktop(app, layout)?;
+    position_over_bounds_with_scale(
+        app,
+        &layout
+            .virtual_bounds()
+            .ok_or_else(|| {
+                PlatformError::new(
+                    PlatformErrorKind::MonitorQueryFailed,
+                    "no monitors in layout",
+                )
+            })?
+            .as_top_left_bounds(),
+        Some(layout),
+    )?;
     let window = app.get_webview_window("overlay").ok_or_else(|| {
         PlatformError::new(
             PlatformErrorKind::InvalidSessionState,

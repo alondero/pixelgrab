@@ -63,29 +63,42 @@ pub fn now_ms() -> i64 {
 fn queue_position(app: &PixelGrabApp) -> Result<pixelgrab_contracts::ShelfPosition, PlatformError> {
     let layout = app.platform().monitor_layout()?;
     let prefs = app.preferences().current();
-    let monitor = resolve_preferred_monitor(&prefs, &layout).ok_or_else(|| {
-        PlatformError::new(
-            PlatformErrorKind::MonitorQueryFailed,
-            "no monitor available for shelf placement",
-        )
-    })?;
+    let monitor = resolve_preferred_monitor(&prefs, &layout, app.platform().cursor_position())
+        .ok_or_else(|| {
+            PlatformError::new(
+                PlatformErrorKind::MonitorQueryFailed,
+                "no monitor available for shelf placement",
+            )
+        })?;
     let visible = app.shelf_queue().snapshot(now_ms()).cards.len();
     Ok(pixelgrab_contracts::placement_for(&prefs, monitor, visible))
 }
 
+/// Reserved `target_monitor_id` that anchors the shelf to whichever
+/// monitor currently contains the pointer (issue #63).
+pub const CURSOR_MONITOR_ID: &str = "cursor";
+
 /// Resolve the monitor the shelf should anchor to. Honours the user's
-/// `target_monitor_id` when the named monitor is present, otherwise
-/// falls back to the primary monitor (or the first one when no
-/// monitor claims primary). The preference is intentionally NOT
-/// cleared on a miss — the user's selection survives a temporary
-/// disconnect (cable unplugged) and is re-applied when the monitor
-/// reappears.
+/// `target_monitor_id` when the named monitor is present; the reserved
+/// id `"cursor"` resolves to the monitor containing the pointer at
+/// resolution time. Otherwise falls back to the primary monitor (or
+/// the first one when no monitor claims primary). The preference is
+/// intentionally NOT cleared on a miss — the user's selection survives
+/// a temporary disconnect (cable unplugged) and is re-applied when the
+/// monitor reappears.
 pub fn resolve_preferred_monitor<'a>(
     prefs: &ShelfPreferences,
     layout: &'a MonitorLayout,
+    cursor_position: Option<pixelgrab_contracts::PhysicalPoint>,
 ) -> Option<&'a MonitorDescriptor> {
     if let Some(id) = prefs.target_monitor_id.as_ref() {
-        if let Some(m) = layout.monitors.iter().find(|m| m.id == *id) {
+        if id == CURSOR_MONITOR_ID {
+            if let Some(position) = cursor_position {
+                if let Some(m) = layout.monitor_containing(position) {
+                    return Some(m);
+                }
+            }
+        } else if let Some(m) = layout.monitors.iter().find(|m| m.id == *id) {
             return Some(m);
         }
     }
@@ -111,8 +124,33 @@ fn emit_shelf_queue_updated<R: tauri::Runtime>(
 /// geometry itself. The mutation-only `with_position` variant is
 /// kept as a thin alias for the few call sites that already hold a
 /// snapshot they want to decorate.
-fn snapshot_with_position(app: &PixelGrabApp) -> ShelfQueueSnapshot {
+pub(crate) fn snapshot_with_position(app: &PixelGrabApp) -> ShelfQueueSnapshot {
     with_position(app.shelf_queue().snapshot(now_ms()), app)
+}
+
+/// Shared tail of every "queue snapshot + resolved window position"
+/// path (IPC, background ticker, display watcher). Resolves the
+/// preferred monitor — honouring cursor targeting — against the live
+/// layout and stamps the computed [`pixelgrab_contracts::ShelfPosition`]
+/// onto the snapshot. Kept in exactly one place so a change to the
+/// placement policy cannot drift between the three emitters.
+pub(crate) fn snapshot_with_resolved_position(
+    queue: &crate::shelf::queue::ShelfQueueEngine,
+    prefs: &ShelfPreferences,
+    platform: &dyn crate::platform::PixelGrabPlatform,
+) -> ShelfQueueSnapshot {
+    let mut snap = queue.snapshot(now_ms());
+    if let Ok(layout) = platform.monitor_layout() {
+        if let Some(monitor) = resolve_preferred_monitor(prefs, &layout, platform.cursor_position())
+        {
+            snap.position = Some(pixelgrab_contracts::placement_for(
+                prefs,
+                monitor,
+                snap.cards.len(),
+            ));
+        }
+    }
+    snap
 }
 
 /// Begin a capture from the tray or shortcut. The orchestrator refuses the
@@ -1206,29 +1244,115 @@ fn emit_shelf_updated<R: tauri::Runtime>(
     let _ = handle.emit("pixelgrab://shelf-updated", &view);
 }
 
+/// Show and focus the main companion window. Invoked by the shelf
+/// webview after a card is reopened for editing (issue #63) so the
+/// editor surface becomes visible; the main window starts hidden
+/// because the tray is the resident UI.
+#[tauri::command]
+pub fn show_main_window(handle: AppHandle) -> IpcResponse<()> {
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    IpcResponse::from_result(Ok(()))
+}
+
 /// Start an external drag from a shelf card. The IPC layer hands the
 /// payload to the platform contract, which owns the PNG bytes for the
 /// full synchronous OLE drag loop. The terminal outcome and the
 /// diagnostics record are returned alongside the dismiss hint.
 ///
-/// The cache's `Drag` lock acquisition is a future wiring — the cache
-/// adds `acquire_drag_lock` / `release_drag_lock` in the same change
-/// that promotes the lock contract to the cache layer. For now the
-/// drag honors the file-handle-only contract.
+/// Issue #63: when the drag originates from a shelf card the entry
+/// holds a `LockOwner::Drag` lock for the full synchronous
+/// `start_drag` call, so the sweeper cannot evict the offered PNG
+/// mid-loop (the AGENTS.md §14 invariant). The RAII guard releases on
+/// drop, covering every outcome including early error returns. A drag
+/// that does not originate from a shelf card (`shelf_id = None`) skips
+/// the lock — there is no entry to protect.
 #[tauri::command]
 pub fn start_shelf_drag(
     app: AppState<'_>,
     payload: StartShelfDragIntent,
 ) -> IpcResponse<StartShelfDragResult> {
+    // Resolve the committed entry. The heavy OLE payload (PNG path +
+    // BGRA bitmap) is assembled here so the frontend only names the
+    // card.
+    let entry = match app.cache().entry(&payload.shelf_id) {
+        Some(entry) => entry,
+        None => {
+            return IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                format!("unknown shelf id: {}", payload.shelf_id),
+            )));
+        }
+    };
+    let request = match build_drag_request(&entry) {
+        Ok(request) => request,
+        Err(err) => return IpcResponse::from_result(Err(err)),
+    };
+    let drag_guard = app.cache().acquire_drag_lock(&payload.shelf_id);
+    let guard = match drag_guard {
+        Ok(guard) => Some(guard),
+        Err(err) => return IpcResponse::from_result(Err(err)),
+    };
     let result = app
         .platform()
-        .start_drag(&payload.request)
+        .start_drag(&request)
         .map(|drag_result| StartShelfDragResult {
             should_dismiss: payload.dismiss_on_accepted && drag_result.outcome.dismiss_card(),
             outcome: drag_result.outcome,
             diagnostics: drag_result.diagnostics,
         });
+    // Release the Drag lock before returning: the OLE loop is over, so
+    // the entry becomes evictable again exactly when the drop target's
+    // file handles are closed.
+    drop(guard);
     IpcResponse::from_result(result)
+}
+
+/// Build the platform `DragRequest` for a shelf card. Reads the
+/// committed PNG and decodes it into the BGRA bitmap representation the
+/// OLE pipeline offers as `CF_DIBV5`, so the four clipboard formats all
+/// derive from the same stable on-disk bytes.
+fn build_drag_request(
+    entry: &pixelgrab_contracts::CacheEntry,
+) -> PlatformResult<pixelgrab_contracts::drag::DragRequest> {
+    use pixelgrab_contracts::drag::DragRequest;
+    let png_bytes = std::fs::read(&entry.png_path).map_err(|_| {
+        // Privacy (AGENTS.md §9): the io::Error Display can echo the
+        // absolute path; keep only the categorical description.
+        PlatformError::new(PlatformErrorKind::Io, "read cached png failed")
+    })?;
+    let decoder = png::Decoder::new(std::io::Cursor::new(&png_bytes));
+    let mut reader = decoder.read_info().map_err(|_| {
+        PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "cached png is unreadable",
+        )
+    })?;
+    let mut rgba = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut rgba).map_err(|_| {
+        PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "cached png cannot be decoded",
+        )
+    })?;
+    let width = info.width;
+    let height = info.height;
+    let mut bgra = rgba;
+    for chunk in bgra.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+    }
+    let request = DragRequest {
+        capture_id: entry.capture_id.clone(),
+        shelf_id: Some(entry.shelf_id.clone()),
+        png_path: entry.png_path.clone(),
+        bgra_pixels: bgra,
+        width,
+        height,
+    };
+    request.validate()?;
+    Ok(request)
 }
 
 fn commit(
@@ -1388,27 +1512,73 @@ fn monitor_id_for(capture: &pixelgrab_contracts::capture::CaptureResolution) -> 
 // ---------------------------------------------------------------------------
 
 /// Open a new pin from the supplied capture metadata. The registry acquires
-/// a cache lock; the returned view model is the initial state.
+/// a `Pin` lock on the source entry through the cache's shared lock
+/// registry; a borderless TopMost webview window (`pin-{pinId}`) is
+/// created for the returned view model (issue #63).
+///
+/// Issue #63: the request must reference a committed cache entry — a
+/// pin whose PNG is not backed by the cache would hold no lock and its
+/// pixels could be swept mid-session.
 #[tauri::command]
-pub fn open_pin(app: AppState<'_>, request: OpenPinRequest) -> IpcResponse<PinViewModel> {
-    IpcResponse::from_result(app.pin_registry().open(request))
+pub fn open_pin(
+    app: AppState<'_>,
+    request: OpenPinRequest,
+    handle: AppHandle,
+) -> IpcResponse<PinViewModel> {
+    if app.cache().entry_by_capture(&request.capture_id).is_none() {
+        return IpcResponse::from_result(Err(PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            "pin open: capture id does not match a committed shelf entry",
+        )));
+    }
+    let view = match app.pin_registry().open(request) {
+        Ok(view) => view,
+        Err(err) => return IpcResponse::from_result(Err(err)),
+    };
+    // Create the native window. On failure roll the registry entry
+    // back so the `Pin` lock is released — an open without a window
+    // would be an invisible, unclosable pin.
+    if let Err(reason) = crate::pin::window::create_pin_window(&handle, &view) {
+        let _ = app.pin_registry().close(&view.id);
+        return IpcResponse::from_result(Err(PlatformError::new(
+            PlatformErrorKind::Internal,
+            reason,
+        )));
+    }
+    IpcResponse::from_result(Ok(view))
 }
 
-/// Close a pin. Releases the cache lock; the native window is destroyed by
-/// the frontend on receipt of the close event.
+/// Close a pin. Releases the cache lock and destroys the native
+/// TopMost window.
 #[tauri::command]
-pub fn close_pin(app: AppState<'_>, pin_id: PinId) -> IpcResponse<()> {
-    IpcResponse::from_result(app.pin_registry().close(&pin_id))
+pub fn close_pin(app: AppState<'_>, pin_id: PinId, handle: AppHandle) -> IpcResponse<()> {
+    let result = app.pin_registry().close(&pin_id);
+    if result.is_ok() {
+        crate::pin::window::destroy_pin_window(&handle, &pin_id);
+    }
+    IpcResponse::from_result(result)
 }
 
-/// Apply a drag/zoom/opacity/reset/anchor command to a pin.
+/// Apply a drag/zoom/opacity/reset/anchor command to a pin and sync
+/// the native window's position + size to the updated transform.
 #[tauri::command]
 pub fn apply_pin_command(
     app: AppState<'_>,
     pin_id: PinId,
     command: PinCommand,
+    handle: AppHandle,
 ) -> IpcResponse<PinViewModel> {
-    IpcResponse::from_result(app.pin_registry().apply(&pin_id, command))
+    let result = app.pin_registry().apply(&pin_id, command);
+    if let Ok(view) = &result {
+        if let Err(reason) = crate::pin::window::sync_window_to_view(&handle, view) {
+            return IpcResponse::from_result(Err(PlatformError::new(
+                PlatformErrorKind::Internal,
+                reason,
+            )));
+        }
+        crate::pin::window::emit_view(&handle, view);
+    }
+    IpcResponse::from_result(result)
 }
 
 /// Read the view model for one pin.
@@ -1424,13 +1594,21 @@ pub fn list_pins(app: AppState<'_>) -> IpcResponse<Vec<PinViewModel>> {
 }
 
 /// Apply a context-menu action to a pin. Copy / SaveAs / Reset / Close.
+/// The Close route also destroys the native TopMost window (issue #63).
 #[tauri::command]
 pub fn pin_action(
     app: AppState<'_>,
     pin_id: PinId,
     action: PinAction,
+    handle: AppHandle,
 ) -> IpcResponse<PinActionOutcome> {
-    IpcResponse::from_result(perform_pin_action(&app, &pin_id, action))
+    let result = perform_pin_action(&app, &pin_id, action);
+    if result.is_ok()
+        && matches!(result, Ok(ref outcome) if matches!(outcome.action, PinAction::Close))
+    {
+        crate::pin::window::destroy_pin_window(&handle, &pin_id);
+    }
+    IpcResponse::from_result(result)
 }
 
 /// Notify the registry that the monitor layout has changed. The registry

@@ -165,6 +165,10 @@ impl CacheSweeper {
     /// `Cache` — used by the run-time wiring in `lib.rs`.
     pub fn recover_startup(&self) -> PlatformResult<SweepOutcome> {
         let mut outcome = self.cache.recover_debris()?;
+        // Issue #63: frame assets cannot survive a process restart —
+        // the frozen framebuffer they back is gone. Reap them all.
+        let reaped = self.cache.reap_frame_assets(None, self.clock.now_ms());
+        outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(reaped);
         let policy = self.policy_store.current();
         let now_ms = self.clock.now_ms();
         outcome.merge(&self.evict_expired(&policy, now_ms));
@@ -180,6 +184,12 @@ impl CacheSweeper {
             policy: policy.clone(),
         };
         let mut outcome = self.evict_expired(&policy, now_ms);
+        // Issue #63: orphaned frame assets older than one sweep
+        // interval are debris — a capture session completes in seconds.
+        let reaped = self
+            .cache
+            .reap_frame_assets(Some(policy.sweep_interval_ms), now_ms);
+        outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(reaped);
         if !snapshot.within_low_water() {
             outcome.merge(&self.evict_for_quota(&policy, now_ms));
         } else {
@@ -416,6 +426,64 @@ mod tests {
         assert_eq!(outcome.total_evicted(), 0);
         assert_eq!(outcome.bytes_reclaimed, 0);
         assert_eq!(cache.entries().len(), 1);
+    }
+
+    fn seed_frame(fs: &IsolatedFilesystem, name: &str) -> std::path::PathBuf {
+        let dir = fs.root().join("frames");
+        std::fs::create_dir_all(&dir).expect("mkdir frames");
+        let path = dir.join(name);
+        std::fs::write(&path, b"png-bytes").expect("write frame");
+        path
+    }
+
+    #[test]
+    fn startup_recovery_reaps_every_frame_asset() {
+        // Issue #63: frame assets back a frozen framebuffer that cannot
+        // survive a restart; recovery reaps them all.
+        let fs = IsolatedFilesystem::new("sweeper-frames-startup").expect("fs");
+        seed_frame(&fs, "a.png");
+        seed_frame(&fs, "b.png.tmp");
+        let cache = Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        let policy_store = Arc::new(CachePolicyStore::new());
+        let sweeper = make_sweeper(&Arc::new(cache.clone()), &policy_store);
+        let outcome = sweeper.recover_startup().expect("recover");
+        assert_eq!(outcome.bytes_reclaimed, 18); // 9 bytes x 2 files
+        assert!(!fs.root().join("frames").exists());
+    }
+
+    #[test]
+    fn periodic_sweep_only_reaps_frames_older_than_the_interval() {
+        let fs = IsolatedFilesystem::new("sweeper-frames-ttl").expect("fs");
+        let fresh = seed_frame(&fs, "fresh.png");
+        let stale = seed_frame(&fs, "stale.png");
+        // Backdate the stale file's mtime beyond the sweep interval.
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
+        let backdated = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .and_then(|f| f.set_modified(old_time))
+            .is_ok();
+        let cache = Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        let policy_store = Arc::new(CachePolicyStore::new());
+        // The age check compares against real file mtimes, so this test
+        // uses the production wall-clock rather than the controllable
+        // one (whose epoch sits in 2023).
+        let sweeper = CacheSweeper::new(Arc::new(cache.clone()), policy_store);
+        let outcome = sweeper.sweep_once();
+        if backdated {
+            assert!(fresh.exists(), "fresh frame survives the TTL check");
+            assert!(!stale.exists(), "stale frame is reaped");
+            assert!(outcome.bytes_reclaimed >= 9);
+        } else {
+            // Backdating unavailable on this filesystem — both survive.
+            assert_eq!(outcome.bytes_reclaimed, 0);
+        }
     }
 
     #[test]

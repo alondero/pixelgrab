@@ -184,8 +184,8 @@ export async function mockStartShelfDrag(
       durationMs: completedAt - startedAt,
       targetEffect: "unknown",
       targetKind: "none",
-      captureId: payload.request.captureId,
-      shelfId: payload.request.shelfId,
+      captureId: "mock-capture",
+      shelfId: payload.shelfId,
     },
     shouldDismiss: false,
   });

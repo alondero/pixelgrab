@@ -8,6 +8,7 @@
 #![allow(clippy::needless_return)]
 
 pub mod cache;
+pub mod display;
 pub mod error;
 pub mod hotkey;
 pub mod ipc;
@@ -79,11 +80,11 @@ pub struct PixelGrabApp {
     /// Handle to the periodic background worker. Drop or `stop` to
     /// terminate the worker thread.
     sweep_worker: Mutex<Option<SweepWorker>>,
-    /// Pin registry. Tracer 11 ships its own per-pin view model and
-    /// cache-lock lifecycle; production wiring will replace the
-    /// in-memory lock provider with a shim over the cache's
-    /// `ActiveLockSet` so pins and shelf cards share the same lock
-    /// registry.
+    /// Pin registry. Every open pin holds a `LockOwner::Pin` reference
+    /// on its source entry through the cache's shared lock registry
+    /// (`pin::lock::CachePinLockProvider`, issue #63), so the sweeper
+    /// and the manual clear cannot evict a pinned PNG while its window
+    /// is alive.
     pin_registry: Arc<PinRegistry>,
     /// Hotkey bindings store. Mirrors `PreferencesStore` but
     /// without the debounce so each IPC rebind commits before the
@@ -99,9 +100,9 @@ impl PixelGrabApp {
     /// Construct a new builder with the given platform implementation.
     /// The cache root must be set with [`PixelGrabApp::set_cache_root`]
     /// before the cache is used; the Tauri `run` setup hook does this.
-    /// The pin registry uses the in-memory lock provider by default; the
-    /// production binary can swap in the shelf's cache lock provider at
-    /// setup time (see `lib::run`).
+    /// The pin registry is backed by the cache's shared lock registry;
+    /// tests that need an isolated provider can use
+    /// [`PixelGrabApp::with_pin_lock_provider`].
     ///
     /// The supplied hotkey backend drives the OS-level shortcut
     /// registrations; tests hand in the in-memory fake, the binary
@@ -113,11 +114,17 @@ impl PixelGrabApp {
     ) -> Self {
         let session = Arc::new(SessionOrchestrator::new(platform.clone()));
         let cache = Arc::new(Cache::new());
+        // Issue #63: the pin registry's locks live on the same
+        // `ActiveLockSet` the cache uses for shelf / editor / drag
+        // ownership, so one registry answers every "is this entry in
+        // use?" question.
+        let pin_registry = Arc::new(PinRegistry::new(Arc::new(
+            crate::pin::lock::CachePinLockProvider::new((*cache).clone()),
+        )));
         let shelf_queue = Arc::new(ShelfQueueEngine::default());
         let preferences = Arc::new(PreferencesStore::new());
         let cache_policy = Arc::new(CachePolicyStore::new());
         let sweeper = Arc::new(CacheSweeper::new(cache.clone(), cache_policy.clone()));
-        let pin_registry = Arc::new(PinRegistry::new(Arc::new(InMemoryPinLockProvider::new())));
         let hotkey_store = Arc::new(HotkeyPreferencesStore::new());
         let hotkeys = Arc::new(HotkeyRegistry::new(hotkey_backend));
         Self {
@@ -237,9 +244,9 @@ impl PixelGrabApp {
         *guard = Some(worker);
     }
 
-    /// Handle to the pin registry. Tracer 11 ships the in-memory
-    /// lock provider; production wiring swaps in the shelf's cache
-    /// lock provider at setup time.
+    /// Handle to the pin registry. Pin locks are backed by the cache's
+    /// shared lock registry; tests that need an isolated provider can
+    /// rebuild the registry via `with_pin_lock_provider`.
     pub fn pin_registry(&self) -> Arc<PinRegistry> {
         self.pin_registry.clone()
     }
@@ -300,22 +307,11 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
         }
         // Re-emit the new snapshot so the frontend picks up the
         // removal even when the rAF loop was not running.
-        let snapshot = {
-            let mut snap = queue.snapshot(elapsed_ms);
-            let prefs = preferences.current();
-            if let Ok(layout) = platform.monitor_layout() {
-                if let Some(monitor) =
-                    crate::ipc::commands::resolve_preferred_monitor(&prefs, &layout)
-                {
-                    snap.position = Some(pixelgrab_contracts::placement_for(
-                        &prefs,
-                        monitor,
-                        snap.cards.len(),
-                    ));
-                }
-            }
-            snap
-        };
+        let snapshot = crate::ipc::commands::snapshot_with_resolved_position(
+            &queue,
+            &preferences.current(),
+            platform.as_ref(),
+        );
         let _ = handle.emit("pixelgrab://shelf-queue-updated", &snapshot);
     }
 }
@@ -469,6 +465,14 @@ pub fn run() {
             let ticker_queue = app_state.shelf_queue().clone();
             let ticker_platform = app_state.platform().clone();
             let ticker_prefs = app_state.preferences().clone();
+            // Issue #63: the display watcher needs the same subset of
+            // handles, captured before `manage` consumes `app_state`.
+            let watcher_handles = Arc::new(display::DisplayWatchHandles {
+                platform: ticker_platform.clone(),
+                shelf_queue: ticker_queue.clone(),
+                preferences: ticker_prefs.clone(),
+                pin_registry: app_state.pin_registry(),
+            });
             app.manage(app_state);
 
             // Build the resident tray, the hidden overlay window, and
@@ -489,6 +493,12 @@ pub fn run() {
                 ticker_prefs,
                 app.handle().clone(),
             );
+
+            // Issue #63: poll the OS monitor layout so topology,
+            // resolution, DPI, work-area (taskbar), and taskbar changes
+            // reposition the shelf and re-anchor pins without a
+            // restart. The first tick only records the fingerprint.
+            display::spawn_display_watcher(watcher_handles, app.handle().clone());
 
             // The frontend subscribes to monitor-change events and
             // forwards the new work area to the registry via the
@@ -519,6 +529,7 @@ pub fn run() {
             ipc::tick_shelf_queue,
             ipc::get_shelf_queue_snapshot,
             ipc::start_shelf_drag,
+            ipc::show_main_window,
             ipc::get_shelf_preferences,
             ipc::update_shelf_preferences,
             ipc::open_pin,
@@ -596,6 +607,16 @@ fn handle_run_event(app: &AppHandle<tauri::Wry>, event: RunEvent) {
         if matches!(label.as_str(), "overlay" | "shelf") {
             if let Some(window) = app.get_webview_window(label) {
                 let _ = window.hide();
+            }
+        }
+        // Issue #63: a pin window closed through the OS (Alt+F4,
+        // taskbar gesture) must release its registry entry so the
+        // cache's `Pin` lock does not leak until restart.
+        if let Some(pin_id) = label.strip_prefix("pin-") {
+            if let Some(state) = app.try_state::<PixelGrabApp>() {
+                let _ = state
+                    .pin_registry()
+                    .close(&pixelgrab_contracts::PinId::new(pin_id.to_string()));
             }
         }
     }
