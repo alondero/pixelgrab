@@ -28,6 +28,7 @@
       {
         "label": "overlay",
         "title": "PixelGrab Overlay",
+        "url": "overlay.html",
         "width": 800,
         "height": 600,
         "decorations": false,

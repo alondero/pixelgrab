@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import {
     getSessionSnapshot,
     requestCommit,
@@ -34,6 +35,22 @@
       capture = response.data.lastCapture;
       lastDiagnosticsId = response.data.lastCapture.captureId;
     }
+    // Issue #63: this webview is pre-allocated at boot and survives
+    // between captures, so a mount-time read alone goes stale. The
+    // backend announces every fresh capture; adopting it also starts
+    // the session clean — no inherited annotations or selection.
+    const unlisten = listen<CaptureResolutionDto>("pixelgrab://capture-ready", (event) => {
+      selection = null;
+      commitError = null;
+      saveAsError = null;
+      lastSaveAsPath = null;
+      annotationStore.reset();
+      capture = event.payload;
+      lastDiagnosticsId = event.payload.captureId;
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
   });
 
   function onSelectionChange(next: PhysicalBounds | null) {

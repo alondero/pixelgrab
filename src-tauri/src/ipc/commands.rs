@@ -235,6 +235,15 @@ pub fn request_capture(
     } else {
         position_fallback("positioning");
     }
+    // Issue #63: the overlay webview is pre-allocated at boot and
+    // stays alive between captures, so its mount-time snapshot read is
+    // stale by the second capture. Announce every capture explicitly —
+    // this is the only reliable way for a long-lived webview to learn
+    // about a new frozen frame.
+    let _ = handle.emit(
+        "pixelgrab://capture-ready",
+        &pixelgrab_contracts::ipc::CaptureResolutionDto::from(capture.clone()),
+    );
     let monitor_id = monitor_id_for(&capture);
     let diag =
         CaptureDiagnostics::started(&capture.capture_id, &monitor_id, capture.bounds, started_at)
