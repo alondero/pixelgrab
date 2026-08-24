@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ShelfQueueCard } from "$lib/ipc/types";
+  import { convertFileSrc as tauriConvertFileSrc } from "@tauri-apps/api/core";
   import { formatRemaining, remainingMs } from "./queue.svelte";
 
   // One shelf card. Renders the thumbnail, the editable title, the
@@ -14,6 +15,7 @@
   let {
     card,
     nowMs,
+    showCountdown = true,
     onCopy = () => {},
     onSaveAs = () => {},
     onDismiss = () => {},
@@ -25,6 +27,7 @@
   }: {
     card: ShelfQueueCard;
     nowMs: number;
+    showCountdown?: boolean;
     onCopy?: (shelfId: string) => void;
     onSaveAs?: (shelfId: string) => void;
     onDismiss?: (shelfId: string) => void;
@@ -73,7 +76,14 @@
     return (globalThis as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
   }
   function convertFileSrc(p: string): string {
-    return getTauri()?.core?.convertFileSrc?.(p) ?? p;
+    // Tauri 2 does not expose `__TAURI__.core` unless the global API is
+    // explicitly enabled. Use the typed module API in packaged builds and
+    // retain the raw path fallback for unit tests / non-Tauri previews.
+    try {
+      return tauriConvertFileSrc(p);
+    } catch {
+      return getTauri()?.core?.convertFileSrc?.(p) ?? p;
+    }
   }
 
   let pngUrl = $derived(convertFileSrc(card.pngPath));
@@ -115,15 +125,17 @@
         <span class="size" data-testid="shelf-size">
           {Math.round(card.sizeBytes / 1024)} KB
         </span>
-        <span
-          class="countdown"
-          class:paused
-          class:expired
-          data-testid="shelf-countdown"
-          aria-label={paused ? "Card timer paused" : "Card timer remaining"}
-        >
-          {countdownText}
-        </span>
+        {#if showCountdown}
+          <span
+            class="countdown"
+            class:paused
+            class:expired
+            data-testid="shelf-countdown"
+            aria-label={paused ? "Card timer paused" : "Card timer remaining"}
+          >
+            {countdownText}
+          </span>
+        {/if}
       </div>
     </div>
   </div>

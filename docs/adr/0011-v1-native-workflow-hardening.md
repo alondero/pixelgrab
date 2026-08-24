@@ -64,10 +64,12 @@ the design:
    webview-reachable topology event). On change it invalidates the
    cached layout, re-anchors pins into the work-area union,
    repositions the shelf, and emits `pixelgrab://display-changed`.
-7. **Anchored-monitor DPI for the overlay.** A top-level window has
-   exactly one DPI context, so the overlay's logical conversion uses
-   the anchored (primary) monitor's scale factor resolved from the
-   layout — not the WebView's stale `current_monitor()`.
+7. **Physical-pixel overlay geometry.** The overlay window is
+   positioned and sized explicitly in `PhysicalPosition` /
+   `PhysicalSize` (merged from PR #64's coordinate repair), which
+   preserves negative virtual origins and sidesteps mixed-DPI scale
+   conversion entirely; the Konva stage tracks the real webview
+   viewport instead of a fixed 1920×1080 assumption.
 8. **Real work areas and cursor targeting.** Windows work areas come
    from hand-rolled `EnumDisplayMonitors`/`GetMonitorInfoW` FFI
    (no `windows` crate dependency, matching ADR-0006's convention);

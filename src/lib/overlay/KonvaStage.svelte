@@ -19,6 +19,7 @@
   import Konva from "konva";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import type { Annotation, PhysicalBounds, PhysicalPoint } from "$lib/ipc/types";
+  import { stageToPhysicalPoint } from "./coordinates";
   import { annotationStore, type TransformHandle } from "$lib/annotation/store.svelte";
   import type { AnnotationColor, AnnotationStroke } from "$lib/ipc/types";
 
@@ -38,7 +39,7 @@
     stageWidth: number;
     stageHeight: number;
     onSelectionChange: (bounds: PhysicalBounds | null) => void;
-    onCommit?: () => void;
+    onCommit?: (target?: "shelf" | "clipboard") => void;
     onCancel?: () => void;
     onSaveAs?: () => void;
   }
@@ -170,12 +171,11 @@
     ) {
       return null;
     }
-    const scaleX = bounds.size.width / stageWidth;
-    const scaleY = bounds.size.height / stageHeight;
-    return {
-      x: clampPositive((pos.x - crop.x) * scaleX),
-      y: clampPositive((pos.y - crop.y) * scaleY),
-    };
+    const local = stageToPhysicalPoint({ x: pos.x - crop.x, y: pos.y - crop.y }, bounds.size, {
+      width: stageWidth,
+      height: stageHeight,
+    });
+    return { x: clampPositive(local.x), y: clampPositive(local.y) };
   }
 
   function cropCssRect(): { x: number; y: number; width: number; height: number } | null {
@@ -664,6 +664,13 @@
     } else {
       annotationLayer.position({ x: 0, y: 0 });
     }
+    // Annotation geometry is stored in physical framebuffer pixels while
+    // Konva draws in stage CSS pixels. Keep this conversion at the layer
+    // boundary so arrows, boxes, badges, text, blur, and drafts all align.
+    annotationLayer.scale({
+      x: stageWidth / bounds.size.width,
+      y: stageHeight / bounds.size.height,
+    });
     for (const annotation of annotationStore.annotations) {
       const node = annotationNode(annotation, false);
       const id = annotation.id;
@@ -703,6 +710,22 @@
     annotationSelectionLayer.destroyChildren();
     selectionBoxNodes = new Map();
     selectionHandleNodes = new Map();
+    // `destroyChildren()` also destroys the marquee node created during
+    // mount. Recreate it on every redraw or the first selection click makes
+    // subsequent Shift-marquee gestures inert.
+    marqueeRect = new Konva.Rect({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      stroke: "#4f46e5",
+      strokeWidth: 1,
+      dash: [3, 3],
+      fill: "rgba(79, 70, 229, 0.08)",
+      visible: false,
+      listening: false,
+    });
+    annotationSelectionLayer.add(marqueeRect);
     const crop = cropCssRect();
     if (!crop) {
       annotationSelectionLayer.draw();
@@ -710,9 +733,11 @@
     }
     const scaleX = stageWidth / bounds.size.width;
     const scaleY = stageHeight / bounds.size.height;
-    // The selection layer is positioned at the crop's CSS origin so
-    // every coordinate can be expressed in physical pixels.
+    // Selection geometry shares the physical-pixel annotation coordinate
+    // system. Scale at the layer boundary; the marquee is converted to
+    // physical coordinates before it is drawn as well.
     annotationSelectionLayer.position({ x: crop.x, y: crop.y });
+    annotationSelectionLayer.scale({ x: scaleX, y: scaleY });
     for (const ann of annotationStore.annotations) {
       if (!annotationStore.isSelected(ann.id)) continue;
       const rect = annotationBoundsLocal(ann);
@@ -985,6 +1010,9 @@
   }
 
   function handleKeyDown(event: KeyboardEvent) {
+    // Text editing owns Enter/Escape. Let the textarea handler process the
+    // key instead of allowing the window-level commit shortcut to fire too.
+    if (event.target instanceof HTMLTextAreaElement) return;
     const key = event.key.toLowerCase();
     if (event.ctrlKey || event.metaKey) {
       if (key === "z" && !event.shiftKey) {
@@ -1072,12 +1100,16 @@
         }
       }
     }
-    // Commit shortcut: Ctrl+C or Enter on the active crop.
-    if (((event.ctrlKey || event.metaKey) && key === "c") || event.key === "Enter") {
+    // Enter publishes the normal shelf + clipboard result. Ctrl+C is the
+    // fast clipboard-only path and must not leave a shelf card behind.
+    if ((event.ctrlKey || event.metaKey) && key === "c") {
       if (lastSelection) {
         event.preventDefault();
-        onCommit?.();
+        onCommit?.("clipboard");
       }
+    } else if (event.key === "Enter" && lastSelection) {
+      event.preventDefault();
+      onCommit?.("shelf");
     }
     if (event.key === "Escape") {
       // First Escape: cancel an in-flight transform, drop the draft,
@@ -1265,8 +1297,11 @@
         // Empty-canvas click: clear the selection (or, if shift is
         // held, begin a marquee that adds to the current selection).
         if (event.evt.shiftKey) {
-          marqueeStart = pos;
-          marqueeRect!.position(pos);
+          const crop = cropCssRect();
+          const local = crop ? pointerToCropLocal(pos, crop) : null;
+          if (!local) return;
+          marqueeStart = local;
+          marqueeRect!.position(local);
           marqueeRect!.size({ width: 0, height: 0 });
           marqueeRect!.visible(true);
           marqueeDragging = true;
@@ -1323,10 +1358,13 @@
         return;
       }
       if (marqueeDragging && marqueeStart && marqueeRect) {
-        const x = Math.min(marqueeStart.x, pos.x);
-        const y = Math.min(marqueeStart.y, pos.y);
-        const width = Math.abs(pos.x - marqueeStart.x);
-        const height = Math.abs(pos.y - marqueeStart.y);
+        const crop = cropCssRect();
+        const local = crop ? pointerToCropLocal(pos, crop) : null;
+        if (!local) return;
+        const x = Math.min(marqueeStart.x, local.x);
+        const y = Math.min(marqueeStart.y, local.y);
+        const width = Math.abs(local.x - marqueeStart.x);
+        const height = Math.abs(local.y - marqueeStart.y);
         marqueeRect.position({ x, y });
         marqueeRect.size({ width, height });
         annotationSelectionLayer?.draw();
@@ -1374,23 +1412,15 @@
         marqueeStart = null;
         marqueeRect.visible(false);
         if (rect.width >= MIN_SELECTION_DIM && rect.height >= MIN_SELECTION_DIM) {
-          const crop = cropCssRect();
-          if (crop) {
-            const scaleX = bounds.size.width / stageWidth;
-            const scaleY = bounds.size.height / stageHeight;
-            const physicalRect = {
-              origin: {
-                x: clampPositive((rect.x - crop.x) * scaleX),
-                y: clampPositive((rect.y - crop.y) * scaleY),
-              },
-              size: {
-                width: clampPositive(rect.width * scaleX),
-                height: clampPositive(rect.height * scaleY),
-              },
-            };
-            annotationStore.selectMarquee(physicalRect, "add");
-            rerenderSelection();
-          }
+          const physicalRect = {
+            origin: { x: clampPositive(rect.x), y: clampPositive(rect.y) },
+            size: {
+              width: clampPositive(rect.width),
+              height: clampPositive(rect.height),
+            },
+          };
+          annotationStore.selectMarquee(physicalRect, "add");
+          rerenderSelection();
         } else {
           annotationSelectionLayer?.draw();
         }
@@ -1435,6 +1465,14 @@
     void annotationStore.draft;
     void annotationStore.selection;
     void lastSelection;
+    const width = stageWidth;
+    const height = stageHeight;
+    if (stage) {
+      stage.size({ width, height });
+      imageNode?.size({ width, height });
+      const crop = cropCssRect();
+      if (crop) redrawCropOverlay(crop);
+    }
     rerenderAnnotations();
     rerenderSelection();
   });

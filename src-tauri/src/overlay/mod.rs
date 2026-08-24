@@ -21,7 +21,7 @@ use pixelgrab_contracts::{
     PlatformResult,
 };
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl, WebviewWindowBuilder,
 };
 
 use crate::session::SessionOrchestrator;
@@ -50,13 +50,10 @@ pub fn preallocate<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 /// boundaries; the Konva stage's coordinate system is the same physical
 /// coordinates the captured framebuffer uses (see ADR-0003).
 ///
-/// The window is positioned in logical pixels because Tauri's
-/// `set_position` / `set_size` API takes `LogicalPosition` /
-/// `LogicalSize`. The conversion from physical pixels honours the
-/// primary monitor's scale factor; the WebView's own DPI scaling
-/// handles the rest of the discrepancies. Returns `Ok` when the overlay
-/// is still pre-allocated (e.g. before the first capture) — the position
-/// is set lazily on the first `show_over_virtual_desktop` call.
+/// The window is positioned and sized explicitly in physical pixels. This
+/// preserves negative virtual origins and avoids applying one monitor's scale
+/// factor to a mixed-DPI desktop. Returns `Ok` when the overlay is still
+/// pre-allocated; its geometry is set lazily on the first reveal.
 pub fn position_over_virtual_desktop<R: Runtime>(
     app: &AppHandle<R>,
     layout: &MonitorLayout,
@@ -75,27 +72,9 @@ pub fn position_over_virtual_desktop<R: Runtime>(
 /// Public so the platform adapters can target a single monitor
 /// (`SingleMonitor` capture) without resizing the WebView beyond what
 /// the captured framebuffer can cover.
-///
-/// Issue #63 (mixed DPI): the logical conversion uses
-/// [`transform::overlay_window_scale`] — the anchored monitor's factor —
-/// instead of the WebView's stale `current_monitor` value, which on
-/// mixed-DPI hardware mis-sizes the overlay by the ratio of the two
-/// factors.
 pub fn position_over_bounds<R: Runtime>(
     app: &AppHandle<R>,
     bounds: &PhysicalBounds,
-) -> PlatformResult<()> {
-    position_over_bounds_with_scale(app, bounds, None)
-}
-
-/// Layout-aware variant used by the reveal seam. When `layout` is
-/// supplied the scale comes from the layout's primary monitor; the
-/// no-layout fallback keeps the legacy `current_monitor` behaviour for
-/// single-monitor captures that skip the layout query.
-pub fn position_over_bounds_with_scale<R: Runtime>(
-    app: &AppHandle<R>,
-    bounds: &PhysicalBounds,
-    layout: Option<&MonitorLayout>,
 ) -> PlatformResult<()> {
     let window = app.get_webview_window("overlay").ok_or_else(|| {
         PlatformError::new(
@@ -103,19 +82,11 @@ pub fn position_over_bounds_with_scale<R: Runtime>(
             "overlay window is not pre-allocated",
         )
     })?;
-    let scale = match layout {
-        Some(layout) => pixelgrab_contracts::coordinate::transform::overlay_window_scale(layout),
-        None => primary_scale_factor(app),
-    };
-    let origin =
-        pixelgrab_contracts::coordinate::transform::physical_to_logical(&bounds.origin, scale);
-    let size =
-        pixelgrab_contracts::coordinate::transform::physical_size_to_logical(bounds.size, scale);
     window
-        .set_position(LogicalPosition::new(origin.x as f64, origin.y as f64))
+        .set_position(PhysicalPosition::new(bounds.origin.x, bounds.origin.y))
         .map_err(overlay_err)?;
     window
-        .set_size(LogicalSize::new(size.width as f64, size.height as f64))
+        .set_size(PhysicalSize::new(bounds.size.width, bounds.size.height))
         .map_err(overlay_err)?;
     Ok(())
 }
@@ -132,19 +103,26 @@ pub fn show_over_virtual_desktop<R: Runtime>(
     layout: &MonitorLayout,
     session: &SessionOrchestrator,
 ) -> PlatformResult<()> {
-    position_over_bounds_with_scale(
-        app,
-        &layout
-            .virtual_bounds()
-            .ok_or_else(|| {
-                PlatformError::new(
-                    PlatformErrorKind::MonitorQueryFailed,
-                    "no monitors in layout",
-                )
-            })?
-            .as_top_left_bounds(),
-        Some(layout),
-    )?;
+    position_over_virtual_desktop(app, layout)?;
+    show_positioned(app, session)
+}
+
+/// Show an overlay positioned over a captured physical rectangle. This is
+/// the fallback seam for a transient monitor-layout query failure: a capture
+/// already has trustworthy bounds, so it must still become interactive.
+pub fn show_over_bounds<R: Runtime>(
+    app: &AppHandle<R>,
+    bounds: &PhysicalBounds,
+    session: &SessionOrchestrator,
+) -> PlatformResult<()> {
+    position_over_bounds(app, bounds)?;
+    show_positioned(app, session)
+}
+
+fn show_positioned<R: Runtime>(
+    app: &AppHandle<R>,
+    session: &SessionOrchestrator,
+) -> PlatformResult<()> {
     let window = app.get_webview_window("overlay").ok_or_else(|| {
         PlatformError::new(
             PlatformErrorKind::InvalidSessionState,
@@ -173,19 +151,6 @@ pub fn hide<R: Runtime>(app: &AppHandle<R>) -> PlatformResult<()> {
     })?;
     window.hide().map_err(overlay_err)?;
     Ok(())
-}
-
-/// Read the primary monitor's scale factor from the live Tauri window.
-/// Falls back to 1.0 when the primary monitor is missing or the layout
-/// cannot be queried (the overlay will still position, just at a
-/// 1:1 logical-to-physical ratio).
-fn primary_scale_factor<R: Runtime>(app: &AppHandle<R>) -> f32 {
-    if let Ok(window) = app.get_webview_window("overlay").ok_or(()) {
-        if let Some(monitor) = window.current_monitor().ok().flatten() {
-            return monitor.scale_factor() as f32;
-        }
-    }
-    1.0
 }
 
 fn overlay_err(err: tauri::Error) -> PlatformError {

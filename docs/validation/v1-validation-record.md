@@ -1,5 +1,15 @@
 # Tracer 15 — Windows v1 Validation Record
 
+> **Sign-off withdrawn (2026-08-22).** A production-wiring review reproduced
+> failures that the green unit and contract suites below did not exercise,
+> including the wrong overlay entrypoint, stale preallocated overlay state,
+> incorrect annotation scaling, missing terminal overlay cleanup, and shelf
+> event/asset failures. See
+> [`2026-08-22-v1-gap-review.md`](2026-08-22-v1-gap-review.md) for repaired
+> defects and the remaining release blockers. The tables below are retained as
+> a historical tracer coverage inventory, not evidence that issue #12 is
+> complete.
+
 > Closes issue #27 ("Tracer 15: Validate and harden the complete Windows v1 workflow").
 > Sign-off record mapping every v1 user story in spec #12 to either an
 > automated test or a precisely documented manual check.

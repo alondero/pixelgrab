@@ -869,10 +869,10 @@ pieces:
   (`platform/windows/work_area.rs`); `cursor_position()` on the
   platform contract resolves the `"cursor"` shelf target; the settings
   panel renders a live placement preview.
-- **Mixed-DPI overlay scale.** The overlay's logical conversion uses
-  the anchored monitor's scale factor from the layout
-  (`transform::overlay_window_scale`), never the WebView's stale
-  `current_monitor()`.
+- **Physical-pixel overlay geometry.** The overlay window is
+  positioned/sized in physical pixels and the Konva stage tracks the
+  real webview viewport (merged with PR #64's coordinate repair); the
+  capture-ready event payload is the full `CaptureResponse`.
 - **Static window contract.** Every statically declared Tauri window
   must declare its `url` explicitly — a missing `url` silently loads
   `index.html` and window preallocation then reuses the wrong page.

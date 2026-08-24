@@ -4,7 +4,7 @@
   import { createClockStore } from "./queue.svelte";
   import type { FeedbackEntry } from "./feedback.svelte";
 
-  // The shelf queue. Renders up to four cards side-by-side with an
+  // The shelf queue. Renders up to four cards in a newest-first vertical stack with an
   // expandable "+N" overflow group for older captures. The component
   // subscribes to `nowMs` via `requestAnimationFrame` so each card's
   // countdown updates smoothly without a backend round-trip. The
@@ -13,6 +13,7 @@
   let {
     snapshot,
     feedback = null,
+    showCountdown = true,
     onCopy = () => {},
     onSaveAs = () => {},
     onDismiss = () => {},
@@ -25,6 +26,7 @@
   }: {
     snapshot: ShelfQueueSnapshot | null;
     feedback?: FeedbackEntry | null;
+    showCountdown?: boolean;
     onCopy?: (shelfId: string) => void;
     onSaveAs?: (shelfId: string) => void;
     onDismiss?: (shelfId: string) => void;
@@ -98,6 +100,7 @@
       <ShelfCard
         {card}
         nowMs={clock.nowMs}
+        {showCountdown}
         {onCopy}
         {onSaveAs}
         {onDismiss}
@@ -120,11 +123,17 @@
           +{overflowCount}
         </button>
         {#if overflowOpen}
-          <div class="overflow-panel" role="region" aria-label="Older captures">
+          <div
+            class="overflow-panel"
+            data-testid="shelf-overflow-panel"
+            role="region"
+            aria-label="Older captures"
+          >
             {#each snapshot.overflow as card (card.shelfId)}
               <ShelfCard
                 {card}
                 nowMs={clock.nowMs}
+                {showCountdown}
                 {onCopy}
                 {onSaveAs}
                 {onDismiss}
@@ -154,11 +163,23 @@
 </div>
 
 <style>
+  :global(html),
+  :global(body),
+  :global(#shelf) {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: visible;
+  }
+  :global(body) {
+    background: transparent;
+  }
   .queue {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 8px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 0;
     background: transparent;
     color: #fff;
     font-family: system-ui, sans-serif;
@@ -167,8 +188,8 @@
     position: relative;
   }
   .overflow-toggle {
-    width: 56px;
-    height: 150px;
+    width: 200px;
+    height: 44px;
     background: rgba(28, 28, 32, 0.92);
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 8px;
@@ -185,12 +206,16 @@
   }
   .overflow-panel {
     position: absolute;
-    right: 0;
-    bottom: 158px;
+    left: 0;
+    bottom: 56px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    background: transparent;
+    gap: 12px;
+    width: 200px;
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    background: rgba(12, 12, 16, 0.96);
+    z-index: 2;
   }
   .status {
     position: absolute;
@@ -206,6 +231,9 @@
     min-height: 18px;
     min-width: 12px;
     opacity: 0.95;
+  }
+  .status:empty {
+    display: none;
   }
   .status[data-kind="success"] {
     border-color: rgba(120, 220, 140, 0.6);

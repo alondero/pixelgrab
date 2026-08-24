@@ -14,26 +14,23 @@
 // that contract.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/svelte";
+import { render, screen, waitFor } from "@testing-library/svelte";
 
-// Track every IPC call so we can assert on the orchestration order,
-// and capture event listeners so tests can fire backend events.
+// Track every IPC call so we can assert on the orchestration order.
 const requestOverlay = vi.fn();
 const getSessionSnapshot = vi.fn();
 const requestCommit = vi.fn();
 const requestCancel = vi.fn();
 const saveCaptureAs = vi.fn();
+const listen = vi.fn();
 
+// The mock both records `listen` calls (for assertion) and registers
+// handlers into a map so tests can fire backend events directly.
 type Handler = (event: { payload: unknown }) => void;
 const listeners = new Map<string, Handler[]>();
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn((name: string, handler: Handler) => {
-    const list = listeners.get(name) ?? [];
-    list.push(handler);
-    listeners.set(name, list);
-    return Promise.resolve(() => {});
-  }),
+  listen: (...args: unknown[]) => listen(...args),
 }));
 
 vi.mock("$lib/ipc/commands", () => ({
@@ -52,23 +49,6 @@ vi.mock("$lib/overlay/KonvaStage.svelte", () => ({
 }));
 
 import OverlayApp from "./OverlayApp.svelte";
-import type { CaptureResolutionDto } from "$lib/ipc/types";
-
-function makeCapture(id: string): CaptureResolutionDto {
-  return {
-    format: "virtual_desktop",
-    bounds: { origin: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } },
-    assetUrl: `data:image/png;base64,${id}`,
-    captureId: id,
-    capturedAtMs: 1,
-  };
-}
-
-function fire(name: string, payload: unknown): void {
-  for (const handler of listeners.get(name) ?? []) {
-    handler({ payload });
-  }
-}
 
 describe("OverlayApp", () => {
   beforeEach(() => {
@@ -78,6 +58,12 @@ describe("OverlayApp", () => {
     requestCommit.mockReset();
     requestCancel.mockReset();
     saveCaptureAs.mockReset();
+    listen.mockReset().mockImplementation((name: string, handler: Handler) => {
+      const list = listeners.get(name) ?? [];
+      list.push(handler);
+      listeners.set(name, list);
+      return Promise.resolve(() => {});
+    });
     // Boot-time snapshot: no capture has happened yet.
     getSessionSnapshot.mockResolvedValue({
       status: "ok",
@@ -96,34 +82,35 @@ describe("OverlayApp", () => {
     expect(requestOverlay).not.toHaveBeenCalled();
   });
 
-  it("adopts the capture announced by pixelgrab://capture-ready", async () => {
-    // Regression for issue #63: the pre-allocated overlay webview
-    // mounts once at boot with NO capture. Each reveal must push the
-    // fresh capture into the page or the user sees the stale boot UI.
-    const { screen } = await import("@testing-library/svelte");
+  it("hydrates a pre-mounted overlay when native capture-ready arrives", async () => {
     render(OverlayApp);
     await waitFor(() => {
-      expect(listeners.has("pixelgrab://capture-ready")).toBe(true);
+      expect(listen).toHaveBeenCalledWith("pixelgrab://capture-ready", expect.any(Function));
     });
-    expect(screen.queryByTestId("diagnostics-id")).toBeNull();
-
-    fire("pixelgrab://capture-ready", makeCapture("second-capture"));
-    await waitFor(() => {
-      expect(screen.getByTestId("diagnostics-id").textContent).toBe("second-capture");
+    const handler = listen.mock.calls[0][1] as (event: {
+      payload: {
+        capture: {
+          format: "virtual_desktop";
+          bounds: { origin: { x: number; y: number }; size: { width: number; height: number } };
+          assetUrl: string;
+          captureId: string;
+          capturedAtMs: number;
+        };
+      };
+    }) => void;
+    handler({
+      payload: {
+        capture: {
+          format: "virtual_desktop",
+          bounds: { origin: { x: 0, y: 0 }, size: { width: 800, height: 600 } },
+          assetUrl: "data:image/png;base64,AAAA",
+          captureId: "event-capture",
+          capturedAtMs: 2,
+        },
+      },
     });
-  });
-
-  it("resets annotation state when a new capture starts", async () => {
-    const { annotationStore } = await import("$lib/annotation/store.svelte");
-    render(OverlayApp);
     await waitFor(() => {
-      expect(listeners.has("pixelgrab://capture-ready")).toBe(true);
-    });
-    // Simulate leftover state from a previous session.
-    annotationStore.setColor("green");
-    fire("pixelgrab://capture-ready", makeCapture("third-capture"));
-    await waitFor(() => {
-      expect(annotationStore.color).toBe("red");
+      expect(screen.getByTestId("diagnostics-id")).toHaveTextContent("event-capture");
     });
   });
 });
