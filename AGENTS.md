@@ -243,6 +243,8 @@ ADRs are:
 - 0007 — Cache bounds + recovery (tracer-13)
 - 0008 — Text, blur, and Save As (tracer-05)
 - 0009 — Reopen / non-destructive revision metadata (tracer-10)
+- 0010 — Single backend seam for the overlay reveal contract
+- 0011 — v1 native workflow hardening (issue #63)
 
 Additions and revisions must follow the template in
 [`docs/adr/README.md`](docs/adr/README.md). When a change supersedes a prior
@@ -827,8 +829,59 @@ active_stroke, metadata, to_clipboard }`, output is
   `Editor` lock was released, `"no_active_revision"` when no
   reopen session was active.
 
+## 19. v1 native workflow hardening (issue #63)
+
+Issue #63 closes the v1 release blockers. The architecture is
+recorded in [ADR-0011](docs/adr/0011-v1-native-workflow-hardening.md),
+which amends ADR-0006, ADR-0007, and ADR-0010. The load-bearing
+pieces:
+
+- **Shelf-card actions.** `ShelfCard.svelte` exposes Pin (`open_pin`),
+  Edit (`open_revision` + the `pixelgrab://revision-opened` event into
+  the companion window's `RevisionEditor`), and a threshold-based drag
+  gesture (`start_shelf_drag`). The OLE `DragRequest` is assembled
+  **backend-side** from the cache entry — `StartShelfDragIntent` is
+  `{ shelf_id, dismiss_on_accepted }` and the heavy PNG/BGRA bytes
+  never cross IPC (amends §14).
+- **Per-pin native windows.** Each pin is its own TopMost webview
+  (`pin-{pinId}`, `pin.html?id=…`); lifecycle lives in
+  `src-tauri/src/pin/window.rs`.
+- **Shared lock registry with refcounts.** `ActiveLockSet` owners are
+  reference-counted; pins take `Pin` refs via `CachePinLockProvider`
+  and drags hold an RAII `Drag` guard for the whole OLE loop. A guard
+  drop releases one ref — an owner survives until its last ref drops.
+- **Bounded asset transport.** Freeze frames persist under
+  `<cache-root>/frames/{capture_id}.png` (64 MiB bound, atomic write);
+  `asset_url` is a path the webview loads via the asset protocol.
+  Frames are reaped at startup and by the periodic sweep; the debris
+  pass skips `frames/`.
+- **Capture-ready push.** The pre-allocated overlay webview outlives
+  captures, so `request_capture` emits
+  `pixelgrab://capture-ready` with the fresh resolution; the overlay
+  adopts it and resets selection/annotation state (amends §5 /
+  ADR-0010).
+- **Display watcher.** `src-tauri/src/display.rs` polls the layout
+  fingerprint every 3 s; on change it invalidates the layout,
+  re-anchors pins, repositions the shelf, and emits
+  `pixelgrab://display-changed`.
+- **Real work areas + cursor targeting.** Windows work areas come from
+  hand-rolled `EnumDisplayMonitors`/`GetMonitorInfoW` FFI
+  (`platform/windows/work_area.rs`); `cursor_position()` on the
+  platform contract resolves the `"cursor"` shelf target; the settings
+  panel renders a live placement preview.
+- **Mixed-DPI overlay scale.** The overlay's logical conversion uses
+  the anchored monitor's scale factor from the layout
+  (`transform::overlay_window_scale`), never the WebView's stale
+  `current_monitor()`.
+- **Static window contract.** Every statically declared Tauri window
+  must declare its `url` explicitly — a missing `url` silently loads
+  `index.html` and window preallocation then reuses the wrong page.
+  Pinned by `src-tauri/tests/window_config.rs`.
+
 ## ADRs
 
 - 0007 — Cache bounds + recovery (tracer-13)
 - 0008 — Text, blur, and Save As (tracer-05)
 - 0009 — Reopen / non-destructive revision metadata (tracer-10)
+- 0010 — Single backend seam for the overlay reveal contract
+- 0011 — v1 native workflow hardening (issue #63)

@@ -107,6 +107,7 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixelgrab_test_support::fs::IsolatedFilesystem;
 
     fn tiny_png() -> Vec<u8> {
         // A valid-enough header sequence; the transport never decodes.
@@ -115,13 +116,12 @@ mod tests {
 
     #[test]
     fn writes_frame_under_cache_root_and_returns_path() {
-        let root = std::env::temp_dir().join(format!("pg-asset-{}", uuid::Uuid::new_v4()));
-        let url = write_capture_asset(Some(&root), "cap-1", &tiny_png()).expect("write");
-        let expected = root.join(FRAMES_DIR).join("cap-1.png");
+        let fs = IsolatedFilesystem::new("asset-transport").expect("fs");
+        let url = write_capture_asset(Some(fs.root()), "cap-1", &tiny_png()).expect("write");
+        let expected = fs.root().join(FRAMES_DIR).join("cap-1.png");
         assert_eq!(url, expected.to_string_lossy());
         assert!(expected.exists(), "frame file exists on disk");
         assert!(std::fs::read(&expected).is_ok());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -132,12 +132,11 @@ mod tests {
 
     #[test]
     fn oversize_payload_is_rejected_before_touching_disk() {
-        let root = std::env::temp_dir().join(format!("pg-asset-big-{}", uuid::Uuid::new_v4()));
+        let fs = IsolatedFilesystem::new("asset-transport-big").expect("fs");
         let oversized = vec![0u8; MAX_CAPTURE_ASSET_BYTES + 1];
-        let err = write_capture_asset(Some(&root), "cap-3", &oversized).unwrap_err();
+        let err = write_capture_asset(Some(fs.root()), "cap-3", &oversized).unwrap_err();
         assert_eq!(err.kind, PlatformErrorKind::InvalidPayload);
         // Nothing was written.
-        assert!(!root.join(FRAMES_DIR).join("cap-3.png").exists());
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(!fs.root().join(FRAMES_DIR).join("cap-3.png").exists());
     }
 }

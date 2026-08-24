@@ -39,6 +39,14 @@ add them here.
 - **Primary monitor** — the monitor designated by the OS as primary.
 - **Work area** — the area of a monitor that is not consumed by the
   taskbar or other docked toolbars.
+- **Display watcher** — the background thread that polls the monitor
+  layout fingerprint every 3 s and reacts to topology, resolution,
+  scale, and work-area changes by invalidating the layout cache,
+  re-anchoring pins, repositioning the shelf, and emitting
+  `pixelgrab://display-changed`.
+- **Cursor-monitor targeting** — the reserved `"cursor"` shelf target
+  that anchors the shelf to whichever monitor contains the pointer,
+  resolved via the platform contract's `cursor_position()`.
 
 ## Overlay
 
@@ -46,6 +54,15 @@ add them here.
   after capture. Pre-allocated and hidden during setup.
 - **Pre-allocated overlay** — the overlay window is created during app
   setup and hidden. The first capture does not pay a window-creation cost.
+- **Capture-ready event** — `pixelgrab://capture-ready`, emitted by
+  `request_capture` with the fresh `CaptureResolution`. The
+  pre-allocated overlay webview outlives captures, so this push (not a
+  mount-time read) is how the page learns about a new frozen frame.
+- **Frame asset** — the encoded PNG of a capture's freeze frame,
+  persisted under `<cache-root>/frames/{capture_id}.png` by the
+  bounded local asset transport. The IPC carries the path; the webview
+  loads it through the asset protocol. Reaped at startup and by the
+  periodic sweep.
 
 ## Annotation
 
@@ -90,9 +107,10 @@ add them here.
   `{ shelfId: string }` payload; the frontend uses it to clear its
   local card.
 - **Pin** — a TopMost reference window that displays a captured image.
-  Independent of the shelf. Acquires a `LockOwner::Pin` lock on the
-  backing cache entry so the entry cannot be reaped while the pin is
-  alive.
+  Each pin is its own native webview window (`pin-{pinId}`, loaded
+  from `pin.html`). Independent of the shelf. Acquires a
+  reference-counted `LockOwner::Pin` lock on the backing cache entry
+  so the entry cannot be reaped while any pin holds it.
 
 ## Delivery
 

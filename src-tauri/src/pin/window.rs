@@ -11,6 +11,10 @@
 //! The registry stays the single source of truth for the transform:
 //! after every `apply` / re-anchor the IPC layer calls
 //! [`sync_window_to_view`] so the native window tracks the view model.
+//!
+//! Privacy (AGENTS.md §9): every error surfaced from this module is a
+//! categorical kind string. The raw Tauri error `Display` can embed
+//! window titles and URLs, so it is discarded at the boundary.
 
 use pixelgrab_contracts::{PinId, PinViewModel};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
@@ -57,7 +61,7 @@ pub fn create_pin_window<R: Runtime>(
             view.transform.window_size.height as f64,
         )
         .build()
-        .map_err(|err| format!("pin window creation failed: {err}"))?;
+        .map_err(|_| "pin window creation failed".to_string())?;
     // The builder only accepts *logical* position/size, which on a
     // scaled monitor would land the window offset from the requested
     // physical transform. Re-apply the exact physical geometry now
@@ -92,13 +96,13 @@ pub fn sync_window_to_view<R: Runtime>(
             view.transform.position.x,
             view.transform.position.y,
         ))
-        .map_err(|err| format!("pin window move failed: {err}"))?;
+        .map_err(|_| "pin window move failed".to_string())?;
     window
         .set_size(tauri::PhysicalSize::new(
             view.transform.window_size.width,
             view.transform.window_size.height,
         ))
-        .map_err(|err| format!("pin window resize failed: {err}"))?;
+        .map_err(|_| "pin window resize failed".to_string())?;
     Ok(())
 }
 

@@ -459,7 +459,6 @@ mod tests {
         let fs = IsolatedFilesystem::new("sweeper-frames-ttl").expect("fs");
         let fresh = seed_frame(&fs, "fresh.png");
         let stale = seed_frame(&fs, "stale.png");
-        // Backdate the stale file's mtime beyond the sweep interval.
         let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
         let backdated = std::fs::OpenOptions::new()
             .write(true)
@@ -475,15 +474,16 @@ mod tests {
         // uses the production wall-clock rather than the controllable
         // one (whose epoch sits in 2023).
         let sweeper = CacheSweeper::new(Arc::new(cache.clone()), policy_store);
+        // The mtime comparison runs against the real filesystem clock,
+        // so this test must use the production wall-clock (the
+        // ControllableClock epoch predates every real mtime and would
+        // saturate the age delta to zero). See the reap_frame_assets
+        // doc comment: the injected clock must be wall-clock-based.
+        assert!(backdated, "set_modified must succeed on this filesystem");
         let outcome = sweeper.sweep_once();
-        if backdated {
-            assert!(fresh.exists(), "fresh frame survives the TTL check");
-            assert!(!stale.exists(), "stale frame is reaped");
-            assert!(outcome.bytes_reclaimed >= 9);
-        } else {
-            // Backdating unavailable on this filesystem — both survive.
-            assert_eq!(outcome.bytes_reclaimed, 0);
-        }
+        assert!(fresh.exists(), "fresh frame survives the TTL check");
+        assert!(!stale.exists(), "stale frame is reaped");
+        assert!(outcome.bytes_reclaimed >= 9);
     }
 
     #[test]
