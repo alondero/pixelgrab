@@ -134,6 +134,67 @@ describe("ShelfCard", () => {
     // deadline - now (which would be negative).
     expect(getByTestId("shelf-countdown").textContent).toBe("12s");
   });
+
+  it("invokes the pin callback with the shelf id", () => {
+    const onPin = vi.fn();
+    const { getByTestId } = render(ShelfCard, {
+      card: makeCard("shelf-7"),
+      nowMs: 0,
+      onPin,
+    });
+    (getByTestId("shelf-pin") as HTMLButtonElement).click();
+    expect(onPin).toHaveBeenCalledWith("shelf-7");
+  });
+
+  it("invokes the edit callback with the card", () => {
+    const onEdit = vi.fn();
+    const card = makeCard("shelf-8");
+    const { getByTestId } = render(ShelfCard, {
+      card,
+      nowMs: 0,
+      onEdit,
+    });
+    (getByTestId("shelf-edit") as HTMLButtonElement).click();
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    expect(onEdit.mock.calls[0][0].shelfId).toBe("shelf-8");
+  });
+
+  it("fires the drag callback once when the pointer moves past the threshold", () => {
+    const onDrag = vi.fn();
+    const { getByTestId } = render(ShelfCard, {
+      card: makeCard("shelf-9"),
+      nowMs: 0,
+      onDrag,
+    });
+    const surface = getByTestId("shelf-drag-surface") as HTMLElement;
+    surface.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, clientX: 10, clientY: 10, bubbles: true }),
+    );
+    surface.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 40, clientY: 10, bubbles: true }),
+    );
+    surface.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(onDrag).toHaveBeenCalledTimes(1);
+    expect(onDrag.mock.calls[0][0].shelfId).toBe("shelf-9");
+  });
+
+  it("does not fire the drag callback for small pointer movements", () => {
+    const onDrag = vi.fn();
+    const { getByTestId } = render(ShelfCard, {
+      card: makeCard("shelf-10"),
+      nowMs: 0,
+      onDrag,
+    });
+    const surface = getByTestId("shelf-drag-surface") as HTMLElement;
+    surface.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, clientX: 10, clientY: 10, bubbles: true }),
+    );
+    surface.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 14, clientY: 12, bubbles: true }),
+    );
+    surface.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(onDrag).not.toHaveBeenCalled();
+  });
 });
 
 describe("ShelfQueue", () => {
@@ -210,5 +271,25 @@ describe("ShelfQueue", () => {
     const status = getByTestId("shelf-feedback");
     expect(status.textContent).toBe("Copied to clipboard");
     expect(status.getAttribute("data-kind")).toBe("success");
+  });
+
+  it("forwards pin, edit, and drag callbacks to every card", () => {
+    const onPin = vi.fn();
+    const onEdit = vi.fn();
+    const onDrag = vi.fn();
+    const { getAllByTestId } = render(ShelfQueue, {
+      snapshot: makeSnapshot([makeCard("a"), makeCard("b")]),
+      onPin,
+      onEdit,
+      onDrag,
+    });
+    const pins = getAllByTestId("shelf-pin") as HTMLButtonElement[];
+    const edits = getAllByTestId("shelf-edit") as HTMLButtonElement[];
+    expect(pins).toHaveLength(2);
+    expect(edits).toHaveLength(2);
+    pins[1].click();
+    edits[0].click();
+    expect(onPin).toHaveBeenCalledWith("b");
+    expect(onEdit.mock.calls[0][0].shelfId).toBe("a");
   });
 });

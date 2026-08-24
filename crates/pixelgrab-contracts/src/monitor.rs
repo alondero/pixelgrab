@@ -80,6 +80,45 @@ mod tests {
         let layout = MonitorLayout::new(vec![desc("a", 0, 0, 100, 100, false)]);
         assert!(layout.primary().is_none());
     }
+
+    #[test]
+    fn union_work_area_spans_every_monitor() {
+        let mut secondary = desc("secondary", -1920, 0, 1920, 1080, false);
+        // Taskbar strip on the secondary too.
+        secondary.work_area = PhysicalBounds::from_xywh(-1920, 0, 1920, 1032);
+        let layout = MonitorLayout::new(vec![desc("primary", 0, 0, 1920, 1080, true), secondary]);
+        let union = layout.union_work_area().expect("union");
+        assert_eq!(union.origin.x, -1920);
+        assert_eq!(union.origin.y, 0);
+        assert_eq!(union.size.width, 3840);
+        // The union's bottom edge follows the taller monitor's work area.
+        assert_eq!(union.size.height, 1080);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_geometry_but_is_stable_for_equal_layouts() {
+        let a = MonitorLayout::new(vec![desc("primary", 0, 0, 1920, 1080, true)]);
+        let b = MonitorLayout::new(vec![desc("primary", 0, 0, 1920, 1080, true)]);
+        assert_eq!(a.fingerprint(), b.fingerprint());
+
+        // Resolution change.
+        let resized = MonitorLayout::new(vec![desc("primary", 0, 0, 1680, 1050, true)]);
+        assert_ne!(a.fingerprint(), resized.fingerprint());
+
+        // Taskbar (work-area) change alone must also register.
+        let mut taskbar_changed = desc("primary", 0, 0, 1920, 1080, true);
+        taskbar_changed.work_area = PhysicalBounds::from_xywh(0, 0, 1920, 1032);
+        let taskbar_layout = MonitorLayout::new(vec![taskbar_changed]);
+        assert_ne!(a.fingerprint(), taskbar_layout.fingerprint());
+
+        // DPI change registers.
+        let mut dpi_changed = desc("primary", 0, 0, 1920, 1080, true);
+        dpi_changed.scale_factor = 1.5;
+        assert_ne!(
+            a.fingerprint(),
+            MonitorLayout::new(vec![dpi_changed]).fingerprint()
+        );
+    }
 }
 
 /// Ordered list of monitors.
@@ -133,5 +172,59 @@ impl MonitorLayout {
             min: PhysicalPoint::new(min_x, min_y),
             max: PhysicalPoint::new(max_x, max_y),
         })
+    }
+
+    /// Bounding box of every monitor's work area. Used by the
+    /// display-change hook (issue #63) as the reachable region when
+    /// re-anchoring pins; returns `None` on an empty layout.
+    pub fn union_work_area(&self) -> Option<PhysicalBounds> {
+        let mut iter = self.monitors.iter();
+        let first = iter.next()?;
+        let mut min_x = first.work_area.origin.x;
+        let mut min_y = first.work_area.origin.y;
+        let mut max_x = first.work_area.right();
+        let mut max_y = first.work_area.bottom();
+        for m in iter {
+            min_x = min_x.min(m.work_area.origin.x);
+            min_y = min_y.min(m.work_area.origin.y);
+            max_x = max_x.max(m.work_area.right());
+            max_y = max_y.max(m.work_area.bottom());
+        }
+        Some(PhysicalBounds::from_xywh(
+            min_x,
+            min_y,
+            (max_x - min_x).max(0) as u32,
+            (max_y - min_y).max(0) as u32,
+        ))
+    }
+
+    /// Stable fingerprint of the geometry-relevant layout state:
+    /// every monitor's id, bounds, scale factor, and work area, in
+    /// order, folded through FNV-1a 64-bit. The display watcher uses
+    /// this to detect topology / resolution / DPI / work-area changes
+    /// without shipping full layouts across the comparison.
+    pub fn fingerprint(&self) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut hash = FNV_OFFSET;
+        fn fold(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        for m in &self.monitors {
+            fold(&mut hash, m.id.as_bytes());
+            fold(&mut hash, &m.bounds.origin.x.to_le_bytes());
+            fold(&mut hash, &m.bounds.origin.y.to_le_bytes());
+            fold(&mut hash, &m.bounds.size.width.to_le_bytes());
+            fold(&mut hash, &m.bounds.size.height.to_le_bytes());
+            fold(&mut hash, &m.scale_factor.to_le_bytes());
+            fold(&mut hash, &m.work_area.origin.x.to_le_bytes());
+            fold(&mut hash, &m.work_area.origin.y.to_le_bytes());
+            fold(&mut hash, &m.work_area.size.width.to_le_bytes());
+            fold(&mut hash, &m.work_area.size.height.to_le_bytes());
+            fold(&mut hash, &[u8::from(m.is_primary)]);
+        }
+        hash
     }
 }

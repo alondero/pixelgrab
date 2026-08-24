@@ -39,3 +39,10 @@ What other options were considered? Why were they rejected?
 - [ADR-0002](0002-platform-contracts.md) — Platform contracts
 - [ADR-0003](0003-physical-coordinate-ownership.md) — Physical-coordinate ownership
 - [ADR-0004](0004-packaged-app-testing.md) — Packaged-app testing strategy
+- [ADR-0005](0005-cache-and-shelf.md) — Cache and one-card shelf (tracer-07)
+- [ADR-0006](0006-external-drag.md) — External drag (tracer-09)
+- [ADR-0007](0007-cache-bounds-and-recovery.md) — Cache bounds + recovery (tracer-13)
+- [ADR-0008](0008-text-blur-and-save-as.md) — Text, blur, and Save As (tracer-05)
+- [ADR-0009](0009-revision-metadata.md) — Reopen / non-destructive revision metadata (tracer-10)
+- [ADR-0010](0010-overlay-reveal-seam.md) — Single backend seam for the overlay reveal contract
+- [ADR-0011](0011-v1-native-workflow-hardening.md) — v1 native workflow hardening (issue #63)

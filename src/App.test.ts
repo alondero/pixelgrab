@@ -24,8 +24,14 @@ vi.mock("$lib/ipc/commands", async () => {
 });
 
 // Mock the @tauri-apps/api/event module so the App's onMount doesn't throw.
+// The captured `listen` handler map lets tests fire backend events.
+const eventHandlers = new Map<string, (event: { payload: unknown }) => void>();
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: () => Promise.resolve(() => {}),
+  listen: vi.fn((name: string, handler: (event: { payload: unknown }) => void) => {
+    eventHandlers.set(name, handler);
+    return Promise.resolve(() => {});
+  }),
+  emit: vi.fn().mockResolvedValue(undefined),
 }));
 
 import App from "./App.svelte";
@@ -72,5 +78,38 @@ describe("App", () => {
       const ariaLabel = button.getAttribute("aria-label")?.trim() ?? "";
       expect(text.length + ariaLabel.length).toBeGreaterThan(0);
     }
+  });
+
+  // Issue #63: the shelf card's Edit action forwards the reopened
+  // scene through `pixelgrab://revision-opened`; the main window must
+  // mount the revision editor for it.
+  it("mounts the revision editor when a reopen event arrives", async () => {
+    render(App);
+    const handler = eventHandlers.get("pixelgrab://revision-opened");
+    expect(handler).toBeTruthy();
+    handler!({
+      payload: {
+        shelfId: "shelf-1",
+        captureId: "capture-1",
+        pngPath: "/cache/shelf-1/capture.png",
+        locks: ["shelf"],
+        loaderStatus: "full",
+        revision: {
+          schemaVersion: 1,
+          sourceShelfId: "shelf-1",
+          sourceCaptureId: "capture-1",
+          crop: { origin: { x: 0, y: 0 }, size: { width: 10, height: 10 } },
+          size: { width: 10, height: 10 },
+          annotations: [],
+          badgeCounter: 2,
+          activeTool: "arrow",
+          activeColor: "red",
+          activeStroke: "medium",
+          metadata: { title: "Reopened", note: "", tags: [] },
+        },
+      },
+    });
+    expect(await screen.findByTestId("revision-editor")).toBeTruthy();
+    expect(screen.getByTestId("revision-title")).toHaveValue("Reopened");
   });
 });

@@ -1,7 +1,17 @@
-// Verify the overlay window's mount behaviour. Issue #60 collapsed the
-// reveal contract into one backend seam (`show_over_virtual_desktop`
-// → `overlay_mounted`), so the frontend's only job on mount is to read
-// the snapshot — it never has to drive a `Ready -> Selecting` transition.
+// Verify the overlay window's mount + live-capture behaviour.
+//
+// Issue #60 collapsed the reveal contract into one backend seam
+// (`show_over_virtual_desktop` → `overlay_mounted`), so the frontend's
+// only job on mount is to read the snapshot — it never has to drive a
+// `Ready -> Selecting` transition.
+//
+// Issue #63 regression: the overlay webview is pre-allocated at boot
+// and stays alive (hidden) between captures. A mount-time-only
+// snapshot read means the SECOND capture never reaches the page — the
+// window is revealed with stale "No capture yet" content and the
+// session wedges in `Selecting`. The backend therefore emits
+// `pixelgrab://capture-ready` with the fresh capture; these tests pin
+// that contract.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/svelte";
@@ -13,6 +23,11 @@ const requestCommit = vi.fn();
 const requestCancel = vi.fn();
 const saveCaptureAs = vi.fn();
 const listen = vi.fn();
+
+// The mock both records `listen` calls (for assertion) and registers
+// handlers into a map so tests can fire backend events directly.
+type Handler = (event: { payload: unknown }) => void;
+const listeners = new Map<string, Handler[]>();
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listen(...args),
@@ -37,32 +52,22 @@ import OverlayApp from "./OverlayApp.svelte";
 
 describe("OverlayApp", () => {
   beforeEach(() => {
+    listeners.clear();
     requestOverlay.mockReset();
     getSessionSnapshot.mockReset();
     requestCommit.mockReset();
     requestCancel.mockReset();
     saveCaptureAs.mockReset();
-    listen.mockReset().mockResolvedValue(() => {});
-    // The backend's `show_over_virtual_desktop` already walks
-    // `Ready -> Selecting` before the overlay webview mounts, so the
-    // session snapshot the frontend sees on mount is already in
-    // `Selecting`.
+    listen.mockReset().mockImplementation((name: string, handler: Handler) => {
+      const list = listeners.get(name) ?? [];
+      list.push(handler);
+      listeners.set(name, list);
+      return Promise.resolve(() => {});
+    });
+    // Boot-time snapshot: no capture has happened yet.
     getSessionSnapshot.mockResolvedValue({
       status: "ok",
-      data: {
-        state: "selecting",
-        lastCapture: {
-          format: "virtual_desktop",
-          bounds: {
-            origin: { x: 0, y: 0 },
-            size: { width: 1920, height: 1080 },
-          },
-          assetUrl: "data:image/png;base64,AAAA",
-          captureId: "test-capture",
-          capturedAtMs: 1,
-        },
-        selection: null,
-      },
+      data: { state: "idle", lastCapture: undefined, selection: null },
     });
   });
 

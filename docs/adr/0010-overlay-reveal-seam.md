@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (tracer-15 follow-up, GitHub issue #60). Replaces the two-step
+Accepted (tracer-15 follow-up, GitHub issue #60). Amended by ADR-0011: the reveal seam is unchanged, but the overlay page is additionally pushed each capture via the pixelgrab://capture-ready event because the pre-allocated webview outlives a single session. Replaces the two-step
 reveal split introduced during tracer-01 (overlay mount + state advance
 via separate IPC).
 

@@ -340,8 +340,8 @@ fn missing_monitor_falls_back_to_primary_without_erasing_preference() {
     };
     let layout = sample_layout();
     // The named monitor is absent; resolver falls back to primary.
-    let chosen =
-        pixelgrab_lib::ipc::commands::resolve_preferred_monitor(&prefs, &layout).expect("chosen");
+    let chosen = pixelgrab_lib::ipc::commands::resolve_preferred_monitor(&prefs, &layout, None)
+        .expect("chosen");
     assert_eq!(chosen.id, "primary");
     // The preference is intentionally NOT cleared — the user's
     // selection survives a temporary disconnect.
@@ -355,9 +355,49 @@ fn present_monitor_is_preferred_over_primary() {
         ..ShelfPreferences::default()
     };
     let layout = sample_layout();
-    let chosen =
-        pixelgrab_lib::ipc::commands::resolve_preferred_monitor(&prefs, &layout).expect("chosen");
+    let chosen = pixelgrab_lib::ipc::commands::resolve_preferred_monitor(&prefs, &layout, None)
+        .expect("chosen");
     assert_eq!(chosen.id, "secondary");
+}
+
+#[test]
+fn cursor_target_resolves_to_the_monitor_under_the_pointer() {
+    use pixelgrab_contracts::PhysicalPoint;
+    let prefs = ShelfPreferences {
+        target_monitor_id: Some("cursor".to_string()),
+        ..ShelfPreferences::default()
+    };
+    let layout = sample_layout();
+    // The secondary monitor sits to the right of the primary; a pointer
+    // at (2500, 300) is over the secondary.
+    let chosen = pixelgrab_lib::ipc::commands::resolve_preferred_monitor(
+        &prefs,
+        &layout,
+        Some(PhysicalPoint::new(2_500, 300)),
+    )
+    .expect("chosen");
+    assert_eq!(chosen.id, "secondary");
+
+    // A pointer on the primary resolves back to the primary.
+    let chosen = pixelgrab_lib::ipc::commands::resolve_preferred_monitor(
+        &prefs,
+        &layout,
+        Some(PhysicalPoint::new(100, 100)),
+    )
+    .expect("chosen");
+    assert_eq!(chosen.id, "primary");
+}
+
+#[test]
+fn cursor_target_without_a_cursor_falls_back_to_primary() {
+    let prefs = ShelfPreferences {
+        target_monitor_id: Some("cursor".to_string()),
+        ..ShelfPreferences::default()
+    };
+    let layout = sample_layout();
+    let chosen = pixelgrab_lib::ipc::commands::resolve_preferred_monitor(&prefs, &layout, None)
+        .expect("chosen");
+    assert_eq!(chosen.id, "primary");
 }
 
 #[test]

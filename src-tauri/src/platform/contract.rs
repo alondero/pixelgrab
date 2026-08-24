@@ -95,6 +95,20 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
     /// not need to invalidate anything — it shares state with the test).
     /// Windows replaces it with a flag the capture engine checks.
     fn invalidate_layout(&self) {}
+
+    /// Current cursor position in physical desktop coordinates. Used by
+    /// cursor-monitor shelf targeting (issue #63): the shelf anchors to
+    /// the monitor the pointer is over when the user selects "cursor"
+    /// as the target display.
+    ///
+    /// Returns `None` when the platform has no interactive desktop
+    /// session (CI, service context). The default implementation returns
+    /// `None`; Windows queries `GetCursorPos`, and the synthetic adapter
+    /// exposes a test-controlled value.
+    fn cursor_position(&self) -> Option<pixelgrab_contracts::coordinate::PhysicalPoint> {
+        None
+    }
+
     /// Run a capture pipeline and return a `CaptureResolution`.
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution>;
 

@@ -319,7 +319,10 @@ export interface DragRequest {
 }
 
 export interface StartShelfDragIntent {
-  request: DragRequest;
+  /** Shelf id of the card being dragged. The Rust core resolves the
+   * committed entry and builds the OLE payload itself, so the heavy
+   * PNG / BGRA bytes never cross the IPC boundary (issue #63). */
+  shelfId: string;
   dismissOnAccepted?: boolean;
 }
 

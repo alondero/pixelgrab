@@ -22,6 +22,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockGetShelfQueueSnapshot = vi.fn();
 const mockGetShelfPreferences = vi.fn();
 const mockListen = vi.fn();
+// Issue #63 wiring mocks.
+const mockOpenRevision = vi.fn();
+const mockStartShelfDrag = vi.fn();
+const mockShowMainWindow = vi.fn();
+const mockEmit = vi.fn();
+const mockPinStoreOpenPin = vi.fn();
 
 vi.mock("$lib/ipc/commands", () => ({
   getShelfQueueSnapshot: mockGetShelfQueueSnapshot,
@@ -32,10 +38,20 @@ vi.mock("$lib/ipc/commands", () => ({
   hoverShelfCard: vi.fn(),
   unhoverShelfCard: vi.fn(),
   tickShelfQueue: vi.fn(),
+  openRevision: mockOpenRevision,
+  startShelfDrag: mockStartShelfDrag,
+  showMainWindow: mockShowMainWindow,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mockListen,
+  emit: mockEmit,
+}));
+
+vi.mock("$lib/pin/pinStore.svelte", () => ({
+  pinStore: {
+    openPin: mockPinStoreOpenPin,
+  },
 }));
 
 import type { ShelfQueueCard, ShelfQueueSnapshot } from "$lib/ipc/types";
@@ -109,6 +125,74 @@ describe("shelf window bootstrap", () => {
       "pixelgrab://shelf-queue-updated",
       expect.any(Function),
     );
+  });
+
+  it("wires the card Pin action to pinStore.openPin with the card's source data", async () => {
+    mockPinStoreOpenPin.mockReset().mockResolvedValue({ id: "pin-1" });
+    await import("./shelf.svelte");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const pin = document.querySelector<HTMLButtonElement>('[data-testid="shelf-pin"]');
+    expect(pin).not.toBeNull();
+    pin!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockPinStoreOpenPin).toHaveBeenCalledWith({
+      captureId: "capture-shelf-restored",
+      pngPath: "/cache/shelf-restored/capture.png",
+      bounds: { origin: { x: 0, y: 0 }, size: { width: 320, height: 240 } },
+    });
+  });
+
+  it("wires the card Edit action to openRevision + revision-opened event + main window", async () => {
+    mockOpenRevision.mockReset().mockResolvedValue({
+      status: "ok",
+      data: { context: { shelfId: "shelf-restored" } },
+    });
+    await import("./shelf.svelte");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const edit = document.querySelector<HTMLButtonElement>('[data-testid="shelf-edit"]');
+    expect(edit).not.toBeNull();
+    edit!.click();
+    // Flush all pending microtasks across the three-step async chain
+    // (openRevision -> emit -> showMainWindow).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockOpenRevision).toHaveBeenCalledWith({ shelfId: "shelf-restored" });
+    expect(mockEmit).toHaveBeenCalledWith("pixelgrab://revision-opened", {
+      shelfId: "shelf-restored",
+    });
+    expect(mockShowMainWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it("wires the drag gesture to startShelfDrag with the card's shelf id", async () => {
+    mockStartShelfDrag.mockReset().mockResolvedValue({
+      status: "ok",
+      data: { outcome: "cancelled", shouldDismiss: false },
+    });
+    await import("./shelf.svelte");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const surface = document.querySelector<HTMLElement>('[data-testid="shelf-drag-surface"]');
+    expect(surface).not.toBeNull();
+    surface!.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, clientX: 10, clientY: 10, bubbles: true }),
+    );
+    surface!.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 60, clientY: 10, bubbles: true }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockStartShelfDrag).toHaveBeenCalledWith({
+      shelfId: "shelf-restored",
+      dismissOnAccepted: true,
+    });
   });
 
   it("does not hide the remaining queue when cleared follows an update", async () => {

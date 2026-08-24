@@ -66,6 +66,53 @@ impl PinLockProvider for InMemoryPinLockProvider {
     }
 }
 
+/// Production pin lock provider backed by the cache's shared
+/// `ActiveLockSet`. Every open pin holds one `LockOwner::Pin` reference
+/// on its source entry, so the sweeper and the manual `clear_cache`
+/// cannot evict the pinned PNG while the pin window is alive (issue #63).
+///
+/// The provider keys on `capture_id` (the [`PinSource`] identity) and
+/// resolves it to the owning shelf entry through
+/// [`crate::cache::Cache::entry_by_capture`]; capture ids are UUIDv4
+/// strings unique per committed entry. A capture id that does not match
+/// a committed entry acquires nothing — the IPC layer validates the
+/// entry before opening a pin, so this only fires for stale payloads.
+#[derive(Debug, Clone)]
+pub struct CachePinLockProvider {
+    cache: crate::cache::Cache,
+}
+
+impl CachePinLockProvider {
+    /// Build a provider over the given cache store.
+    pub fn new(cache: crate::cache::Cache) -> Self {
+        Self { cache }
+    }
+}
+
+impl PinLockProvider for CachePinLockProvider {
+    fn acquire(&self, capture_id: &str) -> bool {
+        match self.cache.entry_by_capture(capture_id) {
+            Some(entry) => self.cache.acquire_pin_guard(&entry.shelf_id).is_ok(),
+            None => false,
+        }
+    }
+
+    fn release(&self, capture_id: &str) -> bool {
+        match self.cache.entry_by_capture(capture_id) {
+            Some(entry) => self.cache.release_pin_guard(&entry.shelf_id),
+            None => false,
+        }
+    }
+
+    fn active_locks(&self) -> usize {
+        self.cache
+            .entries()
+            .iter()
+            .filter(|entry| self.cache.pin_guard_count(&entry.shelf_id) > 0)
+            .count()
+    }
+}
+
 /// RAII cache lock guard. Holds an `Arc` to the lock provider so the lock
 /// survives even after the registry is dropped; the guard's `Drop` impl
 /// is the sole release path, so the lock is released exactly once.
@@ -143,6 +190,58 @@ mod tests {
             let _guard = PinLockGuard::new(provider.clone(), "c");
             assert_eq!(provider.active_locks(), 1);
         }
+        assert_eq!(provider.active_locks(), 0);
+    }
+
+    #[test]
+    fn cache_provider_round_trips_shared_registry_locks() {
+        use pixelgrab_contracts::LockOwner;
+        use pixelgrab_test_support::fs::IsolatedFilesystem;
+
+        let fs = IsolatedFilesystem::new("pin-cache-provider").expect("fs");
+        let cache = crate::cache::Cache::new();
+        cache
+            .set_cache_root(Some(fs.root().to_path_buf()))
+            .expect("set root");
+        let committed = cache
+            .commit(crate::cache::CacheCommitRequest {
+                bounds: pixelgrab_contracts::coordinate::PhysicalBounds::from_xywh(0, 0, 4, 4),
+                size: pixelgrab_contracts::coordinate::PhysicalSize::new(4, 4),
+                rgba: vec![0u8; 4 * 4 * 4],
+                metadata: Default::default(),
+                monitor_id: "primary".into(),
+            })
+            .expect("commit");
+        let capture_id = committed.entry.capture_id.clone();
+        let shelf_id = committed.entry.shelf_id.clone();
+
+        let provider = CachePinLockProvider::new(cache.clone());
+        // Two pins on the same capture each hold one reference.
+        assert!(provider.acquire(&capture_id));
+        assert!(provider.acquire(&capture_id));
+        assert_eq!(
+            cache.locks().owners_of(&shelf_id),
+            vec![LockOwner::Shelf, LockOwner::Pin]
+        );
+        assert_eq!(provider.active_locks(), 1);
+        assert!(cache.is_protected_from_sweeper(&shelf_id));
+
+        // The first release drops one ref; the entry stays locked.
+        assert!(provider.release(&capture_id));
+        assert_eq!(cache.pin_guard_count(&shelf_id), 1);
+        assert!(provider.release(&capture_id));
+        assert_eq!(cache.pin_guard_count(&shelf_id), 0);
+        assert!(!cache.is_protected_from_sweeper(&shelf_id));
+
+        // Releasing without a live ref reports false.
+        assert!(!provider.release(&capture_id));
+    }
+
+    #[test]
+    fn cache_provider_unknown_capture_is_a_noop() {
+        let provider = CachePinLockProvider::new(crate::cache::Cache::new());
+        assert!(!provider.acquire("no-such-capture"));
+        assert!(!provider.release("no-such-capture"));
         assert_eq!(provider.active_locks(), 0);
     }
 }

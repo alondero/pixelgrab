@@ -6,5 +6,6 @@
 pub mod capture;
 pub mod drag;
 pub mod platform;
+pub mod work_area;
 
 pub use platform::WindowsPlatform;

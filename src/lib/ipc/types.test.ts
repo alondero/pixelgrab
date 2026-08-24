@@ -173,18 +173,12 @@ describe("IPC type contract", () => {
 
   it("StartShelfDragIntent serialises the request envelope", () => {
     const intent: StartShelfDragIntent = {
-      request: {
-        captureId: "c",
-        pngPath: "c.png",
-        bgraPixels: [],
-        width: 1,
-        height: 1,
-      },
+      shelfId: "shelf-1",
       dismissOnAccepted: true,
     };
     const json = JSON.parse(JSON.stringify(intent));
+    expect(json.shelfId).toBe("shelf-1");
     expect(json.dismissOnAccepted).toBe(true);
-    expect(json.request.captureId).toBe("c");
   });
 
   it("StartShelfDragResult serialises outcome and dismiss hint", () => {

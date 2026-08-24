@@ -6,14 +6,19 @@
   import type { CaptureDiagnostics, IpcResponse, SecondaryLaunchIntent } from "$lib/ipc/types";
   import SettingsPanel from "$lib/preferences/SettingsPanel.svelte";
   import HotkeyPanel from "$lib/hotkey/HotkeyPanel.svelte";
+  import RevisionEditor from "$lib/revision/RevisionEditor.svelte";
   import { createPreferencesStore } from "$lib/preferences/store.svelte";
   import { createHotkeyStore } from "$lib/hotkey/store.svelte";
+  import type { MonitorLayout, RevisionContext } from "$lib/ipc/types";
 
   let lastCaptureId = $state<string | null>(null);
   let lastCaptureBounds = $state<string | null>(null);
   let diagnostics = $state<CaptureDiagnostics | null>(null);
   let pendingError = $state<string | null>(null);
   let settingsOpen = $state(false);
+  // Issue #63: the scene forwarded by the shelf card's Edit action.
+  // Non-null while the revision editor is open.
+  let revisionScene = $state<RevisionContext | null>(null);
   const preferences = createPreferencesStore();
   const hotkeys = createHotkeyStore();
 
@@ -94,6 +99,21 @@
     const unlistenPause = listen("pixelgrab://pause-hotkeys-toggled", () => {
       handlePauseToggle();
     });
+    // Issue #63: the shelf card's Edit action forwards the reopened
+    // editor scene; mounting RevisionEditor is the main window's half
+    // of that hand-off.
+    const unlistenRevision = listen<RevisionContext>("pixelgrab://revision-opened", (event) => {
+      revisionScene = event.payload;
+    });
+    // Issue #63: the display watcher announces topology / DPI /
+    // work-area changes; expose the resolved per-monitor scale factors
+    // on the window so the packaged-app WebDriver pass (mixed-DPI
+    // hardware) can assert against them.
+    const unlistenDisplay = listen<MonitorLayout>("pixelgrab://display-changed", (event) => {
+      (
+        window as unknown as { __PIXELGRAB_SCALE_FACTORS__?: number[] }
+      ).__PIXELGRAB_SCALE_FACTORS__ = event.payload.monitors.map((monitor) => monitor.scaleFactor);
+    });
     refreshSnapshot();
     void preferences.refresh();
     void hotkeys.refresh();
@@ -101,6 +121,8 @@
       unlistenCapture.then((fn) => fn());
       unlistenSecondary.then((fn) => fn());
       unlistenPause.then((fn) => fn());
+      unlistenRevision.then((fn) => fn());
+      unlistenDisplay.then((fn) => fn());
     };
   });
 
@@ -155,6 +177,10 @@
   {#if settingsOpen}
     <SettingsPanel store={preferences} />
     <HotkeyPanel store={hotkeys} />
+  {/if}
+
+  {#if revisionScene}
+    <RevisionEditor scene={revisionScene} onClosed={() => (revisionScene = null)} />
   {/if}
 </main>
 

@@ -9,6 +9,7 @@
 
 pub mod lock;
 pub mod registry;
+pub mod window;
 
-pub use lock::{InMemoryPinLockProvider, PinLockGuard};
+pub use lock::{CachePinLockProvider, InMemoryPinLockProvider, PinLockGuard};
 pub use registry::{PinEntry, PinRegistry, MAX_PINS};

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ShelfQueueSnapshot } from "$lib/ipc/types";
+  import type { ShelfQueueCard, ShelfQueueSnapshot } from "$lib/ipc/types";
   import ShelfCard from "./ShelfCard.svelte";
   import { createClockStore } from "./queue.svelte";
   import type { FeedbackEntry } from "./feedback.svelte";
@@ -20,6 +20,9 @@
     onHover = () => {},
     onUnhover = () => {},
     onTickExpired = () => {},
+    onPin = () => {},
+    onEdit = () => {},
+    onDrag = () => {},
   }: {
     snapshot: ShelfQueueSnapshot | null;
     feedback?: FeedbackEntry | null;
@@ -30,6 +33,9 @@
     onHover?: (shelfId: string) => void;
     onUnhover?: (shelfId: string) => void;
     onTickExpired?: () => void;
+    onPin?: (shelfId: string) => void;
+    onEdit?: (card: ShelfQueueCard) => void;
+    onDrag?: (card: ShelfQueueCard) => void;
   } = $props();
 
   let clock = createClockStore();
@@ -100,6 +106,9 @@
         {onDismiss}
         {onHover}
         {onUnhover}
+        {onPin}
+        {onEdit}
+        {onDrag}
       />
     {/each}
     {#if overflowCount > 0}
@@ -130,6 +139,9 @@
                 {onDismiss}
                 {onHover}
                 {onUnhover}
+                {onPin}
+                {onEdit}
+                {onDrag}
               />
             {/each}
           </div>

@@ -127,6 +127,13 @@ export async function startShelfDrag(
   return invoke<IpcResponse<StartShelfDragResult>>("start_shelf_drag", { payload });
 }
 
+/// Show and focus the main companion window. Used by the shelf
+/// webview after reopening a card for editing so the revision editor
+/// becomes visible.
+export async function showMainWindow(): Promise<IpcResponse<null>> {
+  return invoke<IpcResponse<null>>("show_main_window");
+}
+
 export async function getShelfPreferences(): Promise<IpcResponse<ShelfPreferencesDto>> {
   return invoke<IpcResponse<ShelfPreferencesDto>>("get_shelf_preferences");
 }

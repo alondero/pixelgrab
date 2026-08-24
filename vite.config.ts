@@ -31,6 +31,7 @@ export default defineConfig(async () => ({
         main: resolve(__dirname, "index.html"),
         overlay: resolve(__dirname, "overlay.html"),
         shelf: resolve(__dirname, "shelf.html"),
+        pin: resolve(__dirname, "pin.html"),
       },
     },
   },

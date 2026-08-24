@@ -43,3 +43,6 @@ fixtures/local/
 *.tmp.diff
 # Scratch diffs created by review sub-agents (code-review skill).
 /_stdio_*.diff
+
+# Local-only agent knowledge
+CLAUDE.local.md
