@@ -64,5 +64,16 @@ custom-protocol = ["tauri/custom-protocol"]
 # non-Windows hosts. Production Windows builds run the real adapter by
 # default (see `lib::default_platform`); CI runs the synthetic path so
 # no real desktop session is required.
+#
+# The defaults are intentionally empty. Adding `synthetic` here used to
+# silently flip `pnpm tauri:build` / `pnpm tauri:dev` on Windows to
+# `InMemoryBackend` + `SyntheticPlatform`, so user-installed binaries
+# never registered chords at the OS layer. The `default_features_exclude_synthetic`
+# unit test in `lib.rs` guards against a re-introduction. CI passes
+# `--features synthetic` explicitly via `pnpm ci:rust` (and the same
+# flag is in `.github/workflows/ci.yml`); bare `cargo test` on Windows
+# without that flag will fail to compile `pixelgrab-test-support` —
+# that's intentional, since `pnpm ci:rust` is the documented Rust
+# workflow.
 synthetic = ["dep:pixelgrab-test-support"]
-default = ["synthetic"]
+default = []
