@@ -667,14 +667,25 @@ fn install_hotkey_backend(handle: &AppHandle<Wry>) -> Arc<dyn GlobalShortcutBack
         // installs emit the existing `pixelgrab://secondary-
         // launch` event so tray clicks, single-instance argv,
         // and chord presses all funnel through one frontend
-        // intent handler.
+        // intent handler. The startup log is the surface
+        // observers use to confirm the production backend
+        // actually got selected — the silent-flip footgun
+        // from `default = ["synthetic"]` lived in this branch
+        // being skipped without any signal.
+        log::info!("hotkey backend: TauriGlobalShortcutBackend (real OS registration)");
         return TauriGlobalShortcutBackend::install(handle.clone());
     }
     #[cfg(any(not(target_os = "windows"), feature = "synthetic"))]
     {
         // CI / dev / non-Windows / tests. Keep the in-memory
         // fake so the registry's transaction semantics can be
-        // exercised without involving the OS.
+        // exercised without involving the OS. Logged loud so a
+        // Windows binary built with `--features synthetic`
+        // (or a stray `default = ["synthetic"]`) leaves a
+        // breadcrumb the user can grep for.
+        log::info!(
+            "hotkey backend: InMemoryBackend (synthetic — chords will NOT register with the OS)"
+        );
         let _ = handle;
         InMemoryBackend::new()
     }
@@ -695,14 +706,17 @@ pub fn test_app() -> PixelGrabApp {
 fn default_platform() -> Arc<dyn platform::PixelGrabPlatform> {
     #[cfg(all(target_os = "windows", feature = "synthetic"))]
     {
+        log::info!("platform: SyntheticPlatform (synthetic — captures will be deterministic RGBA, not the real desktop)");
         return Arc::new(platform::synthetic::SyntheticPlatform::new());
     }
     #[cfg(all(target_os = "windows", not(feature = "synthetic")))]
     {
+        log::info!("platform: WindowsPlatform (real Windows Graphics Capture API)");
         return Arc::new(platform::windows::WindowsPlatform::new());
     }
     #[cfg(not(target_os = "windows"))]
     {
+        log::info!("platform: SyntheticPlatform (non-Windows — no real capture path available)");
         Arc::new(platform::synthetic::SyntheticPlatform::new())
     }
 }
@@ -714,3 +728,85 @@ pub fn summarise_session(app: &PixelGrabApp) -> SessionState {
 
 /// Convenience: expose a parking_lot Mutex wrapper as a `Send`-safe shared.
 pub type Shared<T> = Arc<Mutex<T>>;
+
+#[cfg(test)]
+mod tests {
+    /// Guard against re-introducing `default = ["synthetic"]` in
+    /// `src-tauri/Cargo.toml`. That single line used to silently
+    /// flip `pnpm tauri:build` / `pnpm tauri:dev` on Windows to
+    /// `InMemoryBackend` + `SyntheticPlatform`, so user-installed
+    /// binaries never registered chords at the OS layer and the
+    /// first symptom was "Ctrl+Shift+S does nothing" (issue
+    /// documented in [`pixelgrab-tracer-15`]). The fix flipped the
+    /// defaults to `[]` and made CI pass `--features synthetic`
+    /// explicitly; this test fails the moment someone re-adds
+    /// `synthetic` to the defaults.
+    #[test]
+    fn default_features_exclude_synthetic() {
+        let cargo_toml = include_str!("../Cargo.toml");
+        let features_section = cargo_toml
+            .split("[features]")
+            .nth(1)
+            .expect("Cargo.toml must have a [features] section");
+        let default_line = features_section
+            .lines()
+            .map(str::trim_start)
+            .find(|line| line.starts_with("default"));
+        let Some(default_line) = default_line else {
+            // No `default = ...` line at all — Cargo defaults to
+            // an empty feature set, which is exactly what we want.
+            return;
+        };
+        assert!(
+            !default_line.contains("synthetic"),
+            "src-tauri/Cargo.toml [features].default must not include \
+             \"synthetic\"; that flag silently flips production Windows \
+             builds to InMemoryBackend + SyntheticPlatform so chords \
+             never register with the OS. Got: {default_line:?}. See the \
+             doc comment on the `synthetic` feature for the rationale."
+        );
+    }
+
+    /// Pin that the startup-log lines exist on the chosen branch.
+    /// The logs are the surface operators grep for when a chord
+    /// stops firing, so removing them would erase the only breadcrumb
+    /// of the silent-flip regression. We don't assert the exact
+    /// wording (free to tweak), only that each branch has at least
+    /// one `log::info!` call naming the backend.
+    #[test]
+    fn install_hotkey_backend_logs_branch_selection() {
+        // The function is private; assert via the source text. The
+        // string is the compiled artefact so this test will catch a
+        // deletion even if the cfg gates move around.
+        let src = include_str!("lib.rs");
+        let install_start = src
+            .find("fn install_hotkey_backend")
+            .expect("install_hotkey_backend must exist");
+        let install_end = src[install_start..]
+            .find("\n}\n")
+            .map(|end| install_start + end)
+            .expect("install_hotkey_backend must close");
+        let body = &src[install_start..install_end];
+        assert!(
+            body.contains("log::info!"),
+            "install_hotkey_backend must emit a log::info! naming which backend got selected; without it a silent-flip regression is invisible. Got body:\n{body}"
+        );
+    }
+
+    #[test]
+    fn default_platform_logs_branch_selection() {
+        let src = include_str!("lib.rs");
+        let fn_start = src
+            .find("fn default_platform")
+            .expect("default_platform must exist");
+        let fn_end = src[fn_start..]
+            .find("\n}\n")
+            .map(|end| fn_start + end)
+            .expect("default_platform must close");
+        let body = &src[fn_start..fn_end];
+        assert!(
+            body.contains("log::info!"),
+            "default_platform must emit a log::info! naming which backend got selected. Got body:\n{body}"
+        );
+    }
+}

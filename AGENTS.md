@@ -98,14 +98,47 @@ IPC.
 ## 4. Platform boundaries
 
 - **Windows-specific code** lives behind `src-tauri/src/platform/`. The
-  tracer-01 build uses the synthetic implementation exclusively. The
-  Windows implementation will be introduced in tracer-02.
+  Windows adapter is selected by `crate::default_platform()` whenever the
+  build target is Windows and the `synthetic` Cargo feature is **off**.
+  The synthetic adapter is the fallback for non-Windows builds and for
+  CI runs with the `synthetic` feature enabled.
 - **Platform-neutral code** lives in `crates/pixelgrab-contracts/`. This
   crate must compile on every supported platform.
 - **Frontend code** lives in `src/`. It talks to the Rust core only through
   the typed IPC surface in `src/lib/ipc/`.
 - **Test adapters** live in `crates/pixelgrab-test-support/`. No test may
   capture real desktop content.
+
+### 4.1 Cargo features and the production hotkey/backend selection
+
+The `src-tauri/Cargo.toml` `[features]` section controls which adapter
+ends up in the running binary:
+
+- `custom-protocol = ["tauri/custom-protocol"]` — required for production
+  builds (Tauri 2.11.5 still needs it; the "ignored in 2.12+" note in
+  the upstream CHANGELOG does not yet apply). `tauri build` enables this
+  automatically; `tauri dev` does not (the dev server uses
+  `protocol-asset` instead).
+- `synthetic = ["dep:pixelgrab-test-support"]` — pulls in the test
+  harness and flips the binary to `SyntheticPlatform` +
+  `InMemoryBackend`. CI passes this explicitly via `pnpm ci:rust` and
+  `.github/workflows/ci.yml::ci::Test`. Bare `cargo test` (no flag) on
+  Windows will fail to compile — that is intentional; the documented
+  Rust workflow is `pnpm ci:rust`.
+- `default = []` — **must stay empty.** Adding `synthetic` here used to
+  silently flip every `pnpm tauri:build` / `pnpm tauri:dev` on Windows
+  to `InMemoryBackend` + `SyntheticPlatform`, so user-installed binaries
+  never registered chords at the OS layer and the first symptom was
+  "Ctrl+Shift+S does nothing". The `default_features_exclude_synthetic`
+  test in `src-tauri/src/lib.rs` guards against a re-introduction —
+  remove it only if you also flip the regression test off.
+
+`crate::install_hotkey_backend` and `crate::default_platform` each log
+the backend they picked (`log::info!("hotkey backend: ...")` /
+`log::info!("platform: ...")`). The next time chords stop firing,
+grep the first few lines of logs for either message: "real OS
+registration" or "synthetic — chords will NOT register" is the
+five-second answer.
 
 ## 5. Capture-session lifecycle
 
