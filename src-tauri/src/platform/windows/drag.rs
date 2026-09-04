@@ -372,6 +372,8 @@ fn encode_dib_v5(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
     header[44..48].copy_from_slice(&0x0000_FF00u32.to_le_bytes()); // green mask
     header[48..52].copy_from_slice(&0x0000_00FFu32.to_le_bytes()); // blue mask
     header[52..56].copy_from_slice(&0xFF00_0000u32.to_le_bytes()); // alpha mask
+    header[56..60].copy_from_slice(&0x7352_4742u32.to_le_bytes()); // LCS_sRGB
+    header[108..112].copy_from_slice(&4u32.to_le_bytes()); // LCS_GM_IMAGES
     let mut out = Vec::with_capacity(header.len() + bgra.len());
     out.extend_from_slice(&header);
     out.extend_from_slice(bgra);
@@ -455,10 +457,6 @@ impl PixelGrabDataObject {
             ref_count: AtomicU32::new(1),
             state,
         }
-    }
-
-    fn as_raw(&self) -> *mut c_void {
-        self as *const Self as *mut c_void
     }
 }
 
@@ -645,10 +643,6 @@ impl PixelGrabDropSource {
             vtable: &DROP_SOURCE_VTABLE,
             ref_count: AtomicU32::new(1),
         }
-    }
-
-    fn as_raw(&self) -> *mut c_void {
-        self as *const Self as *mut c_void
     }
 }
 
@@ -1003,10 +997,13 @@ pub fn run_drag(request: &DragRequest) -> PlatformResult<DragResult> {
     }
     let _ole_guard = OleGuard;
     let state = Arc::new(OleState::new(request)?);
-    let data_object = Box::new(PixelGrabDataObject::new(state.clone()));
-    let drop_source = Box::new(PixelGrabDropSource::new());
-    let data_object_ptr = data_object.as_raw();
-    let drop_source_ptr = drop_source.as_raw();
+    // Transfer the initial COM references out of Rust's Box ownership. The
+    // matching Release calls below are the sole owners of these allocations;
+    // a Rust `drop(Box)` would bypass COM reference counting and can double
+    // free an object released by the OLE runtime.
+    let data_object_ptr =
+        Box::into_raw(Box::new(PixelGrabDataObject::new(state.clone()))).cast::<c_void>();
+    let drop_source_ptr = Box::into_raw(Box::new(PixelGrabDropSource::new())).cast::<c_void>();
     let mut effect: DWORD = DROPEFFECT_NONE;
     // SAFETY: both COM objects own live vtables and backing state for the
     // duration of this synchronous call; `effect` is a writable DWORD.
@@ -1036,12 +1033,15 @@ pub fn run_drag(request: &DragRequest) -> PlatformResult<DragResult> {
         let rel = (completed_at - state.started_at_ms).max(0);
         diag.record_format_request(fmt, rel);
     }
-    // `DoDragDrop` has its own reference to the data object and drop
-    // source; the boxes are dropped here, which decrements the ref
-    // count to zero. The data object is freed by the `Release` vtable
-    // callback once `DoDragDrop` drops its reference.
-    drop(drop_source);
-    drop(data_object);
+    // Balance the caller-owned initial references. Any references retained
+    // by OLE or a target have already been accounted for through AddRef and
+    // will release independently through the vtables.
+    // SAFETY: both pointers came from Box::into_raw above and remain valid
+    // until their initial COM references are released exactly once here.
+    unsafe {
+        data_object_release(data_object_ptr);
+        drop_source_release(drop_source_ptr);
+    }
     Ok(DragResult {
         outcome,
         diagnostics: diag,
@@ -1143,6 +1143,8 @@ mod tests {
         assert_eq!(&bytes[44..48], &0x0000_FF00u32.to_le_bytes());
         assert_eq!(&bytes[48..52], &0x0000_00FFu32.to_le_bytes());
         assert_eq!(&bytes[52..56], &0xFF00_0000u32.to_le_bytes());
+        assert_eq!(&bytes[56..60], &0x7352_4742u32.to_le_bytes());
+        assert_eq!(&bytes[108..112], &4u32.to_le_bytes());
     }
 
     #[test]
@@ -1218,8 +1220,7 @@ mod tests {
 
     #[test]
     fn format_enumerator_advances_between_next_calls() {
-        let mut enumerator = FormatEnumerator::new();
-        let this = (&mut enumerator as *mut FormatEnumerator).cast::<c_void>();
+        let this = Box::into_raw(Box::new(FormatEnumerator::new())).cast::<c_void>();
         let mut first = offered_formats()[0];
         let mut second = offered_formats()[0];
         let mut fetched = 0;
@@ -1235,13 +1236,16 @@ mod tests {
             S_OK
         );
         assert_ne!(first.cfFormat, second.cfFormat);
+        // SAFETY: `this` owns the initial COM reference allocated above.
+        unsafe {
+            format_enum_release(this);
+        }
     }
 
     #[test]
     fn format_enumerator_skip_and_clone_preserve_position() {
-        let mut enumerator = FormatEnumerator::new();
-        let this = (&mut enumerator as *mut FormatEnumerator).cast::<c_void>();
-        // SAFETY: `this` points to the live enumerator stack allocation.
+        let this = Box::into_raw(Box::new(FormatEnumerator::new())).cast::<c_void>();
+        // SAFETY: `this` points to the heap-allocated enumerator owned by the test.
         assert_eq!(unsafe { format_enum_skip(this, 2) }, S_OK);
         let mut clone_ptr = std::ptr::null_mut();
         // SAFETY: `this` is live and clone_ptr is a valid writable out-pointer.
@@ -1259,6 +1263,7 @@ mod tests {
         // outstanding reference, released exactly once here.
         unsafe {
             format_enum_release(clone_ptr);
+            format_enum_release(this);
         }
     }
 }

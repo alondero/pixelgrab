@@ -69,6 +69,7 @@ export function formatRemaining(ms: number): string {
  */
 export function createClockStore(): {
   readonly nowMs: number;
+  readNowMs(): number;
   sync(authoritativeNowMs: number): void;
   start(): void;
   stop(): void;
@@ -89,6 +90,12 @@ export function createClockStore(): {
   return {
     get nowMs() {
       return nowMs;
+    },
+    readNowMs() {
+      // This accessor intentionally does not read the reactive `nowMs` state.
+      // Expiry checks can sample the authoritative interpolated clock without
+      // subscribing themselves to the 60/144 Hz render ticker.
+      return authoritativeAnchorMs + (nowElapsedMs() - localAnchorMs);
     },
     sync(authoritativeNowMs: number) {
       localAnchorMs = nowElapsedMs();

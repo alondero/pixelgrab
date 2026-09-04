@@ -1005,6 +1005,19 @@ function createAnnotationStore() {
       inner.transform = null;
       Object.assign(inner, defaultState());
     },
+
+    /// Discard annotations when the user clears the crop and starts a new
+    /// crop within the same capture. Tool and style choices remain useful,
+    /// but the old scene, badge numbering, and undo branch cannot leak into
+    /// a different exported rectangle.
+    clearForRecrop(): void {
+      inner.annotations = [];
+      inner.draft = null;
+      inner.selection.clear();
+      inner.history = { past: [], future: [] };
+      inner.transform = null;
+      inner.badgeCounter = 1;
+    },
   };
 }
 

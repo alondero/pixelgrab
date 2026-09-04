@@ -1139,6 +1139,7 @@
       // crop asks the backend to cancel and hide the capture session.
       if (lastSelection) {
         event.preventDefault();
+        annotationStore.clearForRecrop();
         redrawCropOverlay(null);
         emitPhysicalSelection(null);
         rerenderSelection();

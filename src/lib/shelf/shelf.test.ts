@@ -119,14 +119,40 @@ describe("ShelfCard", () => {
     });
     const card = getByTestId("shelf-card");
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "c", bubbles: true }));
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "x", ctrlKey: true, bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "p", bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
-    expect(onCopy).toHaveBeenCalledTimes(2);
+    expect(onCopy).toHaveBeenCalledTimes(3);
     expect(onSaveAs).toHaveBeenCalledWith("shelf-keyboard");
     expect(onPin).toHaveBeenCalledWith("shelf-keyboard");
     expect(onDismiss).toHaveBeenCalledWith("shelf-keyboard");
+  });
+
+  it("releases pointer capture on click completion and cancellation", () => {
+    const { getByTestId } = render(ShelfCard, {
+      card: makeCard("shelf-pointer"),
+      nowMs: 0,
+    });
+    const surface = getByTestId("shelf-drag-surface");
+    const hasPointerCapture = vi.fn().mockReturnValue(true);
+    const releasePointerCapture = vi.fn();
+    Object.defineProperty(surface, "hasPointerCapture", { value: hasPointerCapture });
+    Object.defineProperty(surface, "releasePointerCapture", { value: releasePointerCapture });
+
+    const pointerDown = new MouseEvent("pointerdown", { button: 0, bubbles: true });
+    Object.defineProperty(pointerDown, "pointerId", { value: 7 });
+    surface.dispatchEvent(pointerDown);
+    const pointerUp = new MouseEvent("pointerup", { bubbles: true });
+    Object.defineProperty(pointerUp, "pointerId", { value: 7 });
+    surface.dispatchEvent(pointerUp);
+    const pointerCancel = new MouseEvent("pointercancel", { bubbles: true });
+    Object.defineProperty(pointerCancel, "pointerId", { value: 8 });
+    surface.dispatchEvent(pointerCancel);
+
+    expect(hasPointerCapture).toHaveBeenCalledTimes(2);
+    expect(releasePointerCapture).toHaveBeenCalledTimes(2);
   });
 
   it("renders the countdown text driven by `nowMs`", () => {

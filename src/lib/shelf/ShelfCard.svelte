@@ -62,13 +62,26 @@
     const dy = event.clientY - dragStartY;
     if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
       dragFired = true;
+      dragGestureActive = false;
       (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
       onDrag(card);
     }
   }
 
-  function onPointerUp(): void {
+  function releasePointer(event: PointerEvent): void {
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture?.(event.pointerId)) {
+      target.releasePointerCapture(event.pointerId);
+    }
     dragGestureActive = false;
+  }
+
+  function onPointerUp(event: PointerEvent): void {
+    releasePointer(event);
+  }
+
+  function onPointerCancel(event: PointerEvent): void {
+    releasePointer(event);
   }
 
   function onCardKeyDown(event: KeyboardEvent): void {
@@ -80,7 +93,7 @@
     } else if ((event.ctrlKey || event.metaKey) && key === "x") {
       event.preventDefault();
       onCopy(card.shelfId);
-    } else if (!event.ctrlKey && !event.metaKey && key === "c") {
+    } else if (key === "c") {
       event.preventDefault();
       onCopy(card.shelfId);
     } else if (!event.ctrlKey && !event.metaKey && key === "p") {
@@ -146,7 +159,7 @@
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
-    onpointercancel={onPointerUp}
+    onpointercancel={onPointerCancel}
   >
     <div class="thumbnail" data-testid="shelf-thumbnail">
       <img src={pngUrl} alt={titleText} draggable="false" />

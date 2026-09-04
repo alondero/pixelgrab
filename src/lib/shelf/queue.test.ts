@@ -45,11 +45,11 @@ describe("queue.svelte", () => {
 
   it("anchors the browser clock to the backend snapshot epoch", () => {
     const now = vi.spyOn(performance, "now");
-    now.mockReturnValueOnce(25_000);
+    now.mockReturnValue(25_000);
     const clock = createClockStore();
-    now.mockReturnValueOnce(25_000);
     clock.sync(4_000);
     expect(clock.nowMs).toBe(4_000);
+    expect(clock.readNowMs()).toBe(4_000);
     now.mockRestore();
   });
 });

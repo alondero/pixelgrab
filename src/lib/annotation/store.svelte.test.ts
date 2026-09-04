@@ -189,6 +189,25 @@ describe("annotationStore", () => {
     expect(annotationStore.transform).toBeNull();
   });
 
+  it("clears the scene and history when recropping without changing tool style", () => {
+    annotationStore.reset();
+    annotationStore.setTool("rectangle");
+    annotationStore.setColor("blue");
+    annotationStore.setStroke("thick");
+    annotationStore.beginDraft("rectangle", { x: 10, y: 10 });
+    annotationStore.updateDraft({ x: 40, y: 40 });
+    annotationStore.commitDraft();
+
+    annotationStore.clearForRecrop();
+
+    expect(annotationStore.annotations).toHaveLength(0);
+    expect(annotationStore.canUndo).toBe(false);
+    expect(annotationStore.tool).toBe("rectangle");
+    expect(annotationStore.color).toBe("blue");
+    expect(annotationStore.stroke).toBe("thick");
+    expect(annotationStore.badgeCounter).toBe(1);
+  });
+
   it("style changes are undoable: setColor, setStroke, setTool", () => {
     annotationStore.setColor("red");
     annotationStore.setStroke("thin");
