@@ -104,6 +104,31 @@ describe("ShelfCard", () => {
     expect(onUnhover).toHaveBeenCalledWith("shelf-3");
   });
 
+  it("supports the documented focused-card keyboard actions", () => {
+    const onCopy = vi.fn();
+    const onSaveAs = vi.fn();
+    const onPin = vi.fn();
+    const onDismiss = vi.fn();
+    const { getByTestId } = render(ShelfCard, {
+      card: makeCard("shelf-keyboard"),
+      nowMs: 0,
+      onCopy,
+      onSaveAs,
+      onPin,
+      onDismiss,
+    });
+    const card = getByTestId("shelf-card");
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "c", bubbles: true }));
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "x", ctrlKey: true, bubbles: true }));
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }));
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "p", bubbles: true }));
+    card.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    expect(onCopy).toHaveBeenCalledTimes(2);
+    expect(onSaveAs).toHaveBeenCalledWith("shelf-keyboard");
+    expect(onPin).toHaveBeenCalledWith("shelf-keyboard");
+    expect(onDismiss).toHaveBeenCalledWith("shelf-keyboard");
+  });
+
   it("renders the countdown text driven by `nowMs`", () => {
     const { getByTestId } = render(ShelfCard, {
       card: makeCard("shelf-4"),

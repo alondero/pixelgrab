@@ -48,6 +48,13 @@
   // lingers in the DOM for one frame after expiry doesn't fire twice.
   let reportedExpired = $state(new Set<string>());
 
+  // Browser performance.now() and Rust's process-monotonic clock have
+  // different zero points. Anchor the visual clock to every authoritative
+  // snapshot, then interpolate locally between backend events.
+  $effect(() => {
+    if (snapshot) clock.sync(snapshot.snapshotAtMs);
+  });
+
   $effect(() => {
     if (!snapshot) return;
     const now = clock.nowMs;

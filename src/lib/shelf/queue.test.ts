@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { DEFAULT_TIMER_CONFIG, formatRemaining, remainingMs } from "./queue.svelte";
+import { describe, expect, it, vi } from "vitest";
+import {
+  createClockStore,
+  DEFAULT_TIMER_CONFIG,
+  formatRemaining,
+  remainingMs,
+} from "./queue.svelte";
 import type { ShelfTimerState } from "$lib/ipc/types";
 
 describe("queue.svelte", () => {
@@ -36,5 +41,15 @@ describe("queue.svelte", () => {
     expect(formatRemaining(1_499)).toBe("1s");
     expect(formatRemaining(1_500)).toBe("2s");
     expect(formatRemaining(60_000)).toBe("60s");
+  });
+
+  it("anchors the browser clock to the backend snapshot epoch", () => {
+    const now = vi.spyOn(performance, "now");
+    now.mockReturnValueOnce(25_000);
+    const clock = createClockStore();
+    now.mockReturnValueOnce(25_000);
+    clock.sync(4_000);
+    expect(clock.nowMs).toBe(4_000);
+    now.mockRestore();
   });
 });

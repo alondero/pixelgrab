@@ -22,6 +22,7 @@ const getSessionSnapshot = vi.fn();
 const requestCommit = vi.fn();
 const requestCancel = vi.fn();
 const saveCaptureAs = vi.fn();
+const showMainWindow = vi.fn();
 const listen = vi.fn();
 
 // The mock both records `listen` calls (for assertion) and registers
@@ -31,6 +32,7 @@ const listeners = new Map<string, Handler[]>();
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listen(...args),
+  emit: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/ipc/commands", () => ({
@@ -39,6 +41,7 @@ vi.mock("$lib/ipc/commands", () => ({
   requestCommit: (...args: unknown[]) => requestCommit(...args),
   requestCancel: (...args: unknown[]) => requestCancel(...args),
   saveCaptureAs: (...args: unknown[]) => saveCaptureAs(...args),
+  showMainWindow: (...args: unknown[]) => showMainWindow(...args),
 }));
 
 // Konva requires an HTMLCanvasElement.getContext that jsdom does not
@@ -58,6 +61,7 @@ describe("OverlayApp", () => {
     requestCommit.mockReset();
     requestCancel.mockReset();
     saveCaptureAs.mockReset();
+    showMainWindow.mockReset().mockResolvedValue({ status: "ok", data: null });
     listen.mockReset().mockImplementation((name: string, handler: Handler) => {
       const list = listeners.get(name) ?? [];
       list.push(handler);

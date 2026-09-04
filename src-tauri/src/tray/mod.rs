@@ -243,7 +243,16 @@ fn forward_intent<R: Runtime>(app: &AppHandle<R>, intent: SecondaryLaunchIntent)
         return;
     }
     if let Some(window) = app.get_webview_window("main") {
-        focus_main_window(app);
+        // Capture intents must leave PixelGrab's companion hidden. Showing it
+        // before the backend freezes the desktop captures our own window.
+        if !matches!(
+            &intent,
+            SecondaryLaunchIntent::CaptureRegion
+                | SecondaryLaunchIntent::CaptureFullScreen
+                | SecondaryLaunchIntent::ShelfHistory
+        ) {
+            focus_main_window(app);
+        }
         let _ = window.emit(INTENT_EVENT, &intent);
     }
 }

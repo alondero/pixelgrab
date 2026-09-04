@@ -40,9 +40,18 @@ pub const SINGLE_INSTANCE_EVENT: &str = "pixelgrab://secondary-launch";
 /// closure with the parsed [`SecondaryLaunchIntent`].
 pub fn forward_to_existing_instance<R: Runtime>(app: &AppHandle<R>, intent: SecondaryLaunchIntent) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        // A forwarded capture must freeze the desktop before any PixelGrab
+        // UI becomes visible, just like a tray or global-hotkey capture.
+        if !matches!(
+            &intent,
+            SecondaryLaunchIntent::CaptureRegion
+                | SecondaryLaunchIntent::CaptureFullScreen
+                | SecondaryLaunchIntent::ShelfHistory
+        ) {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
         let _ = window.emit(SINGLE_INSTANCE_EVENT, &intent);
     }
 }

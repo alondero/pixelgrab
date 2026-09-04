@@ -26,7 +26,7 @@ pub use platform::synthetic;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
@@ -289,10 +289,12 @@ fn shelf_ticker_loop<R: tauri::Runtime>(
     preferences: Arc<crate::preferences::PreferencesStore>,
     handle: AppHandle<R>,
 ) {
-    let epoch = Instant::now();
     loop {
         std::thread::sleep(SHELF_TICK_INTERVAL);
-        let elapsed_ms = epoch.elapsed().as_millis() as i64;
+        // Use the exact same process epoch as commit / hover / unhover.
+        // A private ticker epoch made restored and newly-added cards live
+        // longer by however much the two epoch start times differed.
+        let elapsed_ms = crate::ipc::commands::now_ms();
         let outcome = queue.tick(elapsed_ms);
         if outcome.expired.is_empty() {
             continue;
@@ -374,31 +376,28 @@ pub fn run() {
             // tolerates missing / corrupt files (returns defaults),
             // so a first-run install boots cleanly.
             let prefs_root = crate::preferences::default_preferences_root();
-            if let Err(err) = app_state.preferences().set_root(prefs_root.clone()) {
-                // `PlatformError` already carries the preferences root
-                // path in its `Display` payload (the inner
-                // `create_dir_all({path}): {os_err}` from
-                // `preferences::store::PreferencesStore::set_root`), so
-                // appending the path a second time here would log it
-                // twice. See the `set_root_error_display_carries_path`
-                // regression test for the pinned contract.
-                log::warn!("{err}");
+            if app_state
+                .preferences()
+                .set_root(prefs_root.clone())
+                .is_err()
+            {
+                // The preferences directory is outside the capture cache;
+                // log only a category so an absolute user path never leaks.
+                log::warn!("preferences root is unusable");
             }
             // Wire the hotkey bindings root under the same parent
             // directory as the shelf preferences. The two JSON
             // documents cannot collide because the filenames are
             // distinct. A corrupt file falls back to defaults.
             let hotkey_root = crate::preferences::default_preferences_root();
-            if let Err(err) = app_state.hotkey_store().set_root(hotkey_root.clone()) {
-                // `PlatformError` already carries the hotkey bindings
-                // root path in its `Display` payload (the inner
-                // `create_dir_all({path}): {os_err}` from
-                // `hotkey::store::HotkeyPreferencesStore::set_root`),
-                // so appending the path a second time here would log
-                // it twice. See the
-                // `set_root_error_display_carries_path` regression
-                // test for the pinned contract.
-                log::warn!("{err}");
+            if app_state
+                .hotkey_store()
+                .set_root(hotkey_root.clone())
+                .is_err()
+            {
+                // The hotkey settings directory is outside the capture
+                // cache; preserve the privacy boundary in diagnostics.
+                log::warn!("hotkey preferences root is unusable");
             }
             let loaded_bindings = app_state.hotkey_store().current();
             app_state.hotkeys().set_bindings(loaded_bindings.clone());
@@ -486,6 +485,20 @@ pub fn run() {
             overlay::preallocate(app.handle())?;
             shelf::preallocate(app.handle())?;
 
+            // Rehydration above populated the queue while the native shelf
+            // window was still hidden. Synchronize it now so captures that
+            // survived a restart are visible without waiting for a new
+            // commit or the first timer mutation.
+            let startup_snapshot = ipc::snapshot_with_resolved_position(
+                &ticker_queue,
+                &ticker_prefs.current(),
+                ticker_platform.as_ref(),
+            );
+            ipc::sync_shelf_window(app.handle(), &startup_snapshot);
+            let _ = app
+                .handle()
+                .emit("pixelgrab://shelf-queue-updated", &startup_snapshot);
+
             // Spawn the background shelf ticker so cards expire even
             // when the webview is hidden or throttled. The ticker
             // drives `queue.tick` + `cache.dismiss` per expired id so
@@ -532,6 +545,7 @@ pub fn run() {
             ipc::unhover_shelf_card,
             ipc::tick_shelf_queue,
             ipc::get_shelf_queue_snapshot,
+            ipc::show_shelf_queue,
             ipc::start_shelf_drag,
             ipc::show_main_window,
             ipc::get_shelf_preferences,

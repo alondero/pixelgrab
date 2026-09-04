@@ -69,15 +69,18 @@ export function formatRemaining(ms: number): string {
  */
 export function createClockStore(): {
   readonly nowMs: number;
+  sync(authoritativeNowMs: number): void;
   start(): void;
   stop(): void;
 } {
-  let nowMs = $state(nowElapsedMs());
+  let localAnchorMs = nowElapsedMs();
+  let authoritativeAnchorMs = 0;
+  let nowMs = $state(0);
   let rafId = 0;
   let running = false;
 
   function tick() {
-    nowMs = nowElapsedMs();
+    nowMs = authoritativeAnchorMs + (nowElapsedMs() - localAnchorMs);
     if (running && typeof requestAnimationFrame === "function") {
       rafId = requestAnimationFrame(tick);
     }
@@ -86,6 +89,11 @@ export function createClockStore(): {
   return {
     get nowMs() {
       return nowMs;
+    },
+    sync(authoritativeNowMs: number) {
+      localAnchorMs = nowElapsedMs();
+      authoritativeAnchorMs = authoritativeNowMs;
+      nowMs = authoritativeNowMs;
     },
     start() {
       if (running) return;

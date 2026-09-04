@@ -73,7 +73,6 @@ const CF_DIBV5: u16 = 17;
 const CF_UNICODETEXT: u16 = 13;
 /// TYMED bits.
 const TYMED_HGLOBAL: u32 = 0x01;
-const TYMED_FILE: u32 = 0x02;
 /// GMEM flags.
 const GMEM_MOVEABLE: UINT = 0x0040;
 
@@ -98,6 +97,7 @@ const DVASPECT_CONTENT: DWORD = 1;
 /// `DROPEFFECT` bits.
 const DROPEFFECT_NONE: u32 = 0;
 const DROPEFFECT_COPY: u32 = 1;
+const DROPEFFECT_MOVE: u32 = 2;
 
 /// COM IIDs that we care about.
 const IID_IUNKNOWN: [u8; 16] = [
@@ -212,6 +212,8 @@ extern "system" {
 
 #[link(name = "ole32")]
 extern "system" {
+    fn OleInitialize(pvreserved: *mut c_void) -> HRESULT;
+    fn OleUninitialize();
     fn DoDragDrop(
         pdataobj: *mut c_void,
         pdropsource: *mut c_void,
@@ -354,17 +356,22 @@ fn encode_dib_v5(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut header = [0u8; 124];
     header[0..4].copy_from_slice(&124u32.to_le_bytes()); // bV5Size
     header[4..8].copy_from_slice(&width.to_le_bytes());
-    header[8..12].copy_from_slice(&height.to_le_bytes());
+    // A negative DIB height declares top-down rows. The shared RGBA source
+    // and the BGRA buffer are both top-down; a positive height made bitmap
+    // consumers display the capture vertically flipped.
+    header[8..12].copy_from_slice(&(-(height as i32)).to_le_bytes());
     header[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
     header[14..16].copy_from_slice(&32u16.to_le_bytes()); // bV5BitCount
     header[16..20].copy_from_slice(&3u32.to_le_bytes()); // BI_BITFIELDS
     header[20..24].copy_from_slice(&(bgra.len() as u32).to_le_bytes());
     header[24..28].copy_from_slice(&0u32.to_le_bytes()); // bV5XPelsPerMeter
     header[28..32].copy_from_slice(&0u32.to_le_bytes()); // bV5YPelsPerMeter
-    header[56..60].copy_from_slice(&0x00FF_0000u32.to_le_bytes()); // red mask
-    header[60..64].copy_from_slice(&0x0000_FF00u32.to_le_bytes()); // green mask
-    header[64..68].copy_from_slice(&0x0000_00FFu32.to_le_bytes()); // blue mask
-    header[68..72].copy_from_slice(&0xFF00_0000u32.to_le_bytes()); // alpha mask
+                                                         // BITMAPV5HEADER places the channel masks immediately after
+                                                         // bV5ClrImportant. Offsets 56+ are bV5CSType / endpoints, not masks.
+    header[40..44].copy_from_slice(&0x00FF_0000u32.to_le_bytes()); // red mask
+    header[44..48].copy_from_slice(&0x0000_FF00u32.to_le_bytes()); // green mask
+    header[48..52].copy_from_slice(&0x0000_00FFu32.to_le_bytes()); // blue mask
+    header[52..56].copy_from_slice(&0xFF00_0000u32.to_le_bytes()); // alpha mask
     let mut out = Vec::with_capacity(header.len() + bgra.len());
     out.extend_from_slice(&header);
     out.extend_from_slice(bgra);
@@ -515,7 +522,7 @@ unsafe extern "system" fn data_object_get_data(
     }
     let fmt = unsafe { &*pformat };
     let obj = unsafe { &*this.cast::<PixelGrabDataObject>() };
-    let target = match OleState::classify(fmt) {
+    let target = match supported_format(fmt) {
         Some(target) => target,
         None => return OLE_E_ADVISENOTSUPPORTED,
     };
@@ -544,7 +551,7 @@ unsafe extern "system" fn data_object_query_get_data(
     }
     let fmt = unsafe { &*pformat };
     let _ = unsafe { &*this.cast::<PixelGrabDataObject>() };
-    if OleState::classify(fmt).is_some() {
+    if supported_format(fmt).is_some() {
         S_OK
     } else {
         OLE_E_ADVISENOTSUPPORTED
@@ -805,7 +812,11 @@ fn offered_formats() -> [FORMATETC; 4] {
         ptd: std::ptr::null_mut(),
         dwAspect: DVASPECT_CONTENT,
         lindex: -1,
-        tymed: TYMED_FILE,
+        // CF_HDROP is a DROPFILES structure in global memory. Advertising
+        // TYMED_FILE here while GetData returned TYMED_HGLOBAL caused Shell,
+        // Chromium, and Electron targets to reject the format during
+        // negotiation before they ever requested the bytes.
+        tymed: TYMED_HGLOBAL,
     };
     let registered = FORMATETC {
         cfFormat: registered_png_format(),
@@ -831,14 +842,30 @@ fn offered_formats() -> [FORMATETC; 4] {
     [hdrop, registered, dib, unicode]
 }
 
+/// Resolve a target request against the formats this data object can
+/// actually render. Targets may OR several TYMED values together; a request
+/// is compatible when it includes the HGLOBAL transport we return.
+fn supported_format(format: &FORMATETC) -> Option<DragFormat> {
+    if format.dwAspect != DVASPECT_CONTENT || format.lindex != -1 {
+        return None;
+    }
+    if format.tymed & TYMED_HGLOBAL == 0 {
+        return None;
+    }
+    OleState::classify(format)
+}
+
 unsafe extern "system" fn format_enum_next(
     this: *mut c_void,
     celt: DWORD,
     rgelt: *mut FORMATETC,
     pceltfetched: *mut DWORD,
 ) -> HRESULT {
+    if rgelt.is_null() || (celt != 1 && pceltfetched.is_null()) {
+        return E_INVALIDARG;
+    }
     let formats = offered_formats();
-    let obj = unsafe { &*this.cast::<FormatEnumerator>() };
+    let obj = unsafe { &mut *this.cast::<FormatEnumerator>() };
     let mut pos = obj.pos;
     let mut written = 0u32;
     while written < celt && pos < formats.len() {
@@ -848,6 +875,7 @@ unsafe extern "system" fn format_enum_next(
         pos += 1;
         written += 1;
     }
+    obj.pos = pos;
     if !pceltfetched.is_null() {
         unsafe {
             *pceltfetched = written;
@@ -860,8 +888,16 @@ unsafe extern "system" fn format_enum_next(
     }
 }
 
-unsafe extern "system" fn format_enum_skip(_this: *mut c_void, _celt: DWORD) -> HRESULT {
-    S_OK
+unsafe extern "system" fn format_enum_skip(this: *mut c_void, celt: DWORD) -> HRESULT {
+    let obj = unsafe { &mut *this.cast::<FormatEnumerator>() };
+    let remaining = offered_formats().len().saturating_sub(obj.pos);
+    let skipped = remaining.min(celt as usize);
+    obj.pos += skipped;
+    if skipped == celt as usize {
+        S_OK
+    } else {
+        S_FALSE
+    }
 }
 
 unsafe extern "system" fn format_enum_reset(this: *mut c_void) -> HRESULT {
@@ -871,10 +907,24 @@ unsafe extern "system" fn format_enum_reset(this: *mut c_void) -> HRESULT {
 }
 
 unsafe extern "system" fn format_enum_clone(
-    _this: *mut c_void,
-    _ppenum: *mut *mut c_void,
+    this: *mut c_void,
+    ppenum: *mut *mut c_void,
 ) -> HRESULT {
-    E_NOTIMPL
+    if ppenum.is_null() {
+        return E_INVALIDARG;
+    }
+    let obj = unsafe { &*this.cast::<FormatEnumerator>() };
+    let clone = Box::new(FormatEnumerator {
+        vtable: &FORMAT_ENUM_VTABLE,
+        ref_count: AtomicU32::new(1),
+        pos: obj.pos,
+    });
+    // SAFETY: `ppenum` was validated non-null above and receives ownership
+    // of a heap allocation whose lifetime is managed by the COM Release vtable.
+    unsafe {
+        *ppenum = Box::into_raw(clone).cast::<c_void>();
+    }
+    S_OK
 }
 
 // ============================================================
@@ -892,6 +942,17 @@ fn translate_hr(hr: HRESULT) -> pixelgrab_contracts::drag::DragOutcome {
         DragOutcome::Failed
     } else {
         DragOutcome::Rejected
+    }
+}
+
+/// Combine the OLE terminal status with the effect chosen by the target. A
+/// target may complete the gesture with `DRAGDROP_S_DROP` but return
+/// `DROPEFFECT_NONE`; that is a rejection and must not dismiss the card.
+fn translate_drop_result(hr: HRESULT, effect: DWORD) -> pixelgrab_contracts::drag::DragOutcome {
+    if hr == DRAGDROP_S_DROP && effect == DROPEFFECT_NONE {
+        pixelgrab_contracts::drag::DragOutcome::Rejected
+    } else {
+        translate_hr(hr)
     }
 }
 
@@ -918,12 +979,37 @@ fn classify_target() -> DragTargetKind {
 /// when the `DataObject` and `DropSource` are dropped at the end of
 /// the function.
 pub fn run_drag(request: &DragRequest) -> PlatformResult<DragResult> {
+    // Microsoft requires OleInitialize on the thread that calls
+    // DoDragDrop. Tauri normally dispatches this synchronous command on its
+    // STA UI thread, but relying on transitive WebView initialization made
+    // the drag path fail on machines where that thread had not entered OLE.
+    // S_OK and S_FALSE are both successful and each must be balanced.
+    // SAFETY: a null reserved pointer is required by OleInitialize. The
+    // successful call is balanced on this same thread by OleGuard below.
+    let ole_hr = unsafe { OleInitialize(std::ptr::null_mut()) };
+    if ole_hr < 0 {
+        return Err(PlatformError::new(
+            PlatformErrorKind::Internal,
+            "windows drag: OLE initialization failed",
+        ));
+    }
+    struct OleGuard;
+    impl Drop for OleGuard {
+        fn drop(&mut self) {
+            // SAFETY: this guard is constructed only after a successful
+            // OleInitialize call and is dropped on the same thread.
+            unsafe { OleUninitialize() };
+        }
+    }
+    let _ole_guard = OleGuard;
     let state = Arc::new(OleState::new(request)?);
     let data_object = Box::new(PixelGrabDataObject::new(state.clone()));
     let drop_source = Box::new(PixelGrabDropSource::new());
     let data_object_ptr = data_object.as_raw();
     let drop_source_ptr = drop_source.as_raw();
     let mut effect: DWORD = DROPEFFECT_NONE;
+    // SAFETY: both COM objects own live vtables and backing state for the
+    // duration of this synchronous call; `effect` is a writable DWORD.
     let hr = unsafe {
         DoDragDrop(
             data_object_ptr,
@@ -932,8 +1018,7 @@ pub fn run_drag(request: &DragRequest) -> PlatformResult<DragResult> {
             &mut effect,
         )
     };
-    let _ = effect;
-    let outcome = translate_hr(hr);
+    let outcome = translate_drop_result(hr, effect);
     let completed_at = now_ms();
     let mut diag = DragDiagnostics::started(
         state.capture_id.clone(),
@@ -941,7 +1026,7 @@ pub fn run_drag(request: &DragRequest) -> PlatformResult<DragResult> {
         state.started_at_ms,
     )
     .completed(completed_at)
-    .with_target_effect(target_effect_for(outcome))
+    .with_target_effect(target_effect_for(effect, outcome))
     .with_target_kind(classify_target());
     if outcome == pixelgrab_contracts::drag::DragOutcome::Failed {
         diag = diag.failed(failure_kind_for(hr));
@@ -963,9 +1048,18 @@ pub fn run_drag(request: &DragRequest) -> PlatformResult<DragResult> {
     })
 }
 
-fn target_effect_for(outcome: pixelgrab_contracts::drag::DragOutcome) -> DragTargetEffect {
+fn target_effect_for(
+    effect: DWORD,
+    outcome: pixelgrab_contracts::drag::DragOutcome,
+) -> DragTargetEffect {
+    if effect & DROPEFFECT_COPY != 0 {
+        return DragTargetEffect::Copy;
+    }
+    if effect & DROPEFFECT_MOVE != 0 {
+        return DragTargetEffect::Move;
+    }
     match outcome {
-        pixelgrab_contracts::drag::DragOutcome::Accepted => DragTargetEffect::Copy,
+        pixelgrab_contracts::drag::DragOutcome::Accepted => DragTargetEffect::Unknown,
         pixelgrab_contracts::drag::DragOutcome::Rejected => DragTargetEffect::None,
         pixelgrab_contracts::drag::DragOutcome::Cancelled => DragTargetEffect::Unknown,
         pixelgrab_contracts::drag::DragOutcome::Failed => DragTargetEffect::Unknown,
@@ -1009,6 +1103,20 @@ mod tests {
     }
 
     #[test]
+    fn completed_drop_with_no_effect_is_rejected() {
+        use pixelgrab_contracts::drag::DragOutcome;
+
+        assert_eq!(
+            translate_drop_result(DRAGDROP_S_DROP, DROPEFFECT_NONE),
+            DragOutcome::Rejected
+        );
+        assert_eq!(
+            translate_drop_result(DRAGDROP_S_DROP, DROPEFFECT_COPY),
+            DragOutcome::Accepted
+        );
+    }
+
+    #[test]
     fn encode_hdrop_writes_pfiles_offset() {
         let path = PathBuf::from("C:\\cache\\cap.png");
         let bytes = encode_hdrop(&path);
@@ -1029,8 +1137,12 @@ mod tests {
         assert_eq!(bytes.len(), 124 + 8 * 4 * 4);
         assert_eq!(&bytes[0..4], &124u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &8u32.to_le_bytes());
-        assert_eq!(&bytes[8..12], &4u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &(-4i32).to_le_bytes());
         assert_eq!(&bytes[14..16], &32u16.to_le_bytes());
+        assert_eq!(&bytes[40..44], &0x00FF_0000u32.to_le_bytes());
+        assert_eq!(&bytes[44..48], &0x0000_FF00u32.to_le_bytes());
+        assert_eq!(&bytes[48..52], &0x0000_00FFu32.to_le_bytes());
+        assert_eq!(&bytes[52..56], &0xFF00_0000u32.to_le_bytes());
     }
 
     #[test]
@@ -1056,20 +1168,24 @@ mod tests {
     fn target_effect_for_maps_outcomes() {
         use pixelgrab_contracts::drag::DragOutcome;
         assert_eq!(
-            target_effect_for(DragOutcome::Accepted),
+            target_effect_for(DROPEFFECT_COPY, DragOutcome::Accepted),
             DragTargetEffect::Copy
         );
         assert_eq!(
-            target_effect_for(DragOutcome::Rejected),
+            target_effect_for(DROPEFFECT_NONE, DragOutcome::Rejected),
             DragTargetEffect::None
         );
         assert_eq!(
-            target_effect_for(DragOutcome::Cancelled),
+            target_effect_for(DROPEFFECT_NONE, DragOutcome::Cancelled),
             DragTargetEffect::Unknown
         );
         assert_eq!(
-            target_effect_for(DragOutcome::Failed),
+            target_effect_for(DROPEFFECT_NONE, DragOutcome::Failed),
             DragTargetEffect::Unknown
+        );
+        assert_eq!(
+            target_effect_for(DROPEFFECT_MOVE, DragOutcome::Accepted),
+            DragTargetEffect::Move
         );
     }
 
@@ -1089,5 +1205,60 @@ mod tests {
             OleState::classify(&formats[3]),
             Some(DragFormat::UnicodeText),
         );
+        assert!(formats.iter().all(|format| format.tymed == TYMED_HGLOBAL));
+    }
+
+    #[test]
+    fn query_contract_rejects_incompatible_storage_medium() {
+        let mut hdrop = offered_formats()[0];
+        assert_eq!(supported_format(&hdrop), Some(DragFormat::Hdrop));
+        hdrop.tymed = 0x02;
+        assert_eq!(supported_format(&hdrop), None);
+    }
+
+    #[test]
+    fn format_enumerator_advances_between_next_calls() {
+        let mut enumerator = FormatEnumerator::new();
+        let this = (&mut enumerator as *mut FormatEnumerator).cast::<c_void>();
+        let mut first = offered_formats()[0];
+        let mut second = offered_formats()[0];
+        let mut fetched = 0;
+        // SAFETY: `this`, the output slots, and the fetched count all point to
+        // live stack allocations for the duration of both vtable calls.
+        assert_eq!(
+            unsafe { format_enum_next(this, 1, &mut first, &mut fetched) },
+            S_OK
+        );
+        assert_eq!(fetched, 1);
+        assert_eq!(
+            unsafe { format_enum_next(this, 1, &mut second, &mut fetched) },
+            S_OK
+        );
+        assert_ne!(first.cfFormat, second.cfFormat);
+    }
+
+    #[test]
+    fn format_enumerator_skip_and_clone_preserve_position() {
+        let mut enumerator = FormatEnumerator::new();
+        let this = (&mut enumerator as *mut FormatEnumerator).cast::<c_void>();
+        // SAFETY: `this` points to the live enumerator stack allocation.
+        assert_eq!(unsafe { format_enum_skip(this, 2) }, S_OK);
+        let mut clone_ptr = std::ptr::null_mut();
+        // SAFETY: `this` is live and clone_ptr is a valid writable out-pointer.
+        assert_eq!(unsafe { format_enum_clone(this, &mut clone_ptr) }, S_OK);
+        let mut next = offered_formats()[0];
+        let mut fetched = 0;
+        // SAFETY: the clone owns a live COM allocation until Release below;
+        // both output pointers reference writable stack values.
+        assert_eq!(
+            unsafe { format_enum_next(clone_ptr, 1, &mut next, &mut fetched) },
+            S_OK
+        );
+        assert_eq!(next.cfFormat, offered_formats()[2].cfFormat);
+        // SAFETY: clone_ptr was returned by format_enum_clone and has one
+        // outstanding reference, released exactly once here.
+        unsafe {
+            format_enum_release(clone_ptr);
+        }
     }
 }
