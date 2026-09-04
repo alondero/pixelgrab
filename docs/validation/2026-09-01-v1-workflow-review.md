@@ -25,8 +25,8 @@ The reported capture-to-delivery path is now wired coherently:
    marks its DIBV5 pixels as top-down with explicit sRGB metadata. COM object
    allocations now transfer to raw ownership and are released through their
    IUnknown vtables exactly once.
-8. Focused shelf cards implement the documented Copy, Save As, Pin, Dismiss,
-   and clipboard-fallback shortcuts. The thumbnail labels its drag gesture and
+8. Focused shelf cards implement the documented Copy, Save As, Pin, and
+   Dismiss shortcuts. The thumbnail labels its drag gesture and
    releases pointer capture on both completion and cancellation.
 9. Tray and single-instance Shelf History actions call the native shelf
    presentation seam directly; the hidden companion WebView is no longer an

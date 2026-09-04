@@ -90,9 +90,6 @@
     if ((event.ctrlKey || event.metaKey) && key === "s") {
       event.preventDefault();
       onSaveAs(card.shelfId);
-    } else if ((event.ctrlKey || event.metaKey) && key === "x") {
-      event.preventDefault();
-      onCopy(card.shelfId);
     } else if (key === "c") {
       event.preventDefault();
       onCopy(card.shelfId);

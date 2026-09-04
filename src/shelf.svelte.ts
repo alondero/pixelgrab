@@ -222,7 +222,7 @@ listen<ShelfQueueSnapshot>("pixelgrab://shelf-queue-updated", (event) => {
 
 // Shelf History is an explicit navigation action, unlike the passive shelf
 // reveal after a commit. Move focus to the newest card only for that action
-// so keyboard users can immediately use C / Ctrl+S / P / Delete / Ctrl+X.
+// so keyboard users can immediately use C / Ctrl+C / Ctrl+S / P / Delete.
 listen("pixelgrab://shelf-focus-requested", () => {
   requestAnimationFrame(() => {
     target.querySelector<HTMLElement>('[data-testid="shelf-card"]')?.focus();

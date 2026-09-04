@@ -120,11 +120,10 @@ describe("ShelfCard", () => {
     const card = getByTestId("shelf-card");
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "c", bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true }));
-    card.dispatchEvent(new KeyboardEvent("keydown", { key: "x", ctrlKey: true, bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "p", bubbles: true }));
     card.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
-    expect(onCopy).toHaveBeenCalledTimes(3);
+    expect(onCopy).toHaveBeenCalledTimes(2);
     expect(onSaveAs).toHaveBeenCalledWith("shelf-keyboard");
     expect(onPin).toHaveBeenCalledWith("shelf-keyboard");
     expect(onDismiss).toHaveBeenCalledWith("shelf-keyboard");
