@@ -14,10 +14,7 @@ export const documents = [
 
 export const aliases = [
   { alias: "AGENTS.md", target: "CLAUDE.md" },
-  {
-    alias: ".agents/skills/pixelgrab-change/SKILL.md",
-    target: ".claude/skills/pixelgrab-change/SKILL.md",
-  },
+  { alias: ".agents/skills", target: ".claude/skills" },
 ];
 
 /** Check the maintained Markdown subset: inline local file links, not anchors. */

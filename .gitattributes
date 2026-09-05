@@ -30,4 +30,4 @@
 # Git symlink targets are path bytes, not text documents. Keep Windows
 # core.symlinks=false placeholders byte-identical to the link target.
 AGENTS.md                       -text
-.agents/skills/pixelgrab-change/SKILL.md -text
+.agents/skills                  -text

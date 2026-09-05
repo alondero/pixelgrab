@@ -1,16 +1,16 @@
 # Agent infrastructure ownership
 
 `CLAUDE.md` is the canonical shared entrypoint. `AGENTS.md` is a relative
-symlink to it. The `.claude/` skill is canonical and `.agents/` is a relative
-symlink to that skill, so Claude-oriented files are the maintained source and
-agent-oriented names remain compatible with common repository conventions. When
+symlink to it. The `.claude/skills/` directory is canonical and `.agents/skills/`
+is a relative symlink to that directory, so Claude-oriented files are the
+maintained source and agent-oriented names remain compatible with common
+repository conventions. When
 Windows checks out symlinks as plain files (`core.symlinks=false`), the checker
 accepts and validates the target placeholder.
 
 The canonical project skill lives in `.claude/skills/pixelgrab-change/` and is
-symlinked from `.agents/skills/pixelgrab-change/` so agents without Claude skill
-discovery can use the same workflow. Only these shared Claude files are
-unignored. `.claude/settings.local.json`,
+available through the `.agents/skills/` directory alias. Only these shared
+Claude files are unignored. `.claude/settings.local.json`,
 worktrees, and `.codex/` runtime configuration remain local.
 
 Machine-local notification hooks are not quality gates. Do not copy callback

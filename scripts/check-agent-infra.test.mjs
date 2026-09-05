@@ -52,10 +52,7 @@ test("accepts Windows Git placeholders for Claude-canonical aliases", (t) => {
   );
   assert.equal(checkAlias(f.root).errors.length, 2);
   f.write("AGENTS.md", "CLAUDE.md");
-  f.write(
-    ".agents/skills/pixelgrab-change/SKILL.md",
-    "../../../.claude/skills/pixelgrab-change/SKILL.md",
-  );
+  f.write(".agents/skills", "../.claude/skills");
   assert.deepEqual(checkAlias(f.root).errors, []);
   assert.equal(checkAlias(f.root).warnings.length, 2);
   f.write("AGENTS.md", "# Duplicated guide");
