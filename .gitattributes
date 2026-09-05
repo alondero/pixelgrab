@@ -6,6 +6,7 @@
 
 # Shell scripts and tooling that must remain LF.
 *.sh            text eol=lf
+.githooks/*     text eol=lf
 *.bash          text eol=lf
 *.mjs           text eol=lf
 *.js            text eol=lf
@@ -25,3 +26,8 @@
 *.png           binary
 *.ico           binary
 *.icns          binary
+
+# Git symlink targets are path bytes, not text documents. Keep Windows
+# core.symlinks=false placeholders byte-identical to the link target.
+AGENTS.md                       -text
+.agents/skills                  -text

@@ -1,8 +1,8 @@
 # Contributing to PixelGrab
 
-We welcome contributions. PixelGrab is in active development; the foundation
-(tracer-01) is the entry point. Subsequent tracers deliver the real capture
-pipeline, the annotation tools, the shelf, and the OLE drag.
+We welcome contributions. PixelGrab is in active development, with native
+capture, annotation, shelf, pin, and drag workflows. See the current
+[verification guide](docs/agents/verification.md) for acceptance gaps.
 
 ## Code of Conduct
 
@@ -18,7 +18,7 @@ participating you agree to abide by its terms.
 3. Read the relevant ADRs in [`docs/adr/`](docs/adr/).
 4. Fork the repository and create a topic branch.
 5. Make your change.
-6. Run every quality gate locally before opening a PR (see below).
+6. Run the affected quality gates locally before opening a PR (see below).
 7. Open a PR with a short description and a link to the issue.
 
 ## Branch naming
@@ -36,7 +36,9 @@ commit subject must be 72 characters or fewer.
 
 ## Quality gates
 
-Before opening a PR, run every gate locally:
+For product changes, run the affected suites according to the
+[verification guide](docs/agents/verification.md); cross-layer changes run both.
+The source and license gates are:
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -45,8 +47,12 @@ pnpm ci:check
 pnpm licenses:check
 ```
 
-The CI pipeline runs the same gates plus a production build. A PR that
-fails CI will not be merged.
+CI runs these gates plus a dependency audit, production build, and startup smoke.
+The smoke job does not drive the packaged workflow. Record failed or unrun checks
+and native acceptance limitations in the PR; never infer coverage from test titles.
+For documentation/tooling-only work, use the scoped checks in the verification
+guide. The optional [Git hook](docs/agents/infrastructure.md) checks shared agent
+infrastructure without changing local hook configuration.
 
 ## Branch protection on `main`
 

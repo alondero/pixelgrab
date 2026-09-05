@@ -126,6 +126,8 @@ jobs:
         run: pnpm exec eslint .
       - name: Type check
         run: pnpm check
+      - name: Agent infrastructure
+        run: pnpm agents:check
       - name: Test
         run: pnpm test
       - name: License policy
@@ -171,10 +173,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Build
-        # Tracer-01 ships only the synthetic platform. The real Windows
-        # platform adapter is introduced in tracer-02, at which point the
-        # synthetic feature is removed from the default features in
-        # src-tauri/Cargo.toml.
+        # Production defaults select real Windows capture and OS hotkeys.
+        # Keep synthetic explicit in tests only.
         run: pnpm exec tauri build --no-bundle
       - name: Upload artifacts
         if: always()
@@ -188,10 +188,8 @@ jobs:
           retention-days: 7
 
   e2e:
-    # Tracer-01 ships a synthetic-only build. The full WebdriverIO +
-    # official Tauri service acceptance suite arrives in tracer-14 once the
-    # real Windows platform adapter is in place. For now the e2e job
-    # verifies the production binary exists and is runnable.
+    # Startup survival only; does not run tests/e2e or prove capture workflows.
+    # Do not trigger real desktop capture in this production-binary job.
     name: Packaged-app smoke test
     needs: [build]
     runs-on: windows-latest
@@ -234,6 +232,7 @@ jobs:
           $stderrLog = "smoke-stderr.log"
           $stdoutLog = "smoke-stdout.log"
           $proc = Start-Process -FilePath $binary -PassThru `
+            -WindowStyle Hidden `
             -RedirectStandardError $stderrLog -RedirectStandardOutput $stdoutLog
           Write-Host "Launched $binary as PID $($proc.Id)."
           # Poll instead of sleeping flat so a startup panic fails fast rather
