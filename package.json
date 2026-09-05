@@ -26,7 +26,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "ci:install": "pnpm install --frozen-lockfile",
-    "ci:check": "pnpm format:check && pnpm lint && pnpm check && pnpm test",
+    "agents:check": "node scripts/check-agent-infra.mjs && node --test scripts/check-agent-infra.test.mjs",
+    "ci:check": "pnpm agents:check && pnpm format:check && pnpm lint && pnpm check && pnpm test",
     "ci:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features synthetic -- -D warnings && cargo test --workspace --features synthetic",
     "ci:all": "pnpm ci:rust && pnpm ci:check",
     "licenses:check": "node scripts/check-licenses.mjs"

@@ -21,7 +21,10 @@ Thumbs.db
 *.swp
 *.swo
 .codex/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/pixelgrab-change/
 
 # Logs
 *.log
