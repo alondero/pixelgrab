@@ -1,16 +1,16 @@
 # Agent infrastructure ownership
 
-`AGENTS.md` is the shared entrypoint. `CLAUDE.md` is a portable forwarding file
-that instructs the agent to read it. The intended symlink was absent in this
-checkout and creation required unavailable Windows privileges. The forwarding
-file keeps fresh worktrees usable without elevation or duplicated instructions.
-The checker also accepts a relative `AGENTS.md` symlink and warns about Git's
-plain symlink placeholder when `core.symlinks=false`.
+`CLAUDE.md` is the canonical shared entrypoint. `AGENTS.md` is a relative
+symlink to it. The `.claude/` skill is canonical and `.agents/` is a relative
+symlink to that skill, so Claude-oriented files are the maintained source and
+agent-oriented names remain compatible with common repository conventions. When
+Windows checks out symlinks as plain files (`core.symlinks=false`), the checker
+accepts and validates the target placeholder.
 
-The canonical project skill lives in `.agents/skills/pixelgrab-change/` and is
-also linked from AGENTS so agents without skill discovery can use it. The small
-`.claude/skills/pixelgrab-change/SKILL.md` entrypoint routes to the same workflow.
-Only these shared Claude files are unignored. `.claude/settings.local.json`,
+The canonical project skill lives in `.claude/skills/pixelgrab-change/` and is
+symlinked from `.agents/skills/pixelgrab-change/` so agents without Claude skill
+discovery can use the same workflow. Only these shared Claude files are
+unignored. `.claude/settings.local.json`,
 worktrees, and `.codex/` runtime configuration remain local.
 
 Machine-local notification hooks are not quality gates. Do not copy callback
@@ -20,7 +20,7 @@ other services. Project checks run without an agent runtime or network access.
 
 ## Checks and optional Git hook
 
-`pnpm agents:check` verifies shared instruction/skill links and the CLAUDE alias.
+`pnpm agents:check` verifies shared instruction/skill aliases and the CLAUDE guide.
 CI invokes it in the frontend job; `pnpm ci:check` invokes it locally. The checker
 does not validate prose semantics or establish product acceptance.
 

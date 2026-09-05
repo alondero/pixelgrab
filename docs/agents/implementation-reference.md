@@ -1,8 +1,8 @@
-<!-- Historical reference; current instructions live in ../../AGENTS.md. -->
+<!-- Historical reference; current instructions live in ../../CLAUDE.md. -->
 
 > Archived from AGENTS.md at 3c660d6 on 2026-09-05. This inventory contains
 > historical tracer claims and known stale descriptions. It is not an agent
-> instruction source or release sign-off. Use [the current guide](../../AGENTS.md),
+> instruction source or release sign-off. Use [the current guide](../../CLAUDE.md),
 > code, and controlling ADRs for decisions; use [verification](verification.md)
 > for commands and acceptance limits.
 
