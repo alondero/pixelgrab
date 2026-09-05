@@ -127,6 +127,21 @@ describe("shelf window bootstrap", () => {
     );
   });
 
+  it("focuses the newest card when Shelf History requests keyboard focus", async () => {
+    await import("./shelf.svelte");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const focusListener = mockListen.mock.calls.find(
+      ([name]) => name === "pixelgrab://shelf-focus-requested",
+    )?.[1] as (() => void) | undefined;
+    expect(focusListener).toBeDefined();
+    focusListener?.();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    expect(document.activeElement).toBe(document.querySelector('[data-shelf-id="shelf-restored"]'));
+  });
+
   it("wires the card Pin action to pinStore.openPin with the card's source data", async () => {
     mockPinStoreOpenPin.mockReset().mockResolvedValue({ id: "pin-1" });
     await import("./shelf.svelte");

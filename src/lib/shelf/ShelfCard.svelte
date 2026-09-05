@@ -49,6 +49,7 @@
 
   function onPointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
     dragGestureActive = true;
     dragFired = false;
     dragStartX = event.clientX;
@@ -61,12 +62,44 @@
     const dy = event.clientY - dragStartY;
     if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
       dragFired = true;
+      dragGestureActive = false;
+      (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
       onDrag(card);
     }
   }
 
-  function onPointerUp(): void {
+  function releasePointer(event: PointerEvent): void {
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture?.(event.pointerId)) {
+      target.releasePointerCapture(event.pointerId);
+    }
     dragGestureActive = false;
+  }
+
+  function onPointerUp(event: PointerEvent): void {
+    releasePointer(event);
+  }
+
+  function onPointerCancel(event: PointerEvent): void {
+    releasePointer(event);
+  }
+
+  function onCardKeyDown(event: KeyboardEvent): void {
+    if (event.target !== event.currentTarget) return;
+    const key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && key === "s") {
+      event.preventDefault();
+      onSaveAs(card.shelfId);
+    } else if (key === "c") {
+      event.preventDefault();
+      onCopy(card.shelfId);
+    } else if (!event.ctrlKey && !event.metaKey && key === "p") {
+      event.preventDefault();
+      onPin(card.shelfId);
+    } else if (event.key === "Delete") {
+      event.preventDefault();
+      onDismiss(card.shelfId);
+    }
   }
 
   type TauriGlobal = {
@@ -94,6 +127,11 @@
   let expired = $derived(remaining <= 0 && !paused);
 </script>
 
+<!-- A shelf card is a composite widget: it owns keyboard shortcuts while
+     its child buttons remain independently tabbable. `region` is the correct
+     accessible grouping even though Svelte cannot infer this interaction. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="card"
   class:paused
@@ -102,6 +140,8 @@
   data-shelf-id={card.shelfId}
   aria-label="Shelf card: {titleText}"
   role="region"
+  tabindex="0"
+  onkeydown={onCardKeyDown}
   onmouseenter={() => onHover(card.shelfId)}
   onmouseleave={() => onUnhover(card.shelfId)}
   onfocusin={() => onHover(card.shelfId)}
@@ -110,17 +150,20 @@
   <div
     class="drag-surface"
     data-testid="shelf-drag-surface"
-    role="presentation"
+    role="group"
+    aria-label="Drag capture to another application"
+    title="Drag to another app"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
-    onpointercancel={onPointerUp}
+    onpointercancel={onPointerCancel}
   >
     <div class="thumbnail" data-testid="shelf-thumbnail">
       <img src={pngUrl} alt={titleText} draggable="false" />
     </div>
     <div class="meta">
       <div class="title" data-testid="shelf-title">{titleText}</div>
+      <div class="drag-hint">Drag to share</div>
       <div class="row">
         <span class="size" data-testid="shelf-size">
           {Math.round(card.sizeBytes / 1024)} KB
@@ -213,6 +256,7 @@
     grid-area: surface;
     display: grid;
     grid-template-columns: 56px 1fr;
+    grid-template-areas: "thumbnail meta";
     gap: 6px;
     min-height: 0;
     cursor: grab;
@@ -222,6 +266,10 @@
   }
   .card.paused {
     border-color: rgba(78, 161, 255, 0.6);
+  }
+  .card:focus-visible {
+    outline: 3px solid #4ea1ff;
+    outline-offset: 2px;
   }
   .card.expired {
     opacity: 0.35;
@@ -251,6 +299,11 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .drag-hint {
+    margin-top: 2px;
+    font-size: 10px;
+    opacity: 0.72;
   }
   .row {
     display: flex;

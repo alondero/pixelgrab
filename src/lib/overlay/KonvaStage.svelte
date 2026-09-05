@@ -1134,6 +1134,17 @@
         rerenderSelection();
         return;
       }
+      // The crop lives in this component, not in the Rust orchestrator.
+      // Clear it locally on the first Escape; only a second Escape with no
+      // crop asks the backend to cancel and hide the capture session.
+      if (lastSelection) {
+        event.preventDefault();
+        annotationStore.clearForRecrop();
+        redrawCropOverlay(null);
+        emitPhysicalSelection(null);
+        rerenderSelection();
+        return;
+      }
       event.preventDefault();
       onCancel?.();
     }
@@ -1252,6 +1263,20 @@
     stage.on("mousedown", (event) => {
       const pos = stage!.getPointerPosition();
       if (!pos) return;
+      // Crop handles are real Konva nodes, so `event.target` is the handle
+      // rather than the image. Test them before the Select-tool empty-canvas
+      // branch, which otherwise returns early and makes all eight handles
+      // visible but impossible to drag.
+      const existing = cropSelectionGeometry();
+      if (existing) {
+        const hit = cropHandleHit(pos, existing);
+        if (hit) {
+          activeCropHandle = hit;
+          dragging = true;
+          startPoint = pos;
+          return;
+        }
+      }
       // Drawing tools intercept the pointer once a crop exists.
       if (isDrawingTool()) {
         startDraft(pos);
@@ -1311,16 +1336,6 @@
           // Fall through to the crop-region drag if the crop is
           // missing (the user might still be drawing the crop).
           if (event.target !== imageNode) return;
-        }
-      }
-      const existing = cropSelectionGeometry();
-      if (existing) {
-        const hit = cropHandleHit(pos, existing);
-        if (hit) {
-          activeCropHandle = hit;
-          dragging = true;
-          startPoint = pos;
-          return;
         }
       }
       if (event.target !== imageNode) return;

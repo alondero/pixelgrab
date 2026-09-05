@@ -39,10 +39,29 @@ pub const SINGLE_INSTANCE_EVENT: &str = "pixelgrab://secondary-launch";
 /// the forwarded intent. Called from the single-instance plugin
 /// closure with the parsed [`SecondaryLaunchIntent`].
 pub fn forward_to_existing_instance<R: Runtime>(app: &AppHandle<R>, intent: SecondaryLaunchIntent) {
+    if matches!(intent, SecondaryLaunchIntent::ShelfHistory) {
+        if let Some(state) = app.try_state::<crate::PixelGrabApp>() {
+            if let Err(_err) = crate::ipc::show_shelf_queue_native(&state, app) {
+                log::warn!("secondary shelf history presentation failed");
+            }
+        } else {
+            log::warn!("secondary shelf history state unavailable");
+        }
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        // A forwarded capture must freeze the desktop before any PixelGrab
+        // UI becomes visible, just like a tray or global-hotkey capture.
+        if !matches!(
+            &intent,
+            SecondaryLaunchIntent::CaptureRegion
+                | SecondaryLaunchIntent::CaptureFullScreen
+                | SecondaryLaunchIntent::ShelfHistory
+        ) {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
         let _ = window.emit(SINGLE_INSTANCE_EVENT, &intent);
     }
 }

@@ -154,6 +154,16 @@ impl TrayState {
         self.refresh_labels(bindings, status);
     }
 
+    /// Surface a failed background capture without showing or focusing the
+    /// companion window. The next hotkey/tray status refresh restores the
+    /// normal tooltip and icon.
+    pub fn show_capture_error(&self) {
+        let _ = self.inner.icon.set_tooltip(Some(
+            "PixelGrab - capture failed; open PixelGrab for details",
+        ));
+        let _ = self.inner.icon.set_icon(Some(icon_for_capture_error()));
+    }
+
     /// Explicit "hide this tray" call used during shutdown so the
     /// icon disappears before the process exits.
     pub fn shutdown(&self) {
@@ -242,8 +252,27 @@ fn forward_intent<R: Runtime>(app: &AppHandle<R>, intent: SecondaryLaunchIntent)
         focus_main_window(app);
         return;
     }
+    if matches!(intent, SecondaryLaunchIntent::ShelfHistory) {
+        if let Some(state) = app.try_state::<crate::PixelGrabApp>() {
+            if let Err(_err) = crate::ipc::show_shelf_queue_native(&state, app) {
+                log::warn!("tray shelf history presentation failed");
+            }
+        } else {
+            log::warn!("tray shelf history state unavailable");
+        }
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
-        focus_main_window(app);
+        // Capture intents must leave PixelGrab's companion hidden. Showing it
+        // before the backend freezes the desktop captures our own window.
+        if !matches!(
+            &intent,
+            SecondaryLaunchIntent::CaptureRegion
+                | SecondaryLaunchIntent::CaptureFullScreen
+                | SecondaryLaunchIntent::ShelfHistory
+        ) {
+            focus_main_window(app);
+        }
         let _ = window.emit(INTENT_EVENT, &intent);
     }
 }
@@ -335,6 +364,10 @@ fn compose_tooltip(bindings: &HotkeyBindings, status: &HotkeyRegistryStatus) -> 
         return "PixelGrab \u{2014} global hotkeys paused".to_string();
     }
     "PixelGrab \u{2014} capture ready".to_string()
+}
+
+fn icon_for_capture_error() -> Image<'static> {
+    icons::conflict()
 }
 
 /// Stable name for the tray-driven pause toggle event. The

@@ -27,8 +27,8 @@ The primary workflows are:
    `V`) → drag → Enter.
 4. **Shelf** — keyboard focus traversal to a card → `C` (copy) /
    `Ctrl+S` (save) / `P` (pin) / `Delete` (dismiss).
-5. **Drag-out** — `Ctrl+X` from the focused card to copy the card payload
-   to the system clipboard as a fallback to OLE drag.
+5. **Drag-out** — drag from the focused card to offer the card payload through
+   the OLE drag pipeline.
 
 ## Accessibility properties of the v1 stack
 

@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
     getSessionSnapshot,
     requestCommit,
     requestCancel,
     saveCaptureAs,
+    showMainWindow,
   } from "$lib/ipc/commands";
   import KonvaStage from "./KonvaStage.svelte";
   import AnnotationToolbar from "$lib/annotation/AnnotationToolbar.svelte";
@@ -111,6 +112,11 @@
       });
       if (result.status === "err") {
         commitError = result.error.message;
+        // The backend has already returned the session to Idle and hidden
+        // the overlay on a terminal commit failure. Surface the error in the
+        // companion window so it cannot disappear with the overlay.
+        await emit("pixelgrab://commit-failed", { message: result.error.message });
+        await showMainWindow();
         return;
       }
       // Successful commit cleans up the session so a fresh capture
@@ -209,6 +215,22 @@
           ? ""
           : "s"}
       {/if}
+      <div class="commit-actions" aria-label="Capture actions">
+        <button type="button" onclick={() => onCommit("clipboard")} disabled={committing}>
+          Copy <kbd>Ctrl+C</kbd>
+        </button>
+        <button type="button" onclick={onSaveAs} disabled={committing}>
+          Save <kbd>Ctrl+S</kbd>
+        </button>
+        <button
+          type="button"
+          class="primary"
+          onclick={() => onCommit("shelf")}
+          disabled={committing}
+        >
+          {committing ? "Finishing..." : "Done"} <kbd>Enter</kbd>
+        </button>
+      </div>
     </footer>
   {/if}
   {#if commitError}
@@ -287,13 +309,46 @@
   .footer {
     position: absolute;
     z-index: 20;
-    left: 0.75rem;
-    bottom: 0.75rem;
+    right: 0.75rem;
+    top: 0.75rem;
     padding: 0.5rem 1rem;
     border-radius: 6px;
     background: rgba(20, 20, 28, 0.78);
     border-top: 1px solid rgba(255, 255, 255, 0.2);
     font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .commit-actions {
+    display: flex;
+    gap: 0.4rem;
+    margin-left: 0.75rem;
+  }
+  .commit-actions button {
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 5px;
+    padding: 0.38rem 0.65rem;
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+    cursor: pointer;
+  }
+  .commit-actions button.primary {
+    background: #4f46e5;
+    border-color: #7168ee;
+  }
+  .commit-actions button:focus-visible {
+    outline: 3px solid #8fc5ff;
+    outline-offset: 2px;
+  }
+  .commit-actions button:disabled {
+    opacity: 0.55;
+    cursor: wait;
+  }
+  .commit-actions kbd {
+    margin-left: 0.25rem;
+    font-size: 0.7rem;
+    opacity: 0.78;
   }
   .error {
     position: absolute;

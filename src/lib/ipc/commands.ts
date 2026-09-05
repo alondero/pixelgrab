@@ -83,6 +83,10 @@ export async function getShelfQueueSnapshot(): Promise<IpcResponse<ShelfQueueSna
   return invoke<IpcResponse<ShelfQueueSnapshot>>("get_shelf_queue_snapshot");
 }
 
+export async function showShelfQueue(): Promise<IpcResponse<ShelfQueueSnapshot>> {
+  return invoke<IpcResponse<ShelfQueueSnapshot>>("show_shelf_queue");
+}
+
 export async function copyShelfCard(
   payload: CopyShelfCardRequest,
 ): Promise<IpcResponse<CopyShelfCardResponse>> {

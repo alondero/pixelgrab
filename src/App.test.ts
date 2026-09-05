@@ -14,6 +14,10 @@ vi.mock("$lib/ipc/commands", async () => {
     requestCommit: shell.mockRequestCommit,
     requestCancel: shell.mockRequestCancel,
     getSessionSnapshot: shell.mockGetSessionSnapshot,
+    showShelfQueue: vi.fn().mockResolvedValue({
+      status: "ok",
+      data: { cards: [], overflow: [], snapshotAtMs: 0 },
+    }),
     getShelfPreferences: shell.mockGetShelfPreferences,
     updateShelfPreferences: shell.mockUpdateShelfPreferences,
     getHotkeyBindings: shell.mockGetHotkeyBindings,
@@ -39,6 +43,7 @@ import { __resetMock } from "$lib/ipc/shell.svelte";
 
 describe("App", () => {
   beforeEach(() => {
+    eventHandlers.clear();
     __resetMock();
   });
 
@@ -78,6 +83,14 @@ describe("App", () => {
       const ariaLabel = button.getAttribute("aria-label")?.trim() ?? "";
       expect(text.length + ariaLabel.length).toBeGreaterThan(0);
     }
+  });
+
+  it("announces a commit failure forwarded from the hidden overlay", async () => {
+    render(App);
+    const handler = eventHandlers.get("pixelgrab://commit-failed");
+    expect(handler).toBeTruthy();
+    handler!({ payload: { message: "Clipboard unavailable" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Clipboard unavailable");
   });
 
   // Issue #63: the shelf card's Edit action forwards the reopened

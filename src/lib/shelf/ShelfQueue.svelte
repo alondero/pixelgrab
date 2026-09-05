@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { ShelfQueueCard, ShelfQueueSnapshot } from "$lib/ipc/types";
   import ShelfCard from "./ShelfCard.svelte";
   import { createClockStore } from "./queue.svelte";
@@ -47,12 +48,30 @@
   // set remembers which shelves we already reported so a card that
   // lingers in the DOM for one frame after expiry doesn't fire twice.
   let reportedExpired = $state(new Set<string>());
+  let expiryPulse = $state(0);
+
+  onMount(() => {
+    const interval = window.setInterval(() => {
+      expiryPulse += 1;
+    }, 1_000);
+    return () => window.clearInterval(interval);
+  });
+
+  // Browser performance.now() and Rust's process-monotonic clock have
+  // different zero points. Anchor the visual clock to every authoritative
+  // snapshot, then interpolate locally between backend events.
+  $effect(() => {
+    if (snapshot) clock.sync(snapshot.snapshotAtMs);
+  });
+
+  let allCards = $derived(snapshot ? snapshot.cards.concat(snapshot.overflow) : []);
 
   $effect(() => {
+    void expiryPulse;
     if (!snapshot) return;
-    const now = clock.nowMs;
+    const now = clock.readNowMs();
     const newly: string[] = [];
-    for (const card of [...snapshot.cards, ...snapshot.overflow]) {
+    for (const card of allCards) {
       const isPaused = card.timer.pausedAtElapsedMs !== undefined;
       const isExpired = !isPaused && now >= card.timer.deadlineAtElapsedMs;
       if (isExpired && !reportedExpired.has(card.shelfId)) {
@@ -67,13 +86,15 @@
     }
     // Garbage-collect ids that are no longer in the queue so the set
     // does not grow unboundedly across many commits.
-    const live = new Set([...snapshot.cards, ...snapshot.overflow].map((c) => c.shelfId));
-    if ([...reportedExpired].some((id) => !live.has(id))) {
-      const next = new Set<string>();
-      for (const id of reportedExpired) {
-        if (live.has(id)) next.add(id);
+    if (reportedExpired.size > 0) {
+      const live = new Set(allCards.map((c) => c.shelfId));
+      if ([...reportedExpired].some((id) => !live.has(id))) {
+        const next = new Set<string>();
+        for (const id of reportedExpired) {
+          if (live.has(id)) next.add(id);
+        }
+        reportedExpired = next;
       }
-      reportedExpired = next;
     }
   });
 

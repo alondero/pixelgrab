@@ -2,7 +2,12 @@
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { session } from "$lib/stores/session.svelte";
-  import { requestCapture, requestCancel, getSessionSnapshot } from "$lib/ipc/commands";
+  import {
+    requestCapture,
+    requestCancel,
+    getSessionSnapshot,
+    showShelfQueue,
+  } from "$lib/ipc/commands";
   import type { CaptureDiagnostics, IpcResponse, SecondaryLaunchIntent } from "$lib/ipc/types";
   import SettingsPanel from "$lib/preferences/SettingsPanel.svelte";
   import HotkeyPanel from "$lib/hotkey/HotkeyPanel.svelte";
@@ -68,10 +73,7 @@
         void onCaptureIntent("full_screen");
         break;
       case "shelf_history":
-        // The shelf window is managed by the Rust core; the
-        // frontend just refreshes its snapshot so the user sees
-        // the latest cards.
-        void refreshSnapshot();
+        void showShelfQueue();
         break;
       case "open_settings":
         settingsOpen = true;
@@ -99,6 +101,12 @@
     const unlistenPause = listen("pixelgrab://pause-hotkeys-toggled", () => {
       handlePauseToggle();
     });
+    const unlistenCommitFailure = listen<{ message: string }>(
+      "pixelgrab://commit-failed",
+      (event) => {
+        pendingError = event.payload.message;
+      },
+    );
     // Issue #63: the shelf card's Edit action forwards the reopened
     // editor scene; mounting RevisionEditor is the main window's half
     // of that hand-off.
@@ -121,6 +129,7 @@
       unlistenCapture.then((fn) => fn());
       unlistenSecondary.then((fn) => fn());
       unlistenPause.then((fn) => fn());
+      unlistenCommitFailure.then((fn) => fn());
       unlistenRevision.then((fn) => fn());
       unlistenDisplay.then((fn) => fn());
     };
@@ -170,7 +179,7 @@
       </dd>
     </dl>
     {#if pendingError}
-      <p class="error" data-testid="pending-error">{pendingError}</p>
+      <p class="error" data-testid="pending-error" role="alert">{pendingError}</p>
     {/if}
   </section>
 

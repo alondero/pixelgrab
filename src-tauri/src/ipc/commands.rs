@@ -29,7 +29,7 @@ use pixelgrab_contracts::{
     PinActionOutcome, PinCommand, PinId, PinViewModel, PlatformError, PlatformErrorKind,
     PlatformResult, ShelfId, ShelfPreferences,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use crate::PixelGrabApp;
 
@@ -220,6 +220,12 @@ pub fn request_capture(
         log::info!("request_capture: recovering from stuck Ready state");
         app.session().reset();
     }
+    // Hide the companion before the platform reads the framebuffer. Capture
+    // can be requested while Settings is open, not only from a hidden tray
+    // resident, so entry-point guards alone cannot prevent self-capture.
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.hide();
+    }
     let started_at = now_ms();
     let result = app.session().request_capture(&request);
     let capture = match result {
@@ -234,6 +240,13 @@ pub fn request_capture(
             .completed(now_ms())
             .failed(format!("{:?}", err.kind));
             app.session().store_diagnostics(diag);
+            // Keep background capture failures non-intrusive. The failure is
+            // retained in diagnostics and returned through the typed IPC
+            // response; tray presentation can surface it without stealing
+            // focus from the application that initiated the hotkey.
+            if let Some(tray) = handle.try_state::<crate::tray::TrayState>() {
+                tray.show_capture_error();
+            }
             return IpcResponse::from_result(Err(err));
         }
     };
@@ -1167,6 +1180,62 @@ fn with_position(mut snapshot: ShelfQueueSnapshot, app: &PixelGrabApp) -> ShelfQ
 #[tauri::command]
 pub fn get_shelf_queue_snapshot(app: AppState<'_>) -> IpcResponse<ShelfQueueSnapshot> {
     IpcResponse::from_result(Ok(snapshot_with_position(&app)))
+}
+
+/// Show the current shelf history without mutating it. Tray, hotkey, and
+/// secondary-launch intents use this command so an existing queue becomes
+/// visible even when its native window was hidden or moved off-screen.
+#[tauri::command]
+pub fn show_shelf_queue(app: AppState<'_>, handle: AppHandle) -> IpcResponse<ShelfQueueSnapshot> {
+    IpcResponse::from_result(show_shelf_queue_native(&app, &handle))
+}
+
+/// Present the shelf directly from a native caller such as the tray or
+/// single-instance handler. WebView IPC callers use `show_shelf_queue`, but
+/// native callers should not bounce through the hidden companion window.
+pub(crate) fn show_shelf_queue_native<R: Runtime>(
+    app: &PixelGrabApp,
+    handle: &AppHandle<R>,
+) -> PlatformResult<ShelfQueueSnapshot> {
+    let snapshot = snapshot_with_position(app);
+    let result = (|| {
+        if snapshot.is_empty() {
+            crate::shelf::hide_card(handle).map_err(|_err| {
+                PlatformError::new(
+                    PlatformErrorKind::Internal,
+                    "shelf history presentation failed",
+                )
+            })?;
+        } else {
+            let position = snapshot.position.as_ref().ok_or_else(|| {
+                PlatformError::new(
+                    PlatformErrorKind::MonitorQueryFailed,
+                    "shelf history has no available placement",
+                )
+            })?;
+            if handle.get_webview_window("shelf").is_none() {
+                return Err(PlatformError::new(
+                    PlatformErrorKind::Internal,
+                    "shelf history window is unavailable",
+                ));
+            }
+            crate::shelf::show_queue(handle, position).map_err(|_err| {
+                PlatformError::new(
+                    PlatformErrorKind::Internal,
+                    "shelf history presentation failed",
+                )
+            })?;
+            crate::shelf::focus_queue(handle).map_err(|_err| {
+                PlatformError::new(PlatformErrorKind::Internal, "shelf history focus failed")
+            })?;
+        }
+        emit_shelf_queue_updated(handle, snapshot.clone());
+        if !snapshot.is_empty() {
+            let _ = handle.emit("pixelgrab://shelf-focus-requested", ());
+        }
+        Ok(snapshot)
+    })();
+    result
 }
 
 /// Snapshot of the current shelf state. Used by the frontend to

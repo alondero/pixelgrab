@@ -79,6 +79,17 @@ pub fn show_queue<R: Runtime>(app: &AppHandle<R>, position: &ShelfPosition) -> t
     Ok(())
 }
 
+/// Focus the shelf window after an explicit Shelf History request. Ordinary
+/// commits deliberately do not call this helper so a new card never steals
+/// focus from the application the user is working in.
+pub fn focus_queue<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("shelf") else {
+        return Ok(());
+    };
+    window.set_focus()?;
+    Ok(())
+}
+
 /// One-card view model for the shelf webview. Sent via the
 /// `pixelgrab://shelf-updated` event so the Svelte component can
 /// render the most recent card.
