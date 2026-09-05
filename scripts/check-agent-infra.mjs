@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,8 +58,11 @@ export function checkAliases(root, expectedAliases = aliases) {
     try {
       const stat = lstatSync(aliasPath);
       if (stat.isSymbolicLink()) {
-        const actualTarget = resolve(dirname(aliasPath), readlinkSync(aliasPath));
-        if (actualTarget !== targetPath) {
+        const pointsToTarget =
+          existsSync(aliasPath) &&
+          existsSync(targetPath) &&
+          realpathSync(aliasPath) === realpathSync(targetPath);
+        if (!pointsToTarget) {
           errors.push(`Alias points to the wrong target: ${alias} -> ${readlinkSync(aliasPath)}`);
         }
       } else if (
