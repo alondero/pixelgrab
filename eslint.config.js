@@ -20,6 +20,8 @@ export default [
       "scripts/generate-icons.mjs",
       "scripts/generate-ico.mjs",
       ".claude/**",
+      ".tmp_*/**",
+      ".playwright-cli/**",
     ],
   },
   js.configs.recommended,

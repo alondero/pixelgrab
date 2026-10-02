@@ -84,6 +84,20 @@
     releasePointer(event);
   }
 
+  function openPreview(event: MouseEvent) {
+    if (!dragFired || event.detail === 0) onEdit(card);
+  }
+
+  function onFocusOut(event: FocusEvent) {
+    if (
+      event.relatedTarget instanceof Node &&
+      event.currentTarget instanceof Node &&
+      event.currentTarget.contains(event.relatedTarget)
+    )
+      return;
+    onUnhover(card.shelfId);
+  }
+
   function onCardKeyDown(event: KeyboardEvent): void {
     if (event.target !== event.currentTarget) return;
     const key = event.key.toLowerCase();
@@ -99,6 +113,9 @@
     } else if (event.key === "Delete") {
       event.preventDefault();
       onDismiss(card.shelfId);
+    } else if (event.key === "Enter" || key === "e") {
+      event.preventDefault();
+      onEdit(card);
     }
   }
 
@@ -145,14 +162,15 @@
   onmouseenter={() => onHover(card.shelfId)}
   onmouseleave={() => onUnhover(card.shelfId)}
   onfocusin={() => onHover(card.shelfId)}
-  onfocusout={() => onUnhover(card.shelfId)}
+  onfocusout={onFocusOut}
 >
-  <div
+  <button
+    type="button"
     class="drag-surface"
     data-testid="shelf-drag-surface"
-    role="group"
-    aria-label="Drag capture to another application"
-    title="Drag to another app"
+    aria-label="Open screenshot: {titleText}. Drag to another application."
+    title="Click to open · Drag to share"
+    onclick={openPreview}
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
@@ -165,10 +183,11 @@
       <div class="title" data-testid="shelf-title">{titleText}</div>
       <div class="drag-hint">Drag to share</div>
       <div class="row">
+        <span class="dimensions">{card.bounds.size.width} × {card.bounds.size.height}</span>
         <span class="size" data-testid="shelf-size">
           {Math.round(card.sizeBytes / 1024)} KB
         </span>
-        {#if showCountdown}
+        {#if showCountdown && card.timer.deadlineAtElapsedMs < Number.MAX_SAFE_INTEGER}
           <span
             class="countdown"
             class:paused
@@ -181,7 +200,7 @@
         {/if}
       </div>
     </div>
-  </div>
+  </button>
   <div class="actions">
     <button
       type="button"
@@ -233,11 +252,11 @@
 
 <style>
   .card {
-    width: 200px;
-    height: 150px;
+    width: 260px;
+    height: 220px;
     background: rgba(28, 28, 32, 0.92);
     border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
+    border-radius: 12px;
     display: grid;
     grid-template-columns: 1fr;
     grid-template-rows: 1fr auto;
@@ -255,11 +274,20 @@
   .drag-surface {
     grid-area: surface;
     display: grid;
-    grid-template-columns: 56px 1fr;
-    grid-template-areas: "thumbnail meta";
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas: "thumbnail" "meta";
     gap: 6px;
     min-height: 0;
     cursor: grab;
+    padding: 0;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    background: transparent;
+    touch-action: none;
+    user-select: none;
   }
   .drag-surface:active {
     cursor: grabbing;
@@ -269,24 +297,24 @@
   }
   .card:focus-visible {
     outline: 3px solid #4ea1ff;
-    outline-offset: 2px;
+    outline-offset: -3px;
   }
   .card.expired {
     opacity: 0.35;
   }
   .thumbnail {
     grid-area: thumbnail;
-    width: 56px;
-    height: 56px;
-    background: #000;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    background: #151821;
     border-radius: 4px;
     overflow: hidden;
-    align-self: start;
   }
   .thumbnail img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
     display: block;
   }
   .meta {
@@ -333,7 +361,7 @@
     grid-area: actions;
     display: flex;
     gap: 4px;
-    justify-content: flex-end;
+    justify-content: space-between;
   }
   .action,
   .dismiss {
@@ -346,7 +374,7 @@
   }
   .action {
     font-size: 11px;
-    padding: 2px 6px;
+    padding: 4px 8px;
   }
   .dismiss {
     width: 22px;

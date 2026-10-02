@@ -15,6 +15,13 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/svelte";
+import type { PhysicalBounds } from "$lib/ipc/types";
+const stageProps = vi.hoisted(() => ({
+  current: null as null | {
+    assetUrl: string;
+    onSelectionComplete: (bounds: PhysicalBounds, editRequested: boolean) => void;
+  },
+}));
 
 // Track every IPC call so we can assert on the orchestration order.
 const requestOverlay = vi.fn();
@@ -48,7 +55,9 @@ vi.mock("$lib/ipc/commands", () => ({
 // implement. Stub the stage out so the overlay mount still exercises
 // the lifecycle above the canvas.
 vi.mock("$lib/overlay/KonvaStage.svelte", () => ({
-  default: () => {},
+  default: (_anchor: unknown, props: NonNullable<typeof stageProps.current>) => {
+    stageProps.current = props;
+  },
 }));
 
 import OverlayApp from "./OverlayApp.svelte";
@@ -59,6 +68,7 @@ describe("OverlayApp", () => {
     requestOverlay.mockReset();
     getSessionSnapshot.mockReset();
     requestCommit.mockReset();
+    requestCommit.mockResolvedValue({ status: "ok", data: { outcome: {} } });
     requestCancel.mockReset();
     saveCaptureAs.mockReset();
     showMainWindow.mockReset().mockResolvedValue({ status: "ok", data: null });
@@ -114,7 +124,62 @@ describe("OverlayApp", () => {
       },
     });
     await waitFor(() => {
-      expect(screen.getByTestId("diagnostics-id")).toHaveTextContent("event-capture");
+      expect(stageProps.current?.assetUrl).toBe("data:image/png;base64,AAAA");
     });
+  });
+
+  it("commits a completed region immediately and accepts the next capture", async () => {
+    render(OverlayApp);
+    await waitFor(() => expect(getSessionSnapshot).toHaveBeenCalled());
+    const bounds = { origin: { x: -50, y: 20 }, size: { width: 320, height: 240 } };
+    const publish = (id: string) =>
+      listeners.get("pixelgrab://capture-ready")?.[0]({
+        payload: {
+          capture: {
+            captureId: id,
+            assetUrl: "data:image/png;base64,AAAA",
+            bounds,
+            format: "virtual_desktop",
+            capturedAtMs: 0,
+          },
+        },
+      });
+    publish("first");
+    await waitFor(() => expect(stageProps.current).not.toBeNull());
+    stageProps.current!.onSelectionComplete(bounds, false);
+    await waitFor(() =>
+      expect(requestCommit).toHaveBeenCalledWith({
+        crop: bounds,
+        annotations: [],
+        toShelf: true,
+        toClipboard: true,
+        saveAs: false,
+      }),
+    );
+    publish("second");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    stageProps.current!.onSelectionComplete(bounds, false);
+    await waitFor(() => expect(requestCommit).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the annotation tools available when Ctrl is held on release", async () => {
+    render(OverlayApp);
+    await waitFor(() => expect(getSessionSnapshot).toHaveBeenCalled());
+    const bounds = { origin: { x: 0, y: 0 }, size: { width: 320, height: 240 } };
+    listeners.get("pixelgrab://capture-ready")?.[0]({
+      payload: {
+        capture: {
+          captureId: "edit",
+          assetUrl: "data:image/png;base64,AAAA",
+          bounds,
+          format: "virtual_desktop",
+          capturedAtMs: 0,
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    stageProps.current!.onSelectionComplete(bounds, true);
+    expect(await screen.findByRole("toolbar")).toBeInTheDocument();
+    expect(requestCommit).not.toHaveBeenCalled();
   });
 });

@@ -30,17 +30,14 @@
 //!
 //! The handler closure captures an `Arc<Mutex<SharedState>>` so
 //! the per-shortcut closures can resolve which
-//! [`HotkeyAction`] was pressed (and emit the matching
-//! `pixelgrab://secondary-launch` event) without re-allocating
+//! [`HotkeyAction`] was pressed and dispatch the native action without re-allocating
 //! per call.
 //!
 //! ## Single source of truth
 //!
-//! The handler emits the same `pixelgrab://secondary-launch` event
-//! the tray menu uses (see [`crate::singleton::SINGLE_INSTANCE_EVENT`]),
-//! so the frontend listener routes tray clicks, global shortcuts,
-//! and secondary-launch argv through one intent dispatcher. See
-//! `crate::tray::forward_intent` for the matching tray path.
+//! Tray clicks, global shortcuts, and secondary-launch argv converge on
+//! [`crate::singleton::forward_to_existing_instance`]. Capture and shelf
+//! presentation run natively; settings use the companion's UI event.
 //!
 //! ## Lifecycle
 //!
@@ -57,13 +54,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Manager, Runtime, Wry};
+use tauri::{AppHandle, Runtime, Wry};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 
 use pixelgrab_contracts::{HotkeyAction, PlatformError, PlatformErrorKind, SecondaryLaunchIntent};
 
 use crate::hotkey::GlobalShortcutBackend;
-use crate::singleton::SINGLE_INSTANCE_EVENT;
 
 /// Production backend that drives
 /// `tauri_plugin_global_shortcut::GlobalShortcut`. Cheap to
@@ -273,19 +269,15 @@ impl GlobalShortcutBackend for TauriGlobalShortcutBackend {
     }
 }
 
-/// Emit the secondary-launch intent for the matching chord
+/// Dispatch the secondary-launch intent for the matching chord
 /// press. Pulled out so the handler closure stays focused on
 /// the dispatch. The `HotkeyAction -> SecondaryLaunchIntent`
 /// mapping lives in [`pixelgrab_contracts::hotkey`] as a
 /// `From` impl so the tray menu, the singleton argv parser,
-/// and this handler cannot drift. The channel name is the one
-/// the tray menu and the single-instance plugin use, so all
-/// three entry-points converge on the same frontend listener.
+/// and this handler cannot drift. All entrypoints share the native dispatcher.
 fn emit_secondary_launch<R: Runtime>(handle: &AppHandle<R>, action: HotkeyAction) {
     let intent: SecondaryLaunchIntent = action.into();
-    if let Some(window) = handle.get_webview_window("main") {
-        let _ = window.emit(SINGLE_INSTANCE_EVENT, &intent);
-    }
+    crate::singleton::forward_to_existing_instance(handle, intent);
 }
 
 #[cfg(test)]

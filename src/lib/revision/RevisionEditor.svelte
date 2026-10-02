@@ -1,19 +1,10 @@
-<!--
-  RevisionEditor - the reopen surface for a shelf capture (issue #63).
-
-  The component is mounted by the main window when the shelf card's
-  Edit action fires `open_revision` and forwards the restored
-  `RevisionContext` through `pixelgrab://revision-opened`. It renders
-  the restored scene summary (annotation count, badge counter, loader
-  status), lets the user edit the metadata, and drives the
-  commit / cancel round-trip. The heavy annotation editing itself
-  stays in the overlay editor; this surface guarantees every reopen
-  path can be committed or cancelled safely from the companion
-  window.
--->
-<script lang="ts">
+﻿<script lang="ts">
+  import { onMount } from "svelte";
   import type { CacheEntryMetadata, RevisionContext } from "$lib/ipc/types";
-  import { cancelRevision, commitRevision, updateRevision } from "$lib/ipc/commands";
+  import { cancelRevision, commitRevision } from "$lib/ipc/commands";
+  import KonvaStage from "$lib/overlay/KonvaStage.svelte";
+  import AnnotationToolbar from "$lib/annotation/AnnotationToolbar.svelte";
+  import { annotationStore } from "$lib/annotation/store.svelte";
 
   let {
     scene,
@@ -21,15 +12,10 @@
     onClosed = () => {},
   }: {
     scene: RevisionContext;
-    /** Fired after a successful commit with the NEW entry's shelf id. */
     onCommitted?: (newShelfId: string) => void;
-    /** Fired when the editor closes (commit or cancel). */
     onClosed?: () => void;
   } = $props();
 
-  // The editable fields intentionally capture the scene's initial
-  // metadata — the reopened snapshot is a starting point for local
-  // edits, not a live view (the registry owns the authoritative copy).
   // svelte-ignore state_referenced_locally
   let title = $state(scene.revision.metadata.title ?? "");
   // svelte-ignore state_referenced_locally
@@ -38,155 +24,233 @@
   let tagsText = $state((scene.revision.metadata.tags ?? []).join(", "));
   let busy = $state(false);
   let lastError = $state<string | null>(null);
-
-  let annotationCount = $derived(
-    scene.revision.annotations.length + (scene.revision.draft ? 1 : 0),
+  let viewport: HTMLDivElement;
+  let availableWidth = $state(640);
+  let availableHeight = $state(280);
+  const bounds = $derived({ origin: { x: 0, y: 0 }, size: scene.revision.size });
+  const scale = $derived(
+    Math.min(
+      1,
+      Math.max(1, availableWidth) / bounds.size.width,
+      availableHeight / bounds.size.height,
+    ),
   );
+  const stageWidth = $derived(Math.max(1, Math.floor(bounds.size.width * scale)));
+  const stageHeight = $derived(Math.max(1, Math.floor(bounds.size.height * scale)));
 
-  function currentMetadata(): CacheEntryMetadata {
+  onMount(() => {
+    annotationStore.loadScene(scene.revision);
+    const observer = new ResizeObserver((entries) => {
+      availableWidth = entries[0]?.contentRect.width ?? 640;
+    });
+    observer.observe(viewport);
+    const resize = () => {
+      availableHeight = Math.max(100, window.innerHeight - 400);
+    };
+    resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", resize);
+      annotationStore.reset();
+    };
+  });
+
+  function metadata(): CacheEntryMetadata {
     return {
       title,
       note,
       tags: tagsText
         .split(",")
         .map((tag) => tag.trim())
-        .filter((tag) => tag.length > 0),
+        .filter(Boolean),
     };
   }
 
-  // Debounced in-progress persistence: every metadata keystroke lands
-  // in `revision.json` shortly after typing stops, so a crash mid-edit
-  // loses at most one beat of work.
-  let updateTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function scheduleUpdate(): void {
-    if (updateTimer) clearTimeout(updateTimer);
-    updateTimer = setTimeout(() => {
-      void updateRevision({
-        shelfId: scene.shelfId,
-        revision: { ...scene.revision, metadata: currentMetadata() },
-      });
-    }, 500);
-  }
-
-  async function onCommit(): Promise<void> {
+  async function onCommit(toClipboard = false): Promise<void> {
+    if (busy || annotationStore.draft) return;
     busy = true;
     lastError = null;
-    const result = await commitRevision({
-      shelfId: scene.shelfId,
-      annotations: scene.revision.annotations,
-      badgeCounter: scene.revision.badgeCounter,
-      activeTool: scene.revision.activeTool,
-      activeColor: scene.revision.activeColor,
-      activeStroke: scene.revision.activeStroke,
-      metadata: currentMetadata(),
-      toClipboard: false,
-    });
-    busy = false;
-    if (result.status === "ok") {
-      // A commit that shelved the revision always carries the new
-      // entry's shelf id; a clipboard-only outcome has none.
-      const newShelfId = result.data.outcome.shelfId;
-      if (newShelfId) {
-        onCommitted(newShelfId);
-      }
-      onClosed();
-    } else {
-      lastError = result.error.message;
+    try {
+      const result = await commitRevision({
+        shelfId: scene.shelfId,
+        annotations: $state.snapshot(annotationStore.annotations),
+        badgeCounter: annotationStore.badgeCounter,
+        activeTool: annotationStore.tool,
+        activeColor: annotationStore.color,
+        activeStroke: annotationStore.stroke,
+        metadata: metadata(),
+        toClipboard,
+      });
+      if (result.status === "ok") {
+        if (result.data.outcome.shelfId) onCommitted(result.data.outcome.shelfId);
+        onClosed();
+      } else lastError = result.error.message;
+    } catch {
+      lastError = "Could not save your edit. Please try again.";
+    } finally {
+      busy = false;
     }
   }
 
   async function onCancel(): Promise<void> {
+    if (busy) return;
     busy = true;
-    lastError = null;
-    if (updateTimer) clearTimeout(updateTimer);
-    const result = await cancelRevision({ shelfId: scene.shelfId });
-    busy = false;
-    if (result.status === "err") {
-      lastError = result.error.message;
-      return;
+    try {
+      const result = await cancelRevision({ shelfId: scene.shelfId });
+      if (result.status === "err") {
+        lastError = result.error.message;
+        return;
+      }
+      onClosed();
+    } catch {
+      lastError = "Could not close the editor. Please try again.";
+    } finally {
+      busy = false;
     }
-    onClosed();
   }
 </script>
 
-<section class="editor" data-testid="revision-editor" aria-label="Capture revision editor">
-  <h2>Reopened capture</h2>
-  <p class="meta" data-testid="revision-loader-status">
-    Scene restored: <strong>{scene.loaderStatus}</strong>
-    · {annotationCount} annotation{annotationCount === 1 ? "" : "s"}
-    · badge counter <span data-testid="revision-badges">{scene.revision.badgeCounter}</span>
-  </p>
-
-  <label for="revision-title">Title</label>
-  <input
-    id="revision-title"
-    data-testid="revision-title"
-    type="text"
-    bind:value={title}
-    oninput={scheduleUpdate}
-  />
-
-  <label for="revision-note">Note</label>
-  <textarea
-    id="revision-note"
-    data-testid="revision-note"
-    rows="3"
-    bind:value={note}
-    oninput={scheduleUpdate}
-  ></textarea>
-
-  <label for="revision-tags">Tags (comma separated)</label>
-  <input
-    id="revision-tags"
-    data-testid="revision-tags"
-    type="text"
-    bind:value={tagsText}
-    oninput={scheduleUpdate}
-  />
-
-  {#if lastError}
-    <p class="error" data-testid="revision-error">{lastError}</p>
-  {/if}
-
+<section class="editor" data-testid="revision-editor" aria-label="Screenshot editor">
+  <div class="heading">
+    <h2>Edit screenshot</h2>
+    <span>{bounds.size.width} × {bounds.size.height}</span>
+  </div>
+  <div class="viewport" bind:this={viewport}>
+    <div class="canvas" style:width="{stageWidth}px" style:height="{stageHeight}px">
+      <KonvaStage
+        assetUrl={scene.pngPath}
+        {bounds}
+        {stageWidth}
+        {stageHeight}
+        fixedSelection
+        onSelectionChange={() => {}}
+        onCommit={(target) => onCommit(target === "clipboard")}
+        {onCancel}
+      />
+    </div>
+  </div>
+  <AnnotationToolbar visible />
+  <p class="hint">Draw an annotation or use Select to move it. Ctrl+Z to undo. Ctrl+C to copy.</p>
+  <details>
+    <summary>Title and notes</summary>
+    <div class="metadata">
+      <label for="revision-title">Title</label><input
+        id="revision-title"
+        data-testid="revision-title"
+        type="text"
+        bind:value={title}
+      />
+      <label for="revision-note">Note</label><textarea
+        id="revision-note"
+        data-testid="revision-note"
+        rows="2"
+        bind:value={note}
+      ></textarea>
+      <label for="revision-tags">Tags (comma separated)</label><input
+        id="revision-tags"
+        data-testid="revision-tags"
+        type="text"
+        bind:value={tagsText}
+      />
+    </div>
+  </details>
+  {#if lastError}<p class="error" data-testid="revision-error" role="alert">{lastError}</p>{/if}
   <div class="actions">
-    <button type="button" data-testid="revision-commit" disabled={busy} onclick={onCommit}>
-      Commit revision
-    </button>
-    <button type="button" data-testid="revision-cancel" disabled={busy} onclick={onCancel}>
-      Cancel
-    </button>
+    <button
+      type="button"
+      disabled={busy || annotationStore.draft !== null}
+      onclick={() => onCommit(true)}>Copy and close</button
+    >
+    <button
+      type="button"
+      data-testid="revision-commit"
+      disabled={busy || annotationStore.draft !== null}
+      onclick={() => onCommit()}>Done</button
+    >
+    <button type="button" data-testid="revision-cancel" disabled={busy} onclick={onCancel}
+      >Close</button
+    >
   </div>
 </section>
 
 <style>
   .editor {
-    border-top: 1px solid #ddd;
-    margin-top: 1rem;
-    padding-top: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
-    max-width: 480px;
+    gap: 12px;
   }
-  .meta {
-    color: #666;
+  .heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
   }
-  label {
-    font-weight: 600;
-    margin-top: 0.4rem;
+  h2 {
+    margin: 0;
+    font-size: 1.15rem;
+  }
+  .heading span,
+  .hint {
+    color: #626a7b;
+    font-size: 0.85rem;
+  }
+  .hint {
+    margin: 0;
+  }
+  .viewport {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    background: #202431;
+    border: 1px solid #b9c3d5;
+    border-radius: 10px;
+    padding: 16px 0;
+  }
+  .canvas {
+    position: relative;
+    overflow: hidden;
+  }
+  .metadata {
+    display: grid;
+    gap: 6px;
+    padding-top: 12px;
+  }
+  summary {
+    cursor: pointer;
   }
   input,
   textarea {
     font: inherit;
-    padding: 0.25rem 0.4rem;
+    padding: 8px;
+    border: 1px solid #b9c3d5;
+    border-radius: 6px;
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
-    margin-top: 0.6rem;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  button {
+    font: inherit;
+    padding: 9px 14px;
+    cursor: pointer;
+    border: 1px solid #b9c3d5;
+    border-radius: 6px;
+    background: white;
+  }
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  summary:focus-visible {
+    outline: 3px solid #477fe8;
+    outline-offset: 2px;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: wait;
   }
   .error {
-    color: #b00020;
+    color: #a51b36;
   }
 </style>

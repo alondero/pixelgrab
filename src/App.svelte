@@ -1,227 +1,230 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { session } from "$lib/stores/session.svelte";
-  import {
-    requestCapture,
-    requestCancel,
-    getSessionSnapshot,
-    showShelfQueue,
-  } from "$lib/ipc/commands";
-  import type { CaptureDiagnostics, IpcResponse, SecondaryLaunchIntent } from "$lib/ipc/types";
+  import { requestCapture } from "$lib/ipc/commands";
+  import type { RevisionContext, SecondaryLaunchIntent } from "$lib/ipc/types";
   import SettingsPanel from "$lib/preferences/SettingsPanel.svelte";
   import HotkeyPanel from "$lib/hotkey/HotkeyPanel.svelte";
   import RevisionEditor from "$lib/revision/RevisionEditor.svelte";
+  import RecentCaptures from "$lib/shelf/RecentCaptures.svelte";
   import { createPreferencesStore } from "$lib/preferences/store.svelte";
   import { createHotkeyStore } from "$lib/hotkey/store.svelte";
-  import type { MonitorLayout, RevisionContext } from "$lib/ipc/types";
 
-  let lastCaptureId = $state<string | null>(null);
-  let lastCaptureBounds = $state<string | null>(null);
-  let diagnostics = $state<CaptureDiagnostics | null>(null);
   let pendingError = $state<string | null>(null);
   let settingsOpen = $state(false);
-  // Issue #63: the scene forwarded by the shelf card's Edit action.
-  // Non-null while the revision editor is open.
+  let capturing = $state(false);
   let revisionScene = $state<RevisionContext | null>(null);
   const preferences = createPreferencesStore();
   const hotkeys = createHotkeyStore();
 
-  async function onCaptureIntent(intent: "region" | "full_screen" = "region") {
+  async function capture(intent: "region" | "full_screen") {
+    if (capturing || revisionScene) return;
+    capturing = true;
     pendingError = null;
-    const response = await requestCapture({ intent });
-    if (response.status === "ok") {
-      lastCaptureId = response.data.capture.captureId;
-      lastCaptureBounds = `${response.data.capture.bounds.size.width}x${response.data.capture.bounds.size.height}`;
-      diagnostics = response.data.diagnostics ?? null;
-      session.setSnapshot({
-        state: "ready",
-        lastCapture: response.data.capture,
-      });
-    } else {
-      pendingError = response.error.message;
+    try {
+      const response = await requestCapture({ intent });
+      if (response.status === "err") pendingError = response.error.message;
+    } catch {
+      pendingError = "Capture failed. Please try again.";
+    } finally {
+      capturing = false;
     }
-  }
-
-  async function onCancelIntent() {
-    pendingError = null;
-    const response = await requestCancel();
-    if (response.status === "ok") {
-      session.setSnapshot(response.data.snapshot);
-    } else {
-      pendingError = response.error.message;
-    }
-  }
-
-  async function refreshSnapshot() {
-    const response: IpcResponse<typeof session.snapshot> = await getSessionSnapshot();
-    if (response.status === "ok") {
-      session.setSnapshot(response.data);
-    }
-  }
-
-  // Route a SecondaryLaunchIntent through the same handlers the
-  // IPC layer exposes. Tray clicks, global shortcuts, and
-  // secondary launches all land here so the user sees identical
-  // behaviour regardless of entry point.
-  function handleSecondaryIntent(intent: SecondaryLaunchIntent) {
-    switch (intent.kind) {
-      case "capture_region":
-        void onCaptureIntent("region");
-        break;
-      case "capture_full_screen":
-        void onCaptureIntent("full_screen");
-        break;
-      case "shelf_history":
-        void showShelfQueue();
-        break;
-      case "open_settings":
-        settingsOpen = true;
-        break;
-      case "default":
-        // No-op: the Rust core has already focused the window.
-        break;
-    }
-  }
-
-  function handlePauseToggle() {
-    void hotkeys.togglePaused();
   }
 
   onMount(() => {
-    const unlistenCapture = listen("pixelgrab://request-capture", () => {
-      void onCaptureIntent("region");
-    });
-    const unlistenSecondary: Promise<UnlistenFn> = listen(
-      "pixelgrab://secondary-launch",
-      (event) => {
-        handleSecondaryIntent(event.payload as SecondaryLaunchIntent);
-      },
-    );
-    const unlistenPause = listen("pixelgrab://pause-hotkeys-toggled", () => {
-      handlePauseToggle();
-    });
-    const unlistenCommitFailure = listen<{ message: string }>(
-      "pixelgrab://commit-failed",
-      (event) => {
+    const subscriptions: Promise<UnlistenFn>[] = [
+      listen("pixelgrab://request-capture", () => {
+        void capture("region");
+      }),
+      listen<SecondaryLaunchIntent>("pixelgrab://secondary-launch", (event) => {
+        if (event.payload.kind === "open_settings" && !revisionScene) settingsOpen = true;
+      }),
+      listen("pixelgrab://pause-hotkeys-toggled", () => {
+        void hotkeys.togglePaused();
+      }),
+      listen<{ message: string }>("pixelgrab://commit-failed", (event) => {
         pendingError = event.payload.message;
-      },
-    );
-    // Issue #63: the shelf card's Edit action forwards the reopened
-    // editor scene; mounting RevisionEditor is the main window's half
-    // of that hand-off.
-    const unlistenRevision = listen<RevisionContext>("pixelgrab://revision-opened", (event) => {
-      revisionScene = event.payload;
-    });
-    // Issue #63: the display watcher announces topology / DPI /
-    // work-area changes; expose the resolved per-monitor scale factors
-    // on the window so the packaged-app WebDriver pass (mixed-DPI
-    // hardware) can assert against them.
-    const unlistenDisplay = listen<MonitorLayout>("pixelgrab://display-changed", (event) => {
-      (
-        window as unknown as { __PIXELGRAB_SCALE_FACTORS__?: number[] }
-      ).__PIXELGRAB_SCALE_FACTORS__ = event.payload.monitors.map((monitor) => monitor.scaleFactor);
-    });
-    refreshSnapshot();
+      }),
+      listen<RevisionContext>("pixelgrab://revision-opened", (event) => {
+        settingsOpen = false;
+        revisionScene = event.payload;
+      }),
+      listen("pixelgrab://revision-closed", () => {
+        revisionScene = null;
+      }),
+      listen("pixelgrab://show-recent", () => {
+        settingsOpen = false;
+      }),
+    ];
     void preferences.refresh();
     void hotkeys.refresh();
     return () => {
-      unlistenCapture.then((fn) => fn());
-      unlistenSecondary.then((fn) => fn());
-      unlistenPause.then((fn) => fn());
-      unlistenCommitFailure.then((fn) => fn());
-      unlistenRevision.then((fn) => fn());
-      unlistenDisplay.then((fn) => fn());
+      for (const subscription of subscriptions) void subscription.then((fn) => fn());
     };
   });
-
-  function openSettings() {
-    settingsOpen = true;
-  }
 </script>
 
 <main class="app">
-  <h1>PixelGrab</h1>
-  <p class="muted">
-    Tracer 14 — configurable hotkeys, dynamic tray, and secondary-launch forwarding. The shortcut
-    and tray-menu paths share a single intent handler so the three entry points are always
-    equivalent.
-  </p>
-
-  <section class="controls">
-    <button type="button" onclick={() => onCaptureIntent("region")}> Trigger capture </button>
-    <button type="button" onclick={() => onCaptureIntent("full_screen")}>
-      Capture full screen
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">P</span>
+      <h1>PixelGrab</h1>
+    </div>
+    <button
+      type="button"
+      class="quiet"
+      onclick={() => (settingsOpen = !settingsOpen)}
+      data-testid="open-settings"
+      aria-expanded={settingsOpen}
+      disabled={revisionScene !== null}
+    >
+      {settingsOpen ? "Back to screenshots" : "Settings"}
     </button>
-    <button type="button" onclick={onCancelIntent}> Cancel </button>
-    <button type="button" onclick={refreshSnapshot}>Refresh snapshot</button>
-    <button type="button" onclick={openSettings} data-testid="open-settings"> Settings </button>
-  </section>
-
-  <section class="status">
-    <h2>Session</h2>
-    <dl>
-      <dt>State</dt>
-      <dd data-testid="session-state">{session.snapshot.state}</dd>
-      <dt>Last capture id</dt>
-      <dd data-testid="session-capture-id">
-        {lastCaptureId ?? "(none)"}
-      </dd>
-      <dt>Last capture bounds</dt>
-      <dd data-testid="session-capture-bounds">
-        {lastCaptureBounds ?? "(none)"}
-      </dd>
-      <dt>Capture-to-overlay latency</dt>
-      <dd data-testid="capture-to-overlay">
-        {diagnostics?.captureToOverlayMs !== undefined
-          ? `${diagnostics.captureToOverlayMs} ms`
-          : "(n/a)"}
-      </dd>
-    </dl>
-    {#if pendingError}
-      <p class="error" data-testid="pending-error" role="alert">{pendingError}</p>
-    {/if}
-  </section>
-
+  </header>
+  {#if pendingError}<p class="error" role="alert">{pendingError}</p>{/if}
   {#if settingsOpen}
     <SettingsPanel store={preferences} />
     <HotkeyPanel store={hotkeys} />
-  {/if}
-
-  {#if revisionScene}
-    <RevisionEditor scene={revisionScene} onClosed={() => (revisionScene = null)} />
+  {:else if revisionScene}
+    {#key revisionScene.shelfId}
+      <RevisionEditor scene={revisionScene} onClosed={() => (revisionScene = null)} />
+    {/key}
+  {:else}
+    <section class="capture-bar" aria-label="Take a screenshot">
+      <div>
+        <h2>Capture. Drag. Keep working.</h2>
+        <p>Select an area and release to see your screenshot.</p>
+      </div>
+      <div class="capture-actions">
+        <button type="button" class="primary" onclick={() => capture("region")} disabled={capturing}
+          >Capture area</button
+        >
+        <button type="button" onclick={() => capture("full_screen")} disabled={capturing}
+          >Full screen</button
+        >
+      </div>
+    </section>
+    <RecentCaptures onEdit={(context) => (revisionScene = context)} />
+    <p class="tip">
+      Need to annotate first? Hold Ctrl when releasing your selection, or choose Edit before
+      sharing.
+    </p>
   {/if}
 </main>
 
 <style>
+  :global(body) {
+    margin: 0;
+    background: #f4f6fb;
+    color: #20283b;
+    font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  :global(button) {
+    font: inherit;
+  }
   .app {
-    font-family: system-ui, sans-serif;
-    padding: 1.5rem;
-    max-width: 640px;
+    padding: 24px;
+    max-width: 1120px;
     margin: 0 auto;
   }
-  .muted {
-    color: #666;
-  }
-  .controls {
-    margin: 1rem 0;
+  .topbar,
+  .brand {
     display: flex;
-    gap: 0.5rem;
+    align-items: center;
+  }
+  .topbar {
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .brand {
+    gap: 10px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.2rem;
+    letter-spacing: -0.03em;
+  }
+  .logo {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    color: white;
+    font-weight: 700;
+    background: #5952dc;
+    border-radius: 9px;
+  }
+  h2 {
+    margin: 0;
+    font-size: 1.4rem;
+    letter-spacing: -0.03em;
+  }
+  p {
+    line-height: 1.5;
+  }
+  .capture-bar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 22px;
+    margin-bottom: 28px;
+    background: white;
+    border: 1px solid #dee4ef;
+    border-radius: 14px;
+  }
+  .capture-bar p {
+    color: #626a7b;
+    margin-bottom: 0;
+  }
+  .capture-actions {
+    display: flex;
+    gap: 8px;
     flex-wrap: wrap;
   }
-  .status {
-    border-top: 1px solid #ddd;
-    padding-top: 1rem;
+  button {
+    padding: 10px 14px;
+    border: 1px solid #b9c3d5;
+    border-radius: 8px;
+    background: white;
+    color: #252d41;
+    cursor: pointer;
   }
-  dl {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: 0.25rem 1rem;
+  button.primary {
+    background: #5952dc;
+    color: white;
+    border-color: #5952dc;
   }
-  dt {
-    font-weight: bold;
+  button.quiet {
+    background: transparent;
+  }
+  button:focus-visible {
+    outline: 3px solid #477fe8;
+    outline-offset: 3px;
+  }
+  button:disabled {
+    opacity: 0.55;
+    cursor: wait;
+  }
+  .tip {
+    color: #626a7b;
+    font-size: 0.85rem;
   }
   .error {
-    color: #b00020;
+    padding: 12px;
+    border: 1px solid #e6a7b2;
+    border-radius: 8px;
+    color: #a51b36;
+    background: #fff1f3;
+  }
+  @media (max-width: 420px) {
+    .app {
+      padding: 16px;
+    }
+    .capture-bar {
+      padding: 16px;
+    }
   }
 </style>

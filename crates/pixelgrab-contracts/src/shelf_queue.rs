@@ -96,7 +96,11 @@ impl ShelfTimerState {
     pub fn started(now_ms: i64, config: ShelfTimerConfig) -> Self {
         Self {
             added_at_elapsed_ms: now_ms,
-            deadline_at_elapsed_ms: now_ms.saturating_add(config.lifetime_ms),
+            deadline_at_elapsed_ms: if config.lifetime_ms <= 0 {
+                i64::MAX
+            } else {
+                now_ms.saturating_add(config.lifetime_ms)
+            },
             paused_at_elapsed_ms: None,
             paused_remaining_ms: None,
         }
@@ -120,6 +124,14 @@ impl ShelfTimerState {
     /// `now + max(remaining, grace_ms)`. The grace bump is the only
     /// piece of policy in this module; everything else is mechanical.
     pub fn unhover(&mut self, now_ms: i64, config: ShelfTimerConfig) {
+        if self.paused_at_elapsed_ms.is_none() {
+            return;
+        }
+        if self.deadline_at_elapsed_ms == i64::MAX {
+            self.paused_at_elapsed_ms = None;
+            self.paused_remaining_ms = None;
+            return;
+        }
         let remaining = self.paused_remaining_ms.unwrap_or(0);
         let new_remaining = remaining.max(config.grace_ms);
         self.deadline_at_elapsed_ms = now_ms.saturating_add(new_remaining);
@@ -249,6 +261,19 @@ pub struct SaveShelfCardAsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_timer_survives_hover_and_long_idle() {
+        let config = ShelfTimerConfig {
+            lifetime_ms: 0,
+            grace_ms: 3_000,
+        };
+        let mut timer = ShelfTimerState::started(100, config);
+        assert!(!timer.is_expired(100));
+        timer.hover(200);
+        timer.unhover(400, config);
+        assert!(!timer.is_expired(86_400_000));
+    }
     use crate::cache::CacheEntryMetadata;
     use crate::coordinate::{PhysicalBounds, PhysicalSize};
 

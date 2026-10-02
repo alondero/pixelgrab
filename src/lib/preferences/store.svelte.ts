@@ -28,7 +28,7 @@ const DEFAULT_PREFS: ShelfPreferencesDto = {
   corner: "bottom_right",
   targetMonitorId: null,
   marginPx: 24,
-  autoDismissEnabled: true,
+  autoDismissEnabled: false,
   lifetimeSeconds: 60,
   visibleCardCount: 4,
   showCountdown: true,

@@ -20,13 +20,16 @@ Every interactive control MUST:
 
 The primary workflows are:
 
-1. **Region capture** — tray or global shortcut → overlay → drag → Enter
-   (commit) or Escape (cancel).
-2. **Full-screen capture** — tray → Enter.
+1. **Region capture** — tray or global shortcut → overlay → drag and release
+   (commit), or hold Ctrl at release / choose Edit before sharing to annotate.
+   Escape clears a crop or cancels the session.
+2. **Full-screen capture** — tray or shortcut → immediate clipboard and shelf.
 3. **Annotation** — toolbar shortcut selection (`A`, `R`, `T`, `B`, `N`,
    `V`) → drag → Enter.
 4. **Shelf** — keyboard focus traversal to a card → `C` (copy) /
-   `Ctrl+S` (save) / `P` (pin) / `Delete` (dismiss).
+   `Ctrl+S` (save) / `P` (pin) / `Delete` (dismiss) / Enter or `E` (edit).
+   Recent screenshots in the tray opens the companion gallery. Image buttons
+   open the visual editor; its shortcuts do not intercept title/note input.
 5. **Drag-out** — drag from the focused card to offer the card payload through
    the OLE drag pipeline.
 

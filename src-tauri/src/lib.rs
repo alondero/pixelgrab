@@ -615,14 +615,40 @@ fn handle_run_event(app: &AppHandle<tauri::Wry>, event: RunEvent) {
     }
     if let RunEvent::WindowEvent {
         label,
-        event: WindowEvent::CloseRequested { .. },
+        event: WindowEvent::CloseRequested { api, .. },
         ..
     } = &event
     {
         // Hide overlay + shelf windows instead of closing them so
         // the next capture reuses the pre-allocated window rather
         // than spinning up a new one.
-        if matches!(label.as_str(), "overlay" | "shelf") {
+        if matches!(label.as_str(), "main" | "overlay" | "shelf") {
+            api.prevent_close();
+            if let Some(state) = app.try_state::<PixelGrabApp>() {
+                if label == "main" {
+                    if state.session().current_state() == SessionState::RevisionCommitting {
+                        return;
+                    }
+                    if state.session().current_state() == SessionState::Reopening {
+                        for entry in state.cache().entries() {
+                            if state.cache().has_editor_lock(&entry.shelf_id) {
+                                let _ = ipc::cancel_revision_native(&state, &entry.shelf_id);
+                            }
+                        }
+                        let _ = app.emit("pixelgrab://revision-closed", ());
+                    }
+                } else if label == "overlay"
+                    && state.session().current_state() == SessionState::Selecting
+                {
+                    let _ = state.session().cancel_session();
+                    let snapshot = ipc::snapshot_with_resolved_position(
+                        &state.shelf_queue(),
+                        &state.preferences().current(),
+                        state.platform().as_ref(),
+                    );
+                    ipc::sync_shelf_window(app, &snapshot);
+                }
+            }
             if let Some(window) = app.get_webview_window(label) {
                 let _ = window.hide();
             }

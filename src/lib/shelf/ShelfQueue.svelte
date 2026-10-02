@@ -190,7 +190,7 @@
     width: 100%;
     height: 100%;
     margin: 0;
-    overflow: visible;
+    overflow: hidden;
   }
   :global(body) {
     background: transparent;
@@ -204,12 +204,18 @@
     background: transparent;
     color: #fff;
     font-family: system-ui, sans-serif;
+    height: 100%;
+    box-sizing: border-box;
+  }
+  .queue :global(.card) {
+    flex-shrink: 0;
+    width: 100%;
   }
   .overflow {
     position: relative;
   }
   .overflow-toggle {
-    width: 200px;
+    width: 100%;
     height: 44px;
     background: rgba(28, 28, 32, 0.92);
     border: 1px solid rgba(255, 255, 255, 0.16);
@@ -232,11 +238,14 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    width: 200px;
+    width: 100%;
     max-height: calc(100vh - 56px);
     overflow-y: auto;
     background: rgba(12, 12, 16, 0.96);
     z-index: 2;
+    scrollbar-width: thin;
+    box-sizing: border-box;
+    border: 1px solid #596078;
   }
   .status {
     position: absolute;

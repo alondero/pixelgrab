@@ -65,6 +65,8 @@ use super::locks::{ActiveLockSet, LockGuard};
 pub mod file_names {
     /// Flattened PNG, derived from `flatten_crop`.
     pub const CAPTURE_PNG: &str = "capture.png";
+    /// Immutable crop pixels used when editing an existing screenshot.
+    pub const SOURCE_PNG: &str = "source.png";
     /// Optional staging bitmap.
     pub const BITMAP_PNG: &str = "bitmap.png";
     /// Editable metadata, JSON-encoded.
@@ -371,6 +373,25 @@ impl Cache {
     /// `CacheEntry` and a `Shelf` lock guard the caller must keep alive
     /// for as long as the shelf card is visible.
     pub fn commit(&self, request: CacheCommitRequest) -> PlatformResult<CommitResult> {
+        self.commit_inner(request, None)
+    }
+
+    /// Publish immutable source pixels and their editable scene before the manifest.
+    /// Both buffers have the crop dimensions; annotations use crop-local coordinates.
+    pub fn commit_editable(
+        &self,
+        request: CacheCommitRequest,
+        source_rgba: Vec<u8>,
+        revision: RevisionMetadata,
+    ) -> PlatformResult<CommitResult> {
+        self.commit_inner(request, Some((source_rgba, revision)))
+    }
+
+    fn commit_inner(
+        &self,
+        request: CacheCommitRequest,
+        source: Option<(Vec<u8>, RevisionMetadata)>,
+    ) -> PlatformResult<CommitResult> {
         let entry_dir = {
             let inner = self.inner.lock();
             let root = inner.root.clone().ok_or_else(|| {
@@ -439,12 +460,28 @@ impl Cache {
                 // The wrapper `AssetWrite` stage keeps the existing
                 // fault-injection contract intact — every prior
                 // failure test still uses the same anchors.
-                let initial_revision = RevisionMetadata::empty(
+                let mut initial_revision = RevisionMetadata::empty(
                     shelf_id.clone(),
                     capture_id.clone(),
                     request.bounds,
                     request.size,
                 );
+                if let Some((source_rgba, mut revision)) = source {
+                    // Quick captures have identical source/export pixels.
+                    // Reuse that encoding instead of compressing the crop twice.
+                    let source_png = if source_rgba == request.rgba {
+                        png_bytes.clone()
+                    } else {
+                        encode_png(&source_rgba, request.size)?
+                    };
+                    write_atomic(&entry_dir.join(file_names::SOURCE_PNG), &source_png)?;
+                    revision.source_shelf_id = shelf_id.clone();
+                    revision.source_capture_id = capture_id.clone();
+                    revision.crop = request.bounds;
+                    revision.size = request.size;
+                    initial_revision = revision.sanitize();
+                }
+                initial_revision.metadata = request.metadata.clone();
                 let revision_json = serde_json::to_vec_pretty(&initial_revision)?;
                 write_atomic(&entry_dir.join(file_names::REVISION_JSON), &revision_json)?;
                 Ok(png_bytes)
@@ -505,7 +542,9 @@ impl Cache {
         let png_size = file_size(&entry_dir.join(file_names::CAPTURE_PNG))?;
         let metadata_size = file_size(&entry_dir.join(file_names::METADATA_JSON))?;
         let revision_size = file_size(&entry_dir.join(file_names::REVISION_JSON))?;
-        let total_size_bytes = png_size + metadata_size + revision_size + manifest_bytes;
+        let source_size = file_size(&entry_dir.join(file_names::SOURCE_PNG)).unwrap_or(0);
+        let total_size_bytes =
+            png_size + metadata_size + revision_size + source_size + manifest_bytes;
 
         let entry = PublicCacheEntry {
             capture_id: capture_id.clone(),
@@ -596,7 +635,9 @@ impl Cache {
                 AtomicWriteOutcome::Written { bytes, .. } => bytes,
                 AtomicWriteOutcome::AlreadyDurable { bytes, .. } => bytes,
             };
-        let total_size_bytes = png_size + metadata_size + revision_size + manifest_bytes;
+        let source_size = file_size(&entry_dir.join(file_names::SOURCE_PNG)).unwrap_or(0);
+        let total_size_bytes =
+            png_size + metadata_size + revision_size + source_size + manifest_bytes;
         let updated = PublicCacheEntry {
             size_bytes: total_size_bytes,
             ..updated_metadata_only.clone()
@@ -628,11 +669,8 @@ impl Cache {
             // Release the cache-owned shelf guard first so the lock
             // count decrements before `try_dismiss` runs.
             inner.shelf_guards.remove(shelf_id);
-            // Tracer-10: any editor lock is owned by the cache so we
-            // must drop the guard here too — otherwise an entry
-            // dismissed via the shelf path would leak the editor
-            // lock until the process restarts.
-            inner.editor_guards.remove(shelf_id);
+            // The open editor owns its own lifetime. Shelf dismissal must
+            // not release that lock or remove pixels still being edited.
             let outcome = inner.locks.try_dismiss(shelf_id);
             if outcome.removed {
                 inner.entries.remove(shelf_id);
@@ -679,6 +717,18 @@ impl Cache {
             return None;
         }
         Some(parsed.sanitize())
+    }
+
+    /// Resolve an immutable source through the cache registry, never a caller's path.
+    /// Older entries have no source asset and safely use their flattened image.
+    pub fn revision_source(&self, shelf_id: &str) -> Option<String> {
+        let entry = self.entry(shelf_id)?;
+        let source = PathBuf::from(&entry.png_path)
+            .parent()?
+            .join(file_names::SOURCE_PNG);
+        source
+            .is_file()
+            .then(|| source.to_string_lossy().to_string())
     }
 
     /// Write the revision sidecar for the given shelf id. Refuses
@@ -1297,7 +1347,9 @@ fn load_manifest(entry_dir: &Path) -> PlatformResult<PublicCacheEntry> {
     // entry pre-dating the sidecar (e.g. committed before the
     // branch landed) still loads cleanly.
     let revision_size = file_size(&entry_dir.join(file_names::REVISION_JSON)).unwrap_or(0);
-    let total_size_bytes = png_size + metadata_size + revision_size + manifest_bytes.len() as u64;
+    let source_size = file_size(&entry_dir.join(file_names::SOURCE_PNG)).unwrap_or(0);
+    let total_size_bytes =
+        png_size + metadata_size + revision_size + source_size + manifest_bytes.len() as u64;
     Ok(PublicCacheEntry {
         capture_id: manifest.capture_id,
         shelf_id: manifest.shelf_id,

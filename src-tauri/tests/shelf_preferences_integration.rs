@@ -405,6 +405,7 @@ fn commit_reapplies_timer_config_to_queue() {
     let queue = ShelfQueueEngine::default();
     let prefs = ShelfPreferences {
         lifetime_seconds: 12_345, // 12.345 s
+        auto_dismiss_enabled: true,
         ..ShelfPreferences::default()
     };
     let cfg = ShelfTimerConfig {

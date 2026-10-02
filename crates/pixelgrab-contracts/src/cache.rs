@@ -186,13 +186,13 @@ impl ShelfPosition {
         }
     }
 
-    /// Width of a single queue card in physical pixels. Used by
+    /// Width of a single queue card in WebView logical pixels. Used by
     /// [`shelf_queue_position`](Self::shelf_queue_position) to lay out
     /// the multi-card stack.
-    pub const QUEUE_CARD_WIDTH: u32 = 200;
-    /// Height of a single queue card in physical pixels.
-    pub const QUEUE_CARD_HEIGHT: u32 = 150;
-    /// Gap between adjacent queue cards in physical pixels.
+    pub const QUEUE_CARD_WIDTH: u32 = 260;
+    /// Height of a single queue card in WebView logical pixels.
+    pub const QUEUE_CARD_HEIGHT: u32 = 220;
+    /// Gap between adjacent queue cards in WebView logical pixels.
     pub const QUEUE_CARD_GAP: u32 = 12;
     /// Width of the expandable `+N` overflow control in physical pixels.
     pub const QUEUE_OVERFLOW_WIDTH: u32 = 56;

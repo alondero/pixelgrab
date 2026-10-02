@@ -93,7 +93,7 @@ production build, licenses, dependency audit, or packaged acceptance. Bare
 ## Evidence and navigation
 
 Green unit tests and a surviving process do not establish a working capture flow.
-The v1 sign-off was withdrawn; [the latest checked-in workflow review](docs/validation/2026-09-01-v1-workflow-review.md)
+The v1 sign-off was withdrawn; [the latest checked-in workflow review](docs/validation/2026-10-02-shottr-workflow-review.md)
 records outstanding packaged, revision, settings, and hardware acceptance gaps.
 Verify their current status before claiming completion of a release story.
 

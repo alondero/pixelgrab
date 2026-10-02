@@ -39,6 +39,8 @@
     stageWidth: number;
     stageHeight: number;
     onSelectionChange: (bounds: PhysicalBounds | null) => void;
+    onSelectionComplete?: (bounds: PhysicalBounds, editRequested: boolean) => void;
+    fixedSelection?: boolean;
     onCommit?: (target?: "shelf" | "clipboard") => void;
     onCancel?: () => void;
     onSaveAs?: () => void;
@@ -50,6 +52,8 @@
     stageWidth,
     stageHeight,
     onSelectionChange,
+    onSelectionComplete,
+    fixedSelection = false,
     onCommit,
     onCancel,
     onSaveAs,
@@ -234,7 +238,7 @@
   function positionCropHandles(
     rect: { x: number; y: number; width: number; height: number } | null,
   ) {
-    if (cropHandles.length !== 8 || !rect) {
+    if (cropHandles.length !== 8 || !rect || fixedSelection) {
       for (const handle of cropHandles) handle.visible(false);
       return;
     }
@@ -348,12 +352,13 @@
 
   function cropSelectionGeometry(): { x: number; y: number; width: number; height: number } | null {
     if (!cropSelectionRect) return null;
-    return {
+    const rect = {
       x: cropSelectionRect.x(),
       y: cropSelectionRect.y(),
       width: cropSelectionRect.width(),
       height: cropSelectionRect.height(),
     };
+    return rect.width > 0 && rect.height > 0 ? rect : null;
   }
 
   function redrawCropOverlay(rect: { x: number; y: number; width: number; height: number } | null) {
@@ -367,16 +372,16 @@
     }
     cropSelectionRect.position({ x: rect.x, y: rect.y });
     cropSelectionRect.size({ width: rect.width, height: rect.height });
-    cropSelectionRect.visible(true);
+    cropSelectionRect.visible(!fixedSelection);
     cropSelectionBorder.position({ x: rect.x, y: rect.y });
     cropSelectionBorder.size({ width: rect.width, height: rect.height });
-    cropSelectionBorder.visible(true);
+    cropSelectionBorder.visible(!fixedSelection);
     updateDimMask(rect);
     positionCropHandles(rect);
   }
 
   function updateCrosshair() {
-    if (!crosshairH || !crosshairV || !stage || !pointerPos) {
+    if (fixedSelection || !crosshairH || !crosshairV || !stage || !pointerPos) {
       crosshairH?.visible(false);
       crosshairV?.visible(false);
       return;
@@ -1012,7 +1017,12 @@
   function handleKeyDown(event: KeyboardEvent) {
     // Text editing owns Enter/Escape. Let the textarea handler process the
     // key instead of allowing the window-level commit shortcut to fire too.
-    if (event.target instanceof HTMLTextAreaElement) return;
+    if (
+      event.target instanceof HTMLTextAreaElement ||
+      event.target instanceof HTMLInputElement ||
+      (event.target instanceof HTMLElement && event.target.isContentEditable)
+    )
+      return;
     const key = event.key.toLowerCase();
     if (event.ctrlKey || event.metaKey) {
       if (key === "z" && !event.shiftKey) {
@@ -1137,7 +1147,7 @@
       // The crop lives in this component, not in the Rust orchestrator.
       // Clear it locally on the first Escape; only a second Escape with no
       // crop asks the backend to cancel and hide the capture session.
-      if (lastSelection) {
+      if (lastSelection && !fixedSelection) {
         event.preventDefault();
         annotationStore.clearForRecrop();
         redrawCropOverlay(null);
@@ -1268,7 +1278,7 @@
       // branch, which otherwise returns early and makes all eight handles
       // visible but impossible to drag.
       const existing = cropSelectionGeometry();
-      if (existing) {
+      if (existing && !fixedSelection) {
         const hit = cropHandleHit(pos, existing);
         if (hit) {
           activeCropHandle = hit;
@@ -1338,7 +1348,7 @@
           if (event.target !== imageNode) return;
         }
       }
-      if (event.target !== imageNode) return;
+      if (fixedSelection || event.target !== imageNode) return;
       startPoint = pos;
       cropSelectionRect!.position(pos);
       cropSelectionRect!.size({ width: 0, height: 0 });
@@ -1400,7 +1410,7 @@
       }
     });
 
-    stage.on("mouseup", () => {
+    stage.on("mouseup", (event) => {
       if (drawingDraft) {
         endDraft();
         return;
@@ -1442,6 +1452,7 @@
         return;
       }
       if (!dragging) return;
+      const wasResizing = activeCropHandle !== null;
       dragging = false;
       activeCropHandle = null;
       const rect = cropSelectionGeometry();
@@ -1452,6 +1463,9 @@
       }
       redrawCropOverlay(rect);
       emitPhysicalSelection(rect);
+      if (!wasResizing && lastSelection) {
+        onSelectionComplete?.(lastSelection, event.evt.ctrlKey || event.evt.metaKey);
+      }
     });
 
     stage.on("mouseleave", () => {
@@ -1471,6 +1485,11 @@
   // Refresh the annotation + selection chrome whenever the store
   // changes (after a draw, undo, batch style, etc.).
   $effect(() => {
+    if (fixedSelection && stage && !lastSelection) {
+      lastSelection = bounds;
+      onSelectionChange(bounds);
+      redrawCropOverlay(cropCssRect());
+    }
     // Touch every reactive dependency so the effect re-runs when any
     // of them changes.
     void annotationStore.tool;

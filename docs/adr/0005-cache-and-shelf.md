@@ -4,6 +4,9 @@
 
 Accepted (tracer-07, extended by tracer-08).
 
+Retention and logical card placement are amended by
+[ADR-0012](0012-quick-capture-and-editable-sources.md).
+
 ## Context
 
 Tracer 02 established the commit pipeline: flatten the user's crop

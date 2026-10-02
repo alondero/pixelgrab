@@ -4,6 +4,9 @@
 
 Accepted · 2026-08-19 · Tracer 09
 
+Reusable drag sources and native timer protection are amended by
+[ADR-0012](0012-quick-capture-and-editable-sources.md).
+
 ## Context
 
 A shelf card must travel to external Windows applications — Chromium
