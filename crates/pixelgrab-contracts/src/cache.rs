@@ -187,44 +187,15 @@ impl ShelfPosition {
     }
 
     /// Width of a single queue card in WebView logical pixels. Used by
-    /// [`shelf_queue_position`](Self::shelf_queue_position) to lay out
-    /// the multi-card stack.
+    /// [`placement_for_overflow`](crate::shelf_preferences::placement_for_overflow)
+    /// to compute the scaled native window bounds.
     pub const QUEUE_CARD_WIDTH: u32 = 260;
     /// Height of a single queue card in WebView logical pixels.
     pub const QUEUE_CARD_HEIGHT: u32 = 220;
     /// Gap between adjacent queue cards in WebView logical pixels.
     pub const QUEUE_CARD_GAP: u32 = 12;
-    /// Width of the expandable `+N` overflow control in physical pixels.
-    pub const QUEUE_OVERFLOW_WIDTH: u32 = 56;
-    /// Height of the expandable `+N older` overflow control in physical pixels.
+    /// Height of the expandable `+N older` overflow control in WebView logical pixels.
     pub const QUEUE_OVERFLOW_HEIGHT: u32 = 44;
-
-    /// Compute the placement of the shelf window for a queue of
-    /// `visible_cards` (clamped to `[1, MAX_VISIBLE_CARDS]`). The
-    /// window is anchored to the bottom-right of the primary
-    /// monitor's work area; its height scales with the visible card
-    /// count.
-    pub fn shelf_queue_position(monitor: &MonitorDescriptor, visible_cards: usize) -> Self {
-        let work_area = monitor.work_area;
-        let count = visible_cards.clamp(1, crate::MAX_VISIBLE_CARDS);
-        let width = Self::QUEUE_CARD_WIDTH;
-        let height = Self::QUEUE_CARD_HEIGHT * (count as u32)
-            + Self::QUEUE_CARD_GAP * ((count as u32).saturating_sub(1));
-        let margin = i64::from(Self::DEFAULT_MARGIN_PX);
-        let right = i64::from(work_area.origin.x) + i64::from(work_area.size.width) - margin;
-        let bottom = i64::from(work_area.origin.y) + i64::from(work_area.size.height) - margin;
-        let x = (right - i64::from(width)).max(i64::from(work_area.origin.x) + margin) as i32;
-        let y = (bottom - i64::from(height)).max(i64::from(work_area.origin.y) + margin) as i32;
-        Self {
-            monitor_id: monitor.id.clone(),
-            work_area,
-            x,
-            y,
-            width,
-            height,
-            margin_px: Self::DEFAULT_MARGIN_PX,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

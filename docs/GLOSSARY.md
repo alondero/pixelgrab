@@ -84,12 +84,12 @@ add them here.
   live in the overflow group until the queue shrinks.
 - **Shelf card** — a single capture on the shelf. Exposes copy, save-as,
   hover-pause, and dismiss actions. Rendered by `ShelfCard.svelte`.
-- **Shelf placement** — the shelf window is always 24 px inside the
-  primary monitor's work area, anchored to the bottom-right. The
-  single-card calculation lives in
-  `pixelgrab_contracts::ShelfPosition::inside_primary_work_area`; the
-  multi-card calculation lives in `ShelfPosition::shelf_queue_position`
-  and scales the window width with the visible card count.
+- **Shelf placement** — `pixelgrab_contracts::shelf_preferences::fit_shelf_snapshot`
+  fits the visible cards and overflow group to the selected monitor's work
+  area. It uses `placement_for_overflow` to convert card, gap, and overflow
+  dimensions from WebView logical pixels to physical window bounds using
+  the monitor's scale factor. Preferences choose the monitor, corner, and
+  physical margin; defaults are the primary monitor, bottom-right, and 24 px.
 - **Shelf timer** — the 60-second default countdown for each card.
   Tracked by the `ShelfTimerState` per-card struct in
   `pixelgrab_contracts::shelf_queue`. Hover pauses the timer; leave
