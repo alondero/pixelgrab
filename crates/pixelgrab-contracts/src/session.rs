@@ -44,7 +44,7 @@ impl SessionState {
         match self {
             Self::Idle => &[Self::Capturing, Self::Reopening],
             Self::Capturing => &[Self::Ready, Self::Cleanup],
-            Self::Ready => &[Self::Selecting, Self::Cleanup],
+            Self::Ready => &[Self::Selecting, Self::Committing, Self::Cleanup],
             Self::Selecting => &[Self::Committing, Self::Cleanup],
             Self::Committing => &[Self::Cleanup],
             Self::Cleanup => &[Self::Idle],

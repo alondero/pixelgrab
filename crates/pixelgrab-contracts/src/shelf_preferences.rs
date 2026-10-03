@@ -130,7 +130,7 @@ impl Default for ShelfPreferences {
             corner: ShelfCorner::default(),
             target_monitor_id: None,
             margin_px: 24,
-            auto_dismiss_enabled: true,
+            auto_dismiss_enabled: false,
             lifetime_seconds: 60,
             visible_card_count: 4,
             show_countdown: true,
@@ -230,9 +230,16 @@ pub fn placement_for_overflow(
     } else {
         0
     };
-    let width = card_width;
-    let height =
-        card_height * (count as u32) + gap * ((count as u32).saturating_sub(1)) + overflow_height;
+    let scale = if monitor.scale_factor.is_finite() && monitor.scale_factor > 0.0 {
+        f64::from(monitor.scale_factor)
+    } else {
+        1.0
+    };
+    let width = (f64::from(card_width) * scale).ceil() as u32;
+    let height = (f64::from(
+        card_height * (count as u32) + gap * ((count as u32).saturating_sub(1)) + overflow_height,
+    ) * scale)
+        .ceil() as u32;
     let margin = i64::from(preferences.margin_px);
     let work = monitor.work_area;
     let work_left = i64::from(work.origin.x);
@@ -270,9 +277,87 @@ pub fn placement_for_overflow(
     }
 }
 
+/// Fit a queue into the target monitor's physical work area without losing older cards.
+/// Card dimensions are logical WebView pixels; native bounds are physical pixels.
+pub fn fit_shelf_snapshot(
+    snapshot: &mut crate::ShelfQueueSnapshot,
+    preferences: &ShelfPreferences,
+    monitor: &crate::monitor::MonitorDescriptor,
+) {
+    if snapshot.is_empty() {
+        snapshot.position = None;
+        return;
+    }
+    let mut cards = std::mem::take(&mut snapshot.cards);
+    cards.append(&mut snapshot.overflow);
+    let mut visible = cards
+        .len()
+        .min(preferences.visible_card_count as usize)
+        .max(1);
+    let available = monitor
+        .work_area
+        .size
+        .height
+        .saturating_sub(preferences.margin_px.saturating_mul(2));
+    while visible > 1
+        && placement_for_overflow(preferences, monitor, visible, cards.len() > visible).height
+            > available
+    {
+        visible -= 1;
+    }
+    snapshot.overflow = cards.split_off(visible);
+    snapshot.cards = cards;
+    snapshot.position = Some(placement_for_overflow(
+        preferences,
+        monitor,
+        visible,
+        !snapshot.overflow.is_empty(),
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shelf_fits_scaled_negative_origin_monitors_and_preserves_older_cards() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut monitor = sample_monitor();
+            monitor.scale_factor = scale;
+            monitor.work_area.origin = crate::PhysicalPoint::new(-1920, -100);
+            let mut snapshot = crate::ShelfQueueSnapshot::default();
+            for i in 0..5 {
+                snapshot.cards.push(crate::ShelfQueueCard {
+                    shelf_id: i.to_string(),
+                    capture_id: i.to_string(),
+                    png_path: String::new(),
+                    size_bytes: 0,
+                    created_at_ms: 0,
+                    bounds: crate::PhysicalBounds::from_xywh(0, 0, 10, 10),
+                    metadata: crate::CacheEntryMetadata::default(),
+                    timer: crate::ShelfTimerState::started(0, crate::ShelfTimerConfig::default()),
+                });
+            }
+            fit_shelf_snapshot(&mut snapshot, &ShelfPreferences::default(), &monitor);
+            let pos = snapshot.position.unwrap();
+            assert_eq!(pos.width, (260.0 * f64::from(scale)).ceil() as u32);
+            assert!(pos.y >= monitor.work_area.origin.y);
+            assert!(
+                i64::from(pos.y) + i64::from(pos.height)
+                    <= i64::from(monitor.work_area.origin.y)
+                        + i64::from(monitor.work_area.size.height)
+            );
+            assert_eq!(
+                snapshot
+                    .cards
+                    .iter()
+                    .chain(&snapshot.overflow)
+                    .map(|c| c.shelf_id.clone())
+                    .collect::<Vec<_>>(),
+                vec!["0", "1", "2", "3", "4"]
+            );
+        }
+    }
 
     fn sample_monitor() -> crate::monitor::MonitorDescriptor {
         use crate::coordinate::PhysicalBounds;
@@ -293,7 +378,7 @@ mod tests {
         assert_eq!(p.corner, ShelfCorner::BottomRight);
         assert!(p.target_monitor_id.is_none());
         assert_eq!(p.margin_px, 24);
-        assert!(p.auto_dismiss_enabled);
+        assert!(!p.auto_dismiss_enabled);
         assert_eq!(p.lifetime_seconds, 60);
         assert_eq!(p.visible_card_count, 4);
         assert!(p.show_countdown);
@@ -339,7 +424,10 @@ mod tests {
 
     #[test]
     fn auto_dismiss_enabled_yields_seconds_in_millis() {
-        let p = ShelfPreferences::default();
+        let p = ShelfPreferences {
+            auto_dismiss_enabled: true,
+            ..ShelfPreferences::default()
+        };
         assert_eq!(
             p.timer_config().lifetime_ms,
             (p.lifetime_seconds as i64) * 1_000

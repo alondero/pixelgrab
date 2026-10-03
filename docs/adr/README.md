@@ -46,3 +46,4 @@ What other options were considered? Why were they rejected?
 - [ADR-0009](0009-revision-metadata.md) — Reopen / non-destructive revision metadata (tracer-10)
 - [ADR-0010](0010-overlay-reveal-seam.md) — Single backend seam for the overlay reveal contract
 - [ADR-0011](0011-v1-native-workflow-hardening.md) — v1 native workflow hardening (issue #63)
+- [ADR-0012](0012-quick-capture-and-editable-sources.md) — Quick capture, reusable previews, and editable source assets

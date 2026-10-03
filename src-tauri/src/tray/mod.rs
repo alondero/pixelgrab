@@ -1,4 +1,4 @@
-//! Resident tray setup. Tracer 14 completes the menu with all six
+//! Resident tray setup. Tracer 14 establishes the core menu's
 //! promised entries (Capture Region, Capture Full Screen, Shelf
 //! History, Pause Global Hotkeys, Settings, Exit) and turns the
 //! shortcut hints into live labels that mirror the persisted
@@ -15,11 +15,9 @@
 //!
 //! ## Single source of truth
 //!
-//! Every tray action funnels through the same intent the global
-//! shortcut + secondary launch paths use, so the frontend only
-//! needs one handler per action. The wiring lives in
-//! [`crate::singleton`] (intent parser) and [`crate::ipc`] (the
-//! intent handlers).
+//! Capture and shelf actions use the same native dispatcher as global
+//! shortcuts and secondary launches. Recent screenshots reveals the companion
+//! gallery. The wiring lives in [`crate::singleton`] and [`crate::ipc`].
 
 use std::sync::Arc;
 
@@ -36,7 +34,6 @@ use pixelgrab_contracts::{
 };
 
 use crate::hotkey::HotkeyRegistry;
-use crate::singleton::SINGLE_INSTANCE_EVENT as INTENT_EVENT;
 
 /// Tray menu state. Cheap to clone: every field is pinned behind
 /// an `Arc`, so cloning the handle is the same as cloning the
@@ -66,6 +63,7 @@ struct TrayItems {
     region_capture: MenuItem<Wry>,
     full_screen_capture: MenuItem<Wry>,
     shelf_toggle: MenuItem<Wry>,
+    recent_captures: MenuItem<Wry>,
     pause: MenuItem<Wry>,
     settings: MenuItem<Wry>,
     exit: MenuItem<Wry>,
@@ -98,6 +96,7 @@ impl TrayState {
                 &items.region_capture,
                 &items.full_screen_capture,
                 &items.shelf_toggle,
+                &items.recent_captures,
                 &items.pause,
                 &items.settings,
                 &PredefinedMenuItem::separator(app)?,
@@ -113,6 +112,10 @@ impl TrayState {
                 "capture_region" => forward_intent(app, SecondaryLaunchIntent::CaptureRegion),
                 "capture_full" => forward_intent(app, SecondaryLaunchIntent::CaptureFullScreen),
                 "shelf_history" => forward_intent(app, SecondaryLaunchIntent::ShelfHistory),
+                "recent_captures" => {
+                    focus_main_window(app);
+                    let _ = app.emit("pixelgrab://show-recent", ());
+                }
                 "pause_hotkeys" => handle_pause_hotkey(app),
                 "settings" => forward_intent(app, SecondaryLaunchIntent::OpenSettings),
                 "exit" => app.exit(0),
@@ -240,41 +243,10 @@ fn set_item_text<R: Runtime>(item: &MenuItem<R>, text: &str) {
 }
 
 /// Forward a tray-initiated intent to the frontend listener.
-/// The frontend already handles `pixelgrab://request-capture`; for
-/// the remaining actions we emit a typed payload (on
-/// `INTENT_EVENT`, re-exported from `crate::singleton` as
-/// `SINGLE_INSTANCE_EVENT`) so the listener can route them to the
-/// matching IPC handler.
+/// Capture and shelf actions run in the shared native intent dispatcher.
+/// Settings presentation is delivered to the companion's UI listener.
 fn forward_intent<R: Runtime>(app: &AppHandle<R>, intent: SecondaryLaunchIntent) {
-    if matches!(intent, SecondaryLaunchIntent::Default) {
-        // Default means "just focus me" — we still want to focus
-        // the window so the icon click feels responsive.
-        focus_main_window(app);
-        return;
-    }
-    if matches!(intent, SecondaryLaunchIntent::ShelfHistory) {
-        if let Some(state) = app.try_state::<crate::PixelGrabApp>() {
-            if let Err(_err) = crate::ipc::show_shelf_queue_native(&state, app) {
-                log::warn!("tray shelf history presentation failed");
-            }
-        } else {
-            log::warn!("tray shelf history state unavailable");
-        }
-        return;
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        // Capture intents must leave PixelGrab's companion hidden. Showing it
-        // before the backend freezes the desktop captures our own window.
-        if !matches!(
-            &intent,
-            SecondaryLaunchIntent::CaptureRegion
-                | SecondaryLaunchIntent::CaptureFullScreen
-                | SecondaryLaunchIntent::ShelfHistory
-        ) {
-            focus_main_window(app);
-        }
-        let _ = window.emit(INTENT_EVENT, &intent);
-    }
+    crate::singleton::forward_to_existing_instance(app, intent);
 }
 
 /// Internal: open the settings panel from the tray. The frontend
@@ -313,6 +285,13 @@ fn build_menu(app: &AppHandle<Wry>) -> tauri::Result<TrayItems> {
     )?;
     let shelf_toggle =
         MenuItem::with_id(app, "shelf_history", "Shelf History", true, None::<&str>)?;
+    let recent_captures = MenuItem::with_id(
+        app,
+        "recent_captures",
+        "Recent screenshots",
+        true,
+        None::<&str>,
+    )?;
     let pause = MenuItem::with_id(
         app,
         "pause_hotkeys",
@@ -326,6 +305,7 @@ fn build_menu(app: &AppHandle<Wry>) -> tauri::Result<TrayItems> {
         region_capture,
         full_screen_capture,
         shelf_toggle,
+        recent_captures,
         pause,
         settings,
         exit,

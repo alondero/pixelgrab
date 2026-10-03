@@ -1,5 +1,13 @@
 // Global Vitest setup. Loaded before every test file.
 import "@testing-library/jest-dom/vitest";
+
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
 import { afterEach, beforeEach, vi } from "vitest";
 
 // jsdom does not implement HTMLCanvasElement.getContext. Konva calls it

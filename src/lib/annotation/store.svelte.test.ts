@@ -15,10 +15,48 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { annotationStore } from "./store.svelte";
+import type { RevisionMetadata } from "$lib/ipc/types";
 
 describe("annotationStore", () => {
   beforeEach(() => {
     annotationStore.reset();
+  });
+
+  it("restores an independent editable scene with fresh history and unique annotation IDs", () => {
+    annotationStore.setTool("arrow");
+    annotationStore.beginDraft("arrow", { x: 1, y: 1 });
+    annotationStore.updateDraft({ x: 30, y: 30 });
+    annotationStore.commitDraft();
+    const annotation = structuredClone($state.snapshot(annotationStore.annotations[0]));
+    annotation.id = 42;
+    const scene: RevisionMetadata = {
+      schemaVersion: 1,
+      sourceShelfId: "source",
+      sourceCaptureId: "capture",
+      crop: { origin: { x: -100, y: 20 }, size: { width: 80, height: 60 } },
+      size: { width: 80, height: 60 },
+      annotations: [annotation],
+      badgeCounter: 7,
+      activeTool: "numbered_badge",
+      activeColor: "blue",
+      activeStroke: "thick",
+      metadata: { title: "", note: "", tags: [] },
+    };
+    annotationStore.loadScene(scene);
+    expect(annotationStore.canUndo).toBe(false);
+    expect(annotationStore.canRedo).toBe(false);
+    annotationStore.selectOnly(42);
+    annotationStore.deleteSelection();
+    expect(scene.annotations).toHaveLength(1);
+    annotationStore.undo();
+    annotationStore.beginDraft("numbered_badge", { x: 40, y: 40 });
+    annotationStore.commitDraft();
+    expect(annotationStore.annotations.map((a) => a.id)).toEqual([42, 43]);
+    expect(annotationStore.annotations[1].number).toBe(7);
+    expect(annotationStore.annotations[1].color).toBe("blue");
+    expect(annotationStore.annotations[1].stroke).toBe("thick");
+    annotationStore.undo();
+    expect(annotationStore.annotations).toEqual(scene.annotations);
   });
 
   it("starts in a fresh state with the badge counter at 1", () => {

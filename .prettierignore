@@ -12,3 +12,5 @@ Cargo.lock
 pnpm-lock.yaml
 fixtures/golden
 .claude/worktrees
+# CLAUDE.md is the canonical guide; AGENTS.md may be a Windows symlink placeholder.
+AGENTS.md

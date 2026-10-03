@@ -4,6 +4,9 @@
 
 Accepted (tracer-07, extended by tracer-08).
 
+Retention and logical card placement are amended by
+[ADR-0012](0012-quick-capture-and-editable-sources.md).
+
 ## Context
 
 Tracer 02 established the commit pipeline: flatten the user's crop
@@ -117,12 +120,14 @@ lock regardless of where the card was rendered.
 
 ### Placement
 
-The shelf window is positioned by `ShelfPosition::shelf_queue_position`,
-which anchors the row of cards to the bottom-right of the primary
-monitor's **work area** (not its bounds) and scales the window width
-with the visible card count. The 24 px inset is carried as a field
-on the struct so tests can assert the policy and future revisions can
-tweak it without recomputing every call site.
+The shelf window is positioned by
+`pixelgrab_contracts::shelf_preferences::fit_shelf_snapshot`, which fits the
+visible cards and overflow group into the selected monitor's **work area**
+(not its bounds). It delegates geometry to `placement_for_overflow`, which
+converts card, gap, and overflow dimensions from WebView logical pixels to
+physical window bounds using the monitor's scale factor. Preferences choose
+the monitor, corner, and physical inset; defaults are the primary monitor,
+bottom-right, and 24 px. The resolved inset is carried by `ShelfPosition`.
 
 ### Two-phase Enter
 

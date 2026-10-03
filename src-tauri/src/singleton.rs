@@ -2,10 +2,9 @@
 //!
 //! Tracer 14 extends the single-instance plugin's argv parsing to
 //! route the secondary launch onto the same internal intent the
-//! tray menu and global shortcuts use. The frontend listener
-//! treats a single `pixelgrab://secondary-launch` event the same
-//! regardless of where the user clicked, so all three entry
-//! points reach the same handler.
+//! tray menu and global shortcuts use. Capture and shelf presentation run
+//! natively, so a hidden main WebView is not required for those operations.
+//! Settings presentation still uses `pixelgrab://secondary-launch`.
 //!
 //! The argv grammar mirrors the cross-platform conventions used
 //! by other tray-resident tools:
@@ -35,10 +34,35 @@ use pixelgrab_contracts::SecondaryLaunchIntent;
 /// frontend listener (in `src/App.svelte`) mirrors this constant.
 pub const SINGLE_INSTANCE_EVENT: &str = "pixelgrab://secondary-launch";
 
-/// Bring the existing primary instance to the foreground and emit
-/// the forwarded intent. Called from the single-instance plugin
-/// closure with the parsed [`SecondaryLaunchIntent`].
+/// Dispatch an intent to the resident native owner. Capture and shelf do not
+/// reveal the companion; settings/default focus it and notify its UI.
 pub fn forward_to_existing_instance<R: Runtime>(app: &AppHandle<R>, intent: SecondaryLaunchIntent) {
+    let capture_intent = match intent {
+        SecondaryLaunchIntent::CaptureRegion => Some(pixelgrab_contracts::CaptureIntent::Region),
+        SecondaryLaunchIntent::CaptureFullScreen => {
+            Some(pixelgrab_contracts::CaptureIntent::FullScreen)
+        }
+        _ => None,
+    };
+    if let Some(intent) = capture_intent {
+        if let Some(state) = app.try_state::<crate::PixelGrabApp>() {
+            if crate::ipc::capture_native(
+                &state,
+                pixelgrab_contracts::RequestCaptureIntent { intent },
+                app,
+            )
+            .is_err()
+            {
+                log::warn!("native capture intent failed");
+                if let Some(tray) = app.try_state::<crate::tray::TrayState>() {
+                    tray.show_capture_error();
+                }
+            }
+        } else {
+            log::warn!("native capture state unavailable");
+        }
+        return;
+    }
     if matches!(intent, SecondaryLaunchIntent::ShelfHistory) {
         if let Some(state) = app.try_state::<crate::PixelGrabApp>() {
             if let Err(_err) = crate::ipc::show_shelf_queue_native(&state, app) {

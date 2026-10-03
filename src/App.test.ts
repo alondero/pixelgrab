@@ -14,6 +14,9 @@ vi.mock("$lib/ipc/commands", async () => {
     requestCommit: shell.mockRequestCommit,
     requestCancel: shell.mockRequestCancel,
     getSessionSnapshot: shell.mockGetSessionSnapshot,
+    getShelfQueueSnapshot: vi
+      .fn()
+      .mockResolvedValue({ status: "ok", data: { cards: [], overflow: [], snapshotAtMs: 0 } }),
     showShelfQueue: vi.fn().mockResolvedValue({
       status: "ok",
       data: { cards: [], overflow: [], snapshotAtMs: 0 },
@@ -37,6 +40,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
   emit: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock("$lib/overlay/KonvaStage.svelte", () => ({ default: () => {} }));
 
 import App from "./App.svelte";
 import { __resetMock } from "$lib/ipc/shell.svelte";
@@ -47,27 +51,41 @@ describe("App", () => {
     __resetMock();
   });
 
-  it("renders the initial idle state", () => {
+  it("shows recent screenshots as the primary surface", () => {
     render(App);
-    expect(screen.getByTestId("session-state")).toHaveTextContent("idle");
+    expect(screen.getByRole("region", { name: "Recent screenshots" })).toBeInTheDocument();
   });
 
-  it("updates the session state after a capture", async () => {
+  it("starts an area capture from the main window", async () => {
     const user = userEvent.setup();
     render(App);
-    await user.click(screen.getByRole("button", { name: /trigger capture/i }));
-    const state = await screen.findByTestId("session-state");
-    expect(state).toHaveTextContent("ready");
-    expect(screen.getByTestId("session-capture-id")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /capture area/i }));
+    const shell = await import("$lib/ipc/shell.svelte");
+    const response = await shell.mockGetSessionSnapshot();
+    expect(response.status === "ok" && response.data.state).toBe("selecting");
   });
 
-  it("exposes a cancel button that returns the session to idle", async () => {
+  it("shows persisted and newly captured images in newest-first order", async () => {
     const user = userEvent.setup();
     render(App);
-    await user.click(screen.getByRole("button", { name: /trigger capture/i }));
-    expect(screen.getByTestId("session-state")).toHaveTextContent("ready");
-    await user.click(screen.getByRole("button", { name: /cancel/i }));
-    expect(screen.getByTestId("session-state")).toHaveTextContent("idle");
+    await user.click(screen.getByRole("button", { name: /capture area/i }));
+    const handler = eventHandlers.get("pixelgrab://shelf-queue-updated");
+    const card = (shelfId: string) => ({
+      shelfId,
+      captureId: shelfId,
+      pngPath: "/cache/capture.png",
+      sizeBytes: 1024,
+      createdAtMs: 0,
+      bounds: { origin: { x: 0, y: 0 }, size: { width: 320, height: 240 } },
+      metadata: { title: shelfId, note: "", tags: [] },
+      timer: { addedAtElapsedMs: 0, deadlineAtElapsedMs: Number.MAX_SAFE_INTEGER },
+    });
+    handler!({ payload: { cards: [card("newest")], overflow: [card("older")], snapshotAtMs: 0 } });
+    expect(
+      (await screen.findAllByTestId("shelf-card")).map((node) =>
+        node.getAttribute("data-shelf-id"),
+      ),
+    ).toEqual(["newest", "older"]);
   });
 
   // Tracer 15 closes the documentation-vs-implementation gap from
@@ -124,5 +142,8 @@ describe("App", () => {
     });
     expect(await screen.findByTestId("revision-editor")).toBeTruthy();
     expect(screen.getByTestId("revision-title")).toHaveValue("Reopened");
+    expect(screen.getByTestId("open-settings")).toBeDisabled();
+    eventHandlers.get("pixelgrab://revision-closed")!({ payload: null });
+    expect(await screen.findByRole("region", { name: "Recent screenshots" })).toBeInTheDocument();
   });
 });

@@ -32,6 +32,7 @@ import type {
   AnnotationTool,
   PhysicalPoint,
   PhysicalSize,
+  RevisionMetadata,
 } from "$lib/ipc/types";
 
 /// Default badge radius in physical pixels. Mirrors the
@@ -1004,6 +1005,17 @@ function createAnnotationStore() {
       // cannot leak through a forgotten Escape.
       inner.transform = null;
       Object.assign(inner, defaultState());
+    },
+
+    /** Restore a crop-local revision without sharing mutable objects with IPC. */
+    loadScene(scene: RevisionMetadata): void {
+      Object.assign(inner, defaultState());
+      inner.annotations = structuredClone($state.snapshot(scene.annotations));
+      inner.tool = scene.activeTool;
+      inner.color = scene.activeColor;
+      inner.stroke = scene.activeStroke;
+      inner.badgeCounter = scene.badgeCounter;
+      inner.nextId = Math.max(0, ...inner.annotations.map((a) => a.id)) + 1;
     },
 
     /// Discard annotations when the user clears the crop and starts a new

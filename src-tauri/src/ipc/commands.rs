@@ -60,25 +60,6 @@ pub fn now_ms() -> i64 {
 /// margin, and visible-card count; falls back to the primary monitor
 /// (and the default placement) when the named monitor is missing.
 /// Returns an error only when no monitor is available at all.
-fn queue_position(app: &PixelGrabApp) -> Result<pixelgrab_contracts::ShelfPosition, PlatformError> {
-    let layout = app.platform().monitor_layout()?;
-    let prefs = app.preferences().current();
-    let monitor = resolve_preferred_monitor(&prefs, &layout, app.platform().cursor_position())
-        .ok_or_else(|| {
-            PlatformError::new(
-                PlatformErrorKind::MonitorQueryFailed,
-                "no monitor available for shelf placement",
-            )
-        })?;
-    let queue = app.shelf_queue().snapshot(now_ms());
-    Ok(pixelgrab_contracts::placement_for_overflow(
-        &prefs,
-        monitor,
-        queue.cards.len(),
-        !queue.overflow.is_empty(),
-    ))
-}
-
 /// Reserved `target_monitor_id` that anchors the shelf to whichever
 /// monitor currently contains the pointer (issue #63).
 pub const CURSOR_MONITOR_ID: &str = "cursor";
@@ -166,12 +147,7 @@ pub(crate) fn snapshot_with_resolved_position(
     if let Ok(layout) = platform.monitor_layout() {
         if let Some(monitor) = resolve_preferred_monitor(prefs, &layout, platform.cursor_position())
         {
-            snap.position = Some(pixelgrab_contracts::placement_for_overflow(
-                prefs,
-                monitor,
-                snap.cards.len(),
-                !snap.overflow.is_empty(),
-            ));
+            pixelgrab_contracts::shelf_preferences::fit_shelf_snapshot(&mut snap, prefs, monitor);
         }
     }
     snap
@@ -197,10 +173,27 @@ pub fn request_capture(
     payload: RequestCaptureIntent,
     handle: AppHandle,
 ) -> IpcResponse<CaptureResponse> {
-    let request = match resolve_capture_request(&app, payload.intent) {
+    IpcResponse::from_result(capture_native(&app, payload, &handle))
+}
+
+/// Own capture, reveal, and immediate full-screen delivery in one native operation.
+pub fn capture_native<R: Runtime>(
+    app: &PixelGrabApp,
+    payload: RequestCaptureIntent,
+    handle: &AppHandle<R>,
+) -> PlatformResult<CaptureResponse> {
+    if app.session().current_state().is_busy()
+        && app.session().current_state() != pixelgrab_contracts::SessionState::Ready
+    {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidSessionState,
+            "Finish the current screenshot before taking another.",
+        ));
+    }
+    let request = match resolve_capture_request(app, payload.intent) {
         Ok(req) => req,
         Err(err) => {
-            return IpcResponse::from_result(Err(err));
+            return Err(err);
         }
     };
     // Defensive recovery: if a previous capture left the session
@@ -226,6 +219,7 @@ pub fn request_capture(
     if let Some(window) = handle.get_webview_window("main") {
         let _ = window.hide();
     }
+    let _ = crate::shelf::hide_card(handle);
     let started_at = now_ms();
     let result = app.session().request_capture(&request);
     let capture = match result {
@@ -247,9 +241,44 @@ pub fn request_capture(
             if let Some(tray) = handle.try_state::<crate::tray::TrayState>() {
                 tray.show_capture_error();
             }
-            return IpcResponse::from_result(Err(err));
+            sync_shelf_window(handle, &snapshot_with_position(app));
+            return Err(err);
         }
     };
+    let monitor_id = monitor_id_for(&capture);
+    app.session().store_diagnostics(
+        CaptureDiagnostics::started(&capture.capture_id, &monitor_id, capture.bounds, started_at)
+            .completed(capture.captured_at_ms),
+    );
+    if matches!(
+        payload.intent,
+        pixelgrab_contracts::ipc::CaptureIntent::FullScreen
+    ) {
+        if let Err(err) = commit_capture(
+            app,
+            handle,
+            &CommitRequest {
+                crop: capture.bounds,
+                annotations: Vec::new(),
+                to_shelf: true,
+                to_clipboard: true,
+                save_as: false,
+            },
+        ) {
+            if let Some(diag) = app.session().last_diagnostics() {
+                app.session()
+                    .store_diagnostics(diag.failed(format!("{:?}", err.kind)));
+            }
+            if let Some(tray) = handle.try_state::<crate::tray::TrayState>() {
+                tray.show_capture_error();
+            }
+            return Err(err);
+        }
+        return Ok(CaptureResponse {
+            capture: capture.into(),
+            diagnostics: app.session().last_diagnostics(),
+        });
+    }
     // Reveal the overlay over the captured bounds. The single seam does
     // the full job — position, show, and walk `Ready -> Selecting` —
     // so the frontend never has to call a separate overlay IPC. A
@@ -257,23 +286,14 @@ pub fn request_capture(
     // bounds directly (single-monitor captures don't have a full virtual
     // desktop to span). The defensive `reset()` above already recovered
     // any stuck `Ready` state from a previous capture.
-    match capture.format {
+    let reveal = match capture.format {
         CaptureFormat::VirtualDesktop => {
             if let Ok(layout) = app.platform().monitor_layout() {
-                if let Err(err) =
-                    crate::overlay::show_over_virtual_desktop(&handle, &layout, &app.session())
-                {
-                    log::warn!("overlay reveal failed: {err}; falling back to bounds");
-                    if let Err(fallback_err) =
-                        crate::overlay::show_over_bounds(&handle, &capture.bounds, &app.session())
-                    {
-                        log::warn!("overlay bounds reveal failed: {fallback_err}");
-                    }
-                }
-            } else if let Err(err) =
-                crate::overlay::show_over_bounds(&handle, &capture.bounds, &app.session())
-            {
-                log::warn!("overlay bounds reveal failed: {err}");
+                crate::overlay::show_over_virtual_desktop(handle, &layout, &app.session()).or_else(
+                    |_| crate::overlay::show_over_bounds(handle, &capture.bounds, &app.session()),
+                )
+            } else {
+                crate::overlay::show_over_bounds(handle, &capture.bounds, &app.session())
             }
         }
         // A single-monitor/full-screen capture has no pixels for the other
@@ -281,18 +301,21 @@ pub fn request_capture(
         // monitor instead of stretching that image across the virtual
         // desktop.
         CaptureFormat::SingleMonitor | CaptureFormat::PhysicalRegion => {
-            if let Err(err) =
-                crate::overlay::show_over_bounds(&handle, &capture.bounds, &app.session())
-            {
-                log::warn!("overlay bounds reveal failed: {err}");
-            }
+            crate::overlay::show_over_bounds(handle, &capture.bounds, &app.session())
         }
+    };
+    if let Err(err) = reveal {
+        let _ = app.session().cancel_session();
+        sync_shelf_window(handle, &snapshot_with_position(app));
+        if let Some(diag) = app.session().last_diagnostics() {
+            app.session()
+                .store_diagnostics(diag.failed(format!("{:?}", err.kind)));
+        }
+        if let Some(tray) = handle.try_state::<crate::tray::TrayState>() {
+            tray.show_capture_error();
+        }
+        return Err(err);
     }
-    let monitor_id = monitor_id_for(&capture);
-    let diag =
-        CaptureDiagnostics::started(&capture.capture_id, &monitor_id, capture.bounds, started_at)
-            .completed(capture.captured_at_ms);
-    app.session().store_diagnostics(diag);
     let response = CaptureResponse {
         capture: pixelgrab_contracts::ipc::CaptureResolutionDto::from(capture),
         diagnostics: app.session().last_diagnostics(),
@@ -303,7 +326,7 @@ pub fn request_capture(
     // it also makes the response/event ordering explicit for packaged-app
     // acceptance tests.
     let _ = handle.emit("pixelgrab://capture-ready", &response);
-    IpcResponse::from_result(Ok(response))
+    Ok(response)
 }
 
 /// Resolve the IPC intent into a concrete `CaptureRequest`. The
@@ -325,10 +348,11 @@ fn resolve_capture_request(
         }),
         pixelgrab_contracts::ipc::CaptureIntent::FullScreen => {
             let layout = app.platform().monitor_layout()?;
-            let monitor = layout
-                .monitors
-                .iter()
-                .find(|m| m.is_primary)
+            let monitor = app
+                .platform()
+                .cursor_position()
+                .and_then(|position| layout.monitor_containing(position))
+                .or_else(|| layout.monitors.iter().find(|m| m.is_primary))
                 .or_else(|| layout.monitors.first())
                 .ok_or_else(|| {
                     PlatformError::new(
@@ -373,6 +397,7 @@ pub fn request_cancel(app: AppState<'_>, handle: AppHandle) -> IpcResponse<Cance
             if let Err(err) = crate::overlay::hide(&handle) {
                 log::warn!("overlay hide after cancellation failed: {err}");
             }
+            sync_shelf_window(&handle, &snapshot_with_position(&app));
             CancelOutcome {
                 action: "session_cancelled".into(),
                 snapshot: app.session().snapshot(),
@@ -401,12 +426,51 @@ pub fn request_cancel(app: AppState<'_>, handle: AppHandle) -> IpcResponse<Cance
 pub fn open_revision(
     app: AppState<'_>,
     payload: OpenRevisionIntent,
+    handle: AppHandle,
 ) -> IpcResponse<OpenRevisionResult> {
+    IpcResponse::from_result(
+        open_revision_native(&app, payload, &handle).map(|context| OpenRevisionResult { context }),
+    )
+}
+
+/// Restore an editor scene, reveal its native window, and deliver it directly.
+/// A missing window or failed reveal rolls back the editor lock and session.
+pub fn open_revision_native<R: Runtime>(
+    app: &PixelGrabApp,
+    payload: OpenRevisionIntent,
+    handle: &AppHandle<R>,
+) -> PlatformResult<RevisionContext> {
+    let context = open_revision_context(app, payload)?;
+    let reveal = (|| {
+        let window = handle.get_webview_window("main").ok_or_else(|| {
+            PlatformError::new(PlatformErrorKind::Io, "editor_window_unavailable")
+        })?;
+        window
+            .show()
+            .map_err(|_| PlatformError::new(PlatformErrorKind::Io, "editor_window_show_failed"))?;
+        handle
+            .emit("pixelgrab://revision-opened", &context)
+            .map_err(|_| {
+                PlatformError::new(PlatformErrorKind::Io, "editor_scene_delivery_failed")
+            })?;
+        let _ = window.set_focus();
+        Ok(())
+    })();
+    if let Err(err) = reveal {
+        let _ = cancel_revision_native(app, &context.shelf_id);
+        return Err(err);
+    }
+    Ok(context)
+}
+
+/// Acquire the editor session and restore the immutable source and scene.
+pub fn open_revision_context(
+    app: &PixelGrabApp,
+    payload: OpenRevisionIntent,
+) -> PlatformResult<RevisionContext> {
     // Reject when the session is busy. A second reopen (or a
     // capture) cannot race the editor session.
-    if let Err(err) = app.session().request_reopen() {
-        return IpcResponse::from_result(Err(err));
-    }
+    app.session().request_reopen()?;
     // Acquire the editor lock + read the entry. The IPC layer
     // never lets the lock leak; the Drop on the wrapper guard
     // releases if anything below returns Err — but Rust's ? would
@@ -418,34 +482,44 @@ pub fn open_revision(
         Err(err) => {
             // Roll back the session transition on failure.
             let _ = app.session().cancel_session();
-            return IpcResponse::from_result(Err(err));
+            return Err(err);
         }
     };
     // Filter the revision: future / older versions fall back to the
     // flat-PNG path. The sidecar bytes are still on disk so a
     // future migration tool can recover them.
+    let source_path = app.cache().revision_source(&payload.shelf_id).filter(|_| {
+        revision
+            .as_ref()
+            .is_some_and(|scene| scene.schema_version == REVISION_SCHEMA_VERSION)
+    });
     let (revision, loader_status) = match revision {
-        Some(r) if r.schema_version == REVISION_SCHEMA_VERSION => (r, RevisionLoaderStatus::Full),
-        Some(_) | None => (
-            RevisionMetadata::empty(
+        Some(r) if r.schema_version == REVISION_SCHEMA_VERSION && source_path.is_some() => {
+            (r, RevisionLoaderStatus::Full)
+        }
+        previous => {
+            let mut fallback = RevisionMetadata::empty(
                 entry.shelf_id.clone(),
                 entry.capture_id.clone(),
                 entry.bounds,
                 entry.size,
-            ),
-            RevisionLoaderStatus::FlatFallback,
-        ),
+            );
+            fallback.metadata = previous
+                .map(|r| r.metadata)
+                .unwrap_or_else(|| entry.metadata.clone());
+            (fallback, RevisionLoaderStatus::FlatFallback)
+        }
     };
     let locks = app.cache().locks().owners_of(&entry.shelf_id);
     let context = RevisionContext {
         shelf_id: entry.shelf_id.clone(),
         capture_id: entry.capture_id.clone(),
-        png_path: entry.png_path.clone(),
+        png_path: source_path.unwrap_or_else(|| entry.png_path.clone()),
         revision,
         locks,
         loader_status,
     };
-    IpcResponse::from_result(Ok(OpenRevisionResult { context }))
+    Ok(context)
 }
 
 /// Persist the in-progress editor scene to the source entry's
@@ -490,29 +564,41 @@ pub fn commit_revision(
     payload: CommitRevisionIntent,
     handle: AppHandle,
 ) -> IpcResponse<CommitRevisionResult> {
-    let outcome = match commit_revision_inner(&app, &handle, &payload) {
+    IpcResponse::from_result(
+        commit_revision_native(&app, &handle, &payload)
+            .map(|outcome| CommitRevisionResult { outcome }),
+    )
+}
+
+/// Commit an editor session and restore its retryable state after a failed delivery.
+pub fn commit_revision_native<R: Runtime>(
+    app: &PixelGrabApp,
+    handle: &AppHandle<R>,
+    payload: &CommitRevisionIntent,
+) -> PlatformResult<pixelgrab_contracts::CommitOutcome> {
+    let outcome = match commit_revision_inner(app, handle, payload) {
         Ok(outcome) => outcome,
         Err(err) => {
-            // Roll the session back to Idle even on failure so the
-            // tray does not stay stuck in a busy state. The cache
-            // hook is the source of truth for the editor lock —
-            // we leave it acquired so the user can retry.
-            if let Err(inner) = app.session().cancel_session() {
-                log::warn!("commit_revision: session.cancel_session failed: {inner}");
+            // Preserve the source lock and restore Reopening so the visible
+            // editor can retry or close without allowing a competing capture.
+            if app.session().current_state() == pixelgrab_contracts::SessionState::Idle
+                && app.cache().has_editor_lock(&payload.shelf_id)
+            {
+                let _ = app.session().request_reopen();
             }
-            return IpcResponse::from_result(Err(err));
+            return Err(err);
         }
     };
-    IpcResponse::from_result(Ok(CommitRevisionResult { outcome }))
+    Ok(outcome)
 }
 
 /// Commit body: extractable so the session-state invariants are
 /// testable without a full Tauri runtime. Mirrors the regular
 /// `commit()` helper's pattern — every side effect runs inside a
 /// closure so `session.finish_revision()` runs exactly once.
-fn commit_revision_inner(
+fn commit_revision_inner<R: Runtime>(
     app: &PixelGrabApp,
-    handle: &AppHandle,
+    handle: &AppHandle<R>,
     payload: &CommitRevisionIntent,
 ) -> PlatformResult<pixelgrab_contracts::CommitOutcome> {
     use crate::cache::CacheCommitRequest;
@@ -534,7 +620,16 @@ fn commit_revision_inner(
     // onto the original framebuffer. The flattened output is the
     // new entry's PNG — the "single source of truth" invariant
     // from tracer-02 / tracer-04.
-    let png_bytes = std::fs::read(&source_entry.png_path).map_err(|_err| {
+    let source_path = app
+        .cache()
+        .revision_source(&payload.shelf_id)
+        .filter(|_| {
+            app.cache()
+                .read_revision(&payload.shelf_id)
+                .is_some_and(|scene| scene.schema_version == REVISION_SCHEMA_VERSION)
+        })
+        .unwrap_or_else(|| source_entry.png_path.clone());
+    let png_bytes = std::fs::read(&source_path).map_err(|_err| {
         // Privacy: categorical kind only.
         PlatformError::new(PlatformErrorKind::Io, "revision_read_source_png_failed")
     })?;
@@ -579,13 +674,24 @@ fn commit_revision_inner(
         // Write the new entry via the cache's two-phase commit.
         let primary_monitor_id =
             crate::cache::Cache::primary_monitor_id(&app.platform().monitor_layout()?)?;
-        let commit = app.cache().commit(CacheCommitRequest {
-            bounds: source_entry.bounds,
-            size,
-            rgba: flat.clone(),
-            metadata: payload.metadata.clone(),
-            monitor_id: primary_monitor_id.clone(),
-        });
+        let mut revision =
+            RevisionMetadata::empty(String::new(), String::new(), source_entry.bounds, size);
+        revision.annotations = payload.annotations.clone();
+        revision.badge_counter = payload.badge_counter;
+        revision.active_tool = payload.active_tool;
+        revision.active_color = payload.active_color;
+        revision.active_stroke = payload.active_stroke;
+        let commit = app.cache().commit_editable(
+            CacheCommitRequest {
+                bounds: source_entry.bounds,
+                size,
+                rgba: flat.clone(),
+                metadata: payload.metadata.clone(),
+                monitor_id: primary_monitor_id.clone(),
+            },
+            source_rgba.clone(),
+            revision,
+        );
         let commit = match commit {
             Ok(c) => c,
             Err(err) => {
@@ -610,43 +716,7 @@ fn commit_revision_inner(
             }
         }
         emit_shelf_queue_updated(handle, snapshot);
-        // Persist the in-progress scene to the source entry's
-        // `revision.json` so a future reopen starts from the same
-        // point. We never overwrite the source PNG — the issue's
-        // "Cancellation does not mutate original assets" guarantee.
-        let updated_revision = RevisionMetadata {
-            schema_version: REVISION_SCHEMA_VERSION,
-            source_shelf_id: payload.shelf_id.clone(),
-            source_capture_id: source_entry.capture_id.clone(),
-            crop: source_entry.bounds,
-            size: source_entry.size,
-            annotations: payload.annotations.clone(),
-            badge_counter: payload.badge_counter,
-            draft: None,
-            active_tool: payload.active_tool,
-            active_color: payload.active_color,
-            active_stroke: payload.active_stroke,
-            metadata: payload.metadata.clone(),
-        };
-        if let Err(err) = app
-            .cache()
-            .write_revision(&payload.shelf_id, &updated_revision)
-        {
-            // The new entry is already durable. Failing to persist
-            // the in-progress revision is a soft failure — log it
-            // and continue so the user is not stranded. The next
-            // reopen will fall back to the flat-PNG path if the
-            // sidecar is corrupted.
-            log::warn!("commit_revision: write_revision failed: {err}");
-        }
-        // Optionally update the source entry's title / note / tags
-        // so the visible shelf card reflects the user's edits.
-        if let Err(err) = app
-            .cache()
-            .update_metadata(&payload.shelf_id, payload.metadata.clone())
-        {
-            log::warn!("commit_revision: update_metadata failed: {err}");
-        }
+        // The new entry owns its source and scene. Never mutate the original.
         // Release the editor lock ONLY after the new entry is
         // durable. The active-lock registry is the source of truth.
         app.cache().release_editor_lock(&payload.shelf_id);
@@ -706,14 +776,20 @@ pub fn cancel_revision(
     app: AppState<'_>,
     payload: CancelRevisionIntent,
 ) -> IpcResponse<CancelRevisionResult> {
-    let result = if app.cache().has_editor_lock(&payload.shelf_id) {
-        app.cache().release_editor_lock(&payload.shelf_id);
+    IpcResponse::from_result(cancel_revision_native(&app, &payload.shelf_id))
+}
+
+/// Close an editor session without changing any source assets.
+pub fn cancel_revision_native(
+    app: &PixelGrabApp,
+    shelf_id: &str,
+) -> PlatformResult<CancelRevisionResult> {
+    let result = if app.cache().has_editor_lock(shelf_id) {
+        app.cache().release_editor_lock(shelf_id);
         // Walk the session back to Idle. The cancel reason is
         // `RevisionCancelled` so the telemetry stream can
         // distinguish it from a regular session cancel.
-        if let Err(err) = app.session().cancel_session() {
-            return IpcResponse::from_result(Err(err));
-        }
+        app.session().cancel_session()?;
         CancelRevisionResult {
             cancelled: true,
             reason: "cancelled".to_string(),
@@ -724,7 +800,7 @@ pub fn cancel_revision(
             reason: "no_active_revision".to_string(),
         }
     };
-    IpcResponse::from_result(Ok(result))
+    Ok(result)
 }
 
 /// Commit the current selection. Returns the commit outcome. The flattened
@@ -749,7 +825,7 @@ pub fn request_commit(
         to_clipboard: payload.to_clipboard,
         save_as: payload.save_as,
     };
-    let result = match commit(&app, &handle, &commit_request) {
+    let result = match commit_capture(&app, &handle, &commit_request) {
         Ok(outcome) => Ok(CommitResponse { outcome }),
         Err(err) => Err(err),
     };
@@ -1109,6 +1185,15 @@ pub fn unhover_shelf_card(
     payload: UnhoverShelfCardRequest,
     handle: AppHandle,
 ) -> IpcResponse<ShelfQueueSnapshot> {
+    // Another preview window must not resume this card during its OLE loop.
+    if app
+        .cache()
+        .locks()
+        .owners_of(&payload.shelf_id)
+        .contains(&pixelgrab_contracts::LockOwner::Drag)
+    {
+        return IpcResponse::from_result(Ok(snapshot_with_position(&app)));
+    }
     let result = match app.shelf_queue().unhover(&payload.shelf_id, now_ms()) {
         Some(snapshot) => {
             let snapshot = with_position(snapshot, &app);
@@ -1169,8 +1254,17 @@ pub struct UnhoverShelfCardRequest {
 fn with_position(mut snapshot: ShelfQueueSnapshot, app: &PixelGrabApp) -> ShelfQueueSnapshot {
     if snapshot.is_empty() {
         snapshot.position = None;
-    } else if let Ok(position) = queue_position(app) {
-        snapshot.position = Some(position);
+    } else if let Ok(layout) = app.platform().monitor_layout() {
+        let prefs = app.preferences().current();
+        if let Some(monitor) =
+            resolve_preferred_monitor(&prefs, &layout, app.platform().cursor_position())
+        {
+            pixelgrab_contracts::shelf_preferences::fit_shelf_snapshot(
+                &mut snapshot,
+                &prefs,
+                monitor,
+            );
+        }
     }
     snapshot
 }
@@ -1385,10 +1479,8 @@ fn emit_shelf_updated<R: tauri::Runtime>(
     let _ = handle.emit("pixelgrab://shelf-updated", &view);
 }
 
-/// Show and focus the main companion window. Invoked by the shelf
-/// webview after a card is reopened for editing (issue #63) so the
-/// editor surface becomes visible; the main window starts hidden
-/// because the tray is the resident UI.
+/// Show and focus the companion when the UI needs to surface a result/error.
+/// Revision opening owns its own native reveal; the tray is the resident UI.
 #[tauri::command]
 pub fn show_main_window(handle: AppHandle) -> IpcResponse<()> {
     if let Some(window) = handle.get_webview_window("main") {
@@ -1415,40 +1507,34 @@ pub fn start_shelf_drag(
     app: AppState<'_>,
     payload: StartShelfDragIntent,
 ) -> IpcResponse<StartShelfDragResult> {
-    // Resolve the committed entry. The heavy OLE payload (PNG path +
-    // BGRA bitmap) is assembled here so the frontend only names the
-    // card.
-    let entry = match app.cache().entry(&payload.shelf_id) {
-        Some(entry) => entry,
-        None => {
-            return IpcResponse::from_result(Err(PlatformError::new(
-                PlatformErrorKind::InvalidPayload,
-                format!("unknown shelf id: {}", payload.shelf_id),
-            )));
-        }
-    };
-    let request = match build_drag_request(&entry) {
-        Ok(request) => request,
-        Err(err) => return IpcResponse::from_result(Err(err)),
-    };
-    let drag_guard = app.cache().acquire_drag_lock(&payload.shelf_id);
-    let guard = match drag_guard {
-        Ok(guard) => Some(guard),
-        Err(err) => return IpcResponse::from_result(Err(err)),
-    };
-    let result = app
-        .platform()
-        .start_drag(&request)
-        .map(|drag_result| StartShelfDragResult {
-            should_dismiss: payload.dismiss_on_accepted && drag_result.outcome.dismiss_card(),
-            outcome: drag_result.outcome,
-            diagnostics: drag_result.diagnostics,
-        });
-    // Release the Drag lock before returning: the OLE loop is over, so
-    // the entry becomes evictable again exactly when the drop target's
-    // file handles are closed.
-    drop(guard);
-    IpcResponse::from_result(result)
+    IpcResponse::from_result(start_shelf_drag_native(&app, &payload))
+}
+
+/// Offer a durable screenshot while protecting its file and pausing its timer.
+/// Delivery keeps the reusable shelf entry and releases only the Drag guard.
+pub fn start_shelf_drag_native(
+    app: &PixelGrabApp,
+    payload: &StartShelfDragIntent,
+) -> PlatformResult<StartShelfDragResult> {
+    let _guard = app.cache().acquire_drag_lock(&payload.shelf_id)?;
+    app.shelf_queue().hover(&payload.shelf_id, now_ms());
+    let result = (|| {
+        let entry = app.cache().entry(&payload.shelf_id).ok_or_else(|| {
+            PlatformError::new(PlatformErrorKind::InvalidPayload, "drag_source_unavailable")
+        })?;
+        let request = build_drag_request(&entry)?;
+        app.platform()
+            .start_drag(&request)
+            .map(|drag_result| StartShelfDragResult {
+                should_dismiss: payload.dismiss_on_accepted && drag_result.outcome.dismiss_card(),
+                outcome: drag_result.outcome,
+                diagnostics: drag_result.diagnostics,
+            })
+    })();
+    app.shelf_queue().unhover(&payload.shelf_id, now_ms());
+    // A drop target can still be reading after OLE returns. Its source keeps
+    // the Shelf lock; the temporary Drag guard releases on every return path.
+    result
 }
 
 /// Build the platform `DragRequest` for a shelf card. Reads the
@@ -1496,9 +1582,10 @@ fn build_drag_request(
     Ok(request)
 }
 
-fn commit(
+/// Deliver a frozen crop and always release the capture session and overlay.
+pub fn commit_capture<R: Runtime>(
     app: &PixelGrabApp,
-    handle: &AppHandle,
+    handle: &AppHandle<R>,
     request: &CommitRequest,
 ) -> Result<pixelgrab_contracts::ipc::CommitOutcome, PlatformError> {
     let result = commit_body(app, handle, request);
@@ -1508,12 +1595,13 @@ fn commit(
     if let Err(err) = crate::overlay::hide(handle) {
         log::warn!("overlay hide after commit failed: {err}");
     }
+    sync_shelf_window(handle, &snapshot_with_position(app));
     result
 }
 
-fn commit_body(
+fn commit_body<R: Runtime>(
     app: &PixelGrabApp,
-    handle: &AppHandle,
+    handle: &AppHandle<R>,
     request: &CommitRequest,
 ) -> Result<pixelgrab_contracts::ipc::CommitOutcome, PlatformError> {
     use pixelgrab_contracts::ipc::CommitOutcome;
@@ -1559,7 +1647,8 @@ fn commit_body(
     // annotation list is empty, so no early-return is needed. The
     // flatten is deterministic in (z_order, id) order so a replay
     // produces a byte-identical PNG.
-    let rgba = pixelgrab_contracts::flatten_annotations(&rgba, size, &request.annotations);
+    let source_rgba = rgba;
+    let rgba = pixelgrab_contracts::flatten_annotations(&source_rgba, size, &request.annotations);
 
     let mut outcome = CommitOutcome {
         capture_id: capture_id.clone(),
@@ -1586,13 +1675,26 @@ fn commit_body(
         if request.to_shelf {
             let primary_monitor_id =
                 crate::cache::Cache::primary_monitor_id(&app.platform().monitor_layout()?)?;
-            let commit = app.cache().commit(crate::cache::CacheCommitRequest {
-                bounds: bbox,
-                size,
-                rgba: rgba.clone(),
-                metadata: CacheEntryMetadata::default(),
-                monitor_id: primary_monitor_id.clone(),
-            });
+            let mut revision = RevisionMetadata::empty(String::new(), String::new(), bbox, size);
+            revision.annotations = request.annotations.clone();
+            revision.badge_counter = request
+                .annotations
+                .iter()
+                .filter_map(|a| a.number)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let commit = app.cache().commit_editable(
+                crate::cache::CacheCommitRequest {
+                    bounds: bbox,
+                    size,
+                    rgba: rgba.clone(),
+                    metadata: CacheEntryMetadata::default(),
+                    monitor_id: primary_monitor_id.clone(),
+                },
+                source_rgba.clone(),
+                revision,
+            );
             match commit {
                 Ok(commit_result) => {
                     let entry = commit_result.entry;

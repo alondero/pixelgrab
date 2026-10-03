@@ -5,6 +5,9 @@
 Accepted. Amends ADR-0006 (external drag), ADR-0007 (cache bounds and
 recovery), and ADR-0010 (overlay reveal seam) as described below.
 
+Quick capture delivery, native intent routing, and reusable companion window
+lifetime are further amended by [ADR-0012](0012-quick-capture-and-editable-sources.md).
+
 ## Context
 
 The 2026-08-22 v1 gap review against #12 and #1 left nine release

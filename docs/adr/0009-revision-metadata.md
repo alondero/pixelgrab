@@ -4,6 +4,9 @@
 
 Accepted (tracer-10, GitHub issue #22).
 
+Immutable source assets and visual revision lifetime are amended by
+[ADR-0012](0012-quick-capture-and-editable-sources.md).
+
 ## Context
 
 After tracer-07, every committed capture yielded a one-card shelf. The

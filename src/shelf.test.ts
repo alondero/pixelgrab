@@ -28,16 +28,17 @@ const mockStartShelfDrag = vi.fn();
 const mockShowMainWindow = vi.fn();
 const mockEmit = vi.fn();
 const mockPinStoreOpenPin = vi.fn();
+const mockDismissCacheEntry = vi.fn();
 
 vi.mock("$lib/ipc/commands", () => ({
   getShelfQueueSnapshot: mockGetShelfQueueSnapshot,
   getShelfPreferences: mockGetShelfPreferences,
   copyShelfCard: vi.fn(),
   saveShelfCardAs: vi.fn(),
-  dismissCacheEntry: vi.fn(),
-  hoverShelfCard: vi.fn(),
-  unhoverShelfCard: vi.fn(),
-  tickShelfQueue: vi.fn(),
+  dismissCacheEntry: mockDismissCacheEntry,
+  hoverShelfCard: vi.fn().mockResolvedValue({ status: "ok", data: {} }),
+  unhoverShelfCard: vi.fn().mockResolvedValue({ status: "ok", data: {} }),
+  tickShelfQueue: vi.fn().mockResolvedValue({ status: "ok", data: {} }),
   openRevision: mockOpenRevision,
   startShelfDrag: mockStartShelfDrag,
   showMainWindow: mockShowMainWindow,
@@ -77,6 +78,12 @@ const rehydratedSnapshot: ShelfQueueSnapshot = {
 
 describe("shelf window bootstrap", () => {
   beforeEach(() => {
+    mockDismissCacheEntry.mockReset();
+    mockStartShelfDrag
+      .mockReset()
+      .mockResolvedValue({ status: "ok", data: { outcome: "cancelled", shouldDismiss: false } });
+    mockEmit.mockReset();
+    mockShowMainWindow.mockReset();
     document.body.innerHTML = '<div id="shelf"></div>';
     mockListen.mockReset().mockResolvedValue(() => {});
     mockGetShelfQueueSnapshot
@@ -84,7 +91,7 @@ describe("shelf window bootstrap", () => {
       .mockResolvedValue({ status: "ok", data: rehydratedSnapshot });
     mockGetShelfPreferences.mockReset().mockResolvedValue({
       status: "ok",
-      data: { showCountdown: true },
+      data: { showCountdown: true, autoDismissEnabled: true },
     });
     vi.resetModules();
   });
@@ -161,7 +168,7 @@ describe("shelf window bootstrap", () => {
     });
   });
 
-  it("wires the card Edit action to openRevision + revision-opened event + main window", async () => {
+  it("opens the editor through the native operation without a webview relay", async () => {
     mockOpenRevision.mockReset().mockResolvedValue({
       status: "ok",
       data: { context: { shelfId: "shelf-restored" } },
@@ -173,15 +180,11 @@ describe("shelf window bootstrap", () => {
     const edit = document.querySelector<HTMLButtonElement>('[data-testid="shelf-edit"]');
     expect(edit).not.toBeNull();
     edit!.click();
-    // Flush all pending microtasks across the three-step async chain
-    // (openRevision -> emit -> showMainWindow).
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(mockOpenRevision).toHaveBeenCalledWith({ shelfId: "shelf-restored" });
-    expect(mockEmit).toHaveBeenCalledWith("pixelgrab://revision-opened", {
-      shelfId: "shelf-restored",
-    });
-    expect(mockShowMainWindow).toHaveBeenCalledTimes(1);
+    expect(mockEmit).not.toHaveBeenCalled();
+    expect(mockShowMainWindow).not.toHaveBeenCalled();
   });
 
   it("wires the drag gesture to startShelfDrag with the card's shelf id", async () => {
@@ -206,7 +209,7 @@ describe("shelf window bootstrap", () => {
 
     expect(mockStartShelfDrag).toHaveBeenCalledWith({
       shelfId: "shelf-restored",
-      dismissOnAccepted: true,
+      dismissOnAccepted: false,
     });
   });
 
@@ -232,6 +235,76 @@ describe("shelf window bootstrap", () => {
 
     expect(document.querySelectorAll('[data-testid="shelf-card"]')).toHaveLength(1);
     expect(document.querySelector('[data-shelf-id="shelf-remaining"]')).not.toBeNull();
+  });
+
+  it("keeps the image available after an accepted drop", async () => {
+    mockStartShelfDrag.mockResolvedValue({
+      status: "ok",
+      data: { outcome: "accepted", shouldDismiss: false },
+    });
+    await import("./shelf.svelte");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const surface = document.querySelector<HTMLElement>('[data-testid="shelf-drag-surface"]')!;
+    surface.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, clientX: 10, clientY: 10, bubbles: true }),
+    );
+    surface.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 60, clientY: 10, bubbles: true }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockDismissCacheEntry).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-shelf-id="shelf-restored"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="shelf-feedback"]')).toHaveTextContent(
+      "Screenshot shared",
+    );
+  });
+
+  it("reports a drag connection failure and allows the same screenshot to be shared again", async () => {
+    mockStartShelfDrag
+      .mockRejectedValueOnce(new Error("disconnected"))
+      .mockResolvedValue({ status: "ok", data: { outcome: "accepted", shouldDismiss: false } });
+    await import("./shelf.svelte");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const surface = document.querySelector<HTMLElement>('[data-testid="shelf-drag-surface"]')!;
+    const drag = async () => {
+      surface.dispatchEvent(
+        new MouseEvent("pointerdown", { button: 0, clientX: 10, clientY: 10, bubbles: true }),
+      );
+      surface.dispatchEvent(
+        new MouseEvent("pointermove", { clientX: 60, clientY: 10, bubbles: true }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await drag();
+    expect(document.querySelector('[data-testid="shelf-feedback"]')).toHaveTextContent(
+      "Could not share",
+    );
+    await drag();
+    expect(mockStartShelfDrag).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[data-testid="shelf-feedback"]')).toHaveTextContent(
+      "Screenshot shared",
+    );
+    expect(mockDismissCacheEntry).not.toHaveBeenCalled();
+  });
+
+  it("does not replace a new screenshot with a slow startup snapshot", async () => {
+    let resolveSnapshot: ((value: { status: "ok"; data: ShelfQueueSnapshot }) => void) | undefined;
+    mockGetShelfQueueSnapshot.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
+    await import("./shelf.svelte");
+    const handler = mockListen.mock.calls.find(
+      ([name]) => name === "pixelgrab://shelf-queue-updated",
+    )?.[1];
+    handler({
+      payload: { cards: [makeCard("fresh", "Just captured")], overflow: [], snapshotAtMs: 20 },
+    });
+    resolveSnapshot!({ status: "ok", data: rehydratedSnapshot });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector('[data-shelf-id="fresh"]')).not.toBeNull();
+    expect(document.querySelector('[data-shelf-id="shelf-restored"]')).toBeNull();
   });
 
   it("does not let a slow startup preference overwrite a live update", async () => {

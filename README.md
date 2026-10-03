@@ -13,7 +13,7 @@ application. All processing happens locally.
 The tracer implementation is present through tracer 15, but a 2026-08-22
 production-wiring review found release-blocking gaps that isolated unit and
 contract tests did not expose. See
-[`docs/validation/2026-08-22-v1-gap-review.md`](docs/validation/2026-08-22-v1-gap-review.md)
+[`docs/validation/2026-10-02-shottr-workflow-review.md`](docs/validation/2026-10-02-shottr-workflow-review.md)
 for the current readiness assessment.
 
 Implemented foundations include:
@@ -40,6 +40,13 @@ contracts exist, but some are not yet connected into complete packaged-app user
 flows. Treat the gap review—not tracer issue state—as the release authority.
 
 ## Quickstart (Windows)
+
+Capture an area from the tray or its configured shortcut, then release the
+mouse to copy it and show its preview. Drag the preview directly into another
+app, or click it to open the visual editor. **Recent screenshots** in the tray
+opens the gallery. Hold Ctrl when releasing a selection, or choose **Edit before
+sharing**, to annotate before delivery. New defaults keep previews until you
+dismiss them; existing auto-dismiss preferences can be changed in Settings.
 
 ```powershell
 # 1. Install dependencies (requires Node 20+ and Rust 1.77+)

@@ -153,10 +153,8 @@ impl ShelfQueueEngine {
         *self.config.lock()
     }
 
-    /// Replace the timer configuration. Cards already in the queue
-    /// keep their original deadline — the new config only affects
-    /// cards added after this call. A lifetime of zero means "no
-    /// timer"; cards added after this call will never auto-expire.
+    /// Replace the timer configuration. Disabling expiry also clears the
+    /// deadlines of existing cards; positive lifetimes apply to new cards.
     ///
     /// Tracer 12 calls this from the startup path (so rehydrated
     /// cards pick up the persisted lifetime) and from the
@@ -165,6 +163,14 @@ impl ShelfQueueEngine {
     /// existing cards).
     pub fn apply_timer_config(&self, config: ShelfTimerConfig) {
         *self.config.lock() = config;
+        if config.lifetime_ms <= 0 {
+            // Turning off expiry also keeps screenshots already on the shelf.
+            let mut inner = self.inner.lock();
+            let now = inner.last_clock_ms;
+            for card in &mut inner.cards {
+                card.timer = ShelfTimerState::started(now, config);
+            }
+        }
     }
 
     /// Apply the persisted maximum number of cards in the main row. Existing
@@ -471,6 +477,21 @@ mod tests {
         let outcome = q.tick(5_000);
         assert!(outcome.expired.is_empty());
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn disabling_expiry_keeps_existing_and_new_cards_through_hover_and_tick() {
+        let q = ShelfQueueEngine::new(fast_config());
+        q.add(entry("a", "cap-a"), 0);
+        q.hover("a", 500);
+        q.apply_timer_config(ShelfTimerConfig {
+            lifetime_ms: 0,
+            ..fast_config()
+        });
+        q.unhover("a", 700);
+        q.add(entry("b", "cap-b"), 800);
+        assert!(q.tick(1_000_000).expired.is_empty());
+        assert_eq!(q.shelf_ids(), vec!["b", "a"]);
     }
 
     #[test]

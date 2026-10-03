@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import RevisionEditor from "./RevisionEditor.svelte";
 import type { RevisionContext } from "$lib/ipc/types";
+vi.mock("$lib/overlay/KonvaStage.svelte", () => ({ default: () => {} }));
 
 vi.mock("$lib/ipc/commands", () => ({
   updateRevision: vi.fn().mockResolvedValue({
@@ -81,8 +82,7 @@ describe("RevisionEditor", () => {
     render(RevisionEditor, { scene: makeContext() });
     const title = screen.getByTestId("revision-title") as HTMLInputElement;
     expect(title.value).toBe("Old title");
-    expect(screen.getByTestId("revision-badges").textContent).toContain("3");
-    expect(screen.getByTestId("revision-loader-status").textContent).toContain("full");
+    expect(screen.getByRole("toolbar")).toBeInTheDocument();
   });
 
   it("commits the revised scene with the edited metadata", async () => {

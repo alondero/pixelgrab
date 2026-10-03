@@ -84,6 +84,72 @@ fn commit_writes_initial_revision_sidecar() {
 }
 
 #[test]
+fn invalid_editable_source_leaves_no_partial_assets_and_next_commit_succeeds() {
+    let (cache, tmp) = fresh_cache();
+    let revision = sample_revision("", "");
+    assert!(cache
+        .commit_editable(test_request(4, 4), vec![0; 3], revision.clone())
+        .is_err());
+    assert!(cache.entries().is_empty());
+    assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
+    let request = test_request(4, 4);
+    let source = request.rgba.clone();
+    cache.commit_editable(request, source, revision).unwrap();
+    assert_eq!(cache.entries().len(), 1);
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn editable_assets_publish_together_recover_and_survive_shelf_dismissal_during_edit() {
+    let (cache, tmp) = fresh_cache();
+    let request = test_request(20, 20);
+    let source = request.rgba.clone();
+    let mut revision = sample_revision("", "");
+    revision.annotations = vec![Annotation::rectangle(
+        AnnotationId(9),
+        PhysicalPoint::new(2, 2),
+        PhysicalSize::new(10, 10),
+        AnnotationColor::Red,
+        AnnotationStroke::Medium,
+        0,
+    )];
+    let mut request = request;
+    request.rgba =
+        pixelgrab_contracts::flatten_annotations(&source, request.size, &revision.annotations);
+    let result = cache
+        .commit_editable(request, source.clone(), revision)
+        .unwrap();
+    let source_path = cache.revision_source(&result.entry.shelf_id).unwrap();
+    let size_before = result.entry.size_bytes;
+    assert_ne!(
+        fs::read(&source_path).unwrap(),
+        fs::read(&result.entry.png_path).unwrap()
+    );
+    cache.load_or_recover().unwrap();
+    assert_eq!(
+        cache.entry(&result.entry.shelf_id).unwrap().size_bytes,
+        size_before
+    );
+    assert_eq!(
+        cache
+            .read_revision(&result.entry.shelf_id)
+            .unwrap()
+            .annotations
+            .len(),
+        1
+    );
+    cache.acquire_editor_lock(&result.entry.shelf_id).unwrap();
+    let dismissed = cache.dismiss(&result.entry.shelf_id).unwrap();
+    assert!(!dismissed.removed);
+    assert!(cache.has_editor_lock(&result.entry.shelf_id));
+    assert!(std::path::Path::new(&source_path).is_file());
+    cache.release_editor_lock(&result.entry.shelf_id);
+    cache.dismiss(&result.entry.shelf_id).unwrap();
+    assert!(!std::path::Path::new(&source_path).exists());
+    fs::remove_dir_all(tmp).ok();
+}
+
+#[test]
 fn revision_round_trip_arrow_preserves_geometry_style_z_order() {
     let (cache, tmp) = fresh_cache();
     let result = cache.commit(test_request(4, 4)).expect("commit");
@@ -508,7 +574,7 @@ fn revision_release_is_idempotent() {
 }
 
 #[test]
-fn dismiss_after_editor_lock_releases_both_locks() {
+fn dismiss_preserves_editor_lock_until_editor_closes() {
     let (cache, tmp) = fresh_cache();
     let result = cache.commit(test_request(4, 4)).expect("commit");
     cache
@@ -516,7 +582,12 @@ fn dismiss_after_editor_lock_releases_both_locks() {
         .expect("acquire");
     cache.dismiss(&result.entry.shelf_id).expect("dismiss");
     let owners = cache.locks().owners_of(&result.entry.shelf_id);
-    assert!(owners.is_empty(), "dismiss should reap all locks");
+    assert_eq!(owners, vec![LockOwner::Editor]);
+    assert!(tmp.join(&result.entry.capture_id).exists());
+    cache.release_editor_lock(&result.entry.shelf_id);
+    cache
+        .dismiss(&result.entry.shelf_id)
+        .expect("reap after close");
     assert!(!tmp.join(&result.entry.capture_id).exists());
     fs::remove_dir_all(&tmp).ok();
 }

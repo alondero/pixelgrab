@@ -11,6 +11,7 @@ target/
 coverage/
 .nyc_output/
 test-results/
+.playwright-cli/
 .vitest-cache/
 
 # Editor / OS

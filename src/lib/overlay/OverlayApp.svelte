@@ -16,7 +16,7 @@
 
   let capture = $state<CaptureResolutionDto | null>(null);
   let selection = $state<PhysicalBounds | null>(null);
-  let lastDiagnosticsId = $state<string | null>(null);
+  let editBeforeSharing = $state(false);
   let commitError = $state<string | null>(null);
   let saveAsError = $state<string | null>(null);
   let lastSaveAsPath = $state<string | null>(null);
@@ -32,7 +32,7 @@
   function loadCapture(next: CaptureResolutionDto | null) {
     if (next?.captureId === capture?.captureId) return;
     capture = next;
-    lastDiagnosticsId = next?.captureId ?? null;
+    editBeforeSharing = false;
     selection = null;
     commitError = null;
     saveAsError = null;
@@ -85,6 +85,15 @@
     selection = next;
     if (!next) {
       commitError = null;
+    }
+  }
+
+  function onSelectionComplete(next: PhysicalBounds, editRequested: boolean) {
+    selection = next;
+    if (editRequested || editBeforeSharing) {
+      editBeforeSharing = true;
+    } else {
+      void onCommit("shelf");
     }
   }
 
@@ -180,26 +189,31 @@
 
 <section class="overlay" data-testid="overlay">
   <header class="header">
-    <span class="pill">Overlay</span>
-    <span class="muted">
-      {capture ? "Capture loaded" : "No capture yet"}
-    </span>
-    {#if lastDiagnosticsId}
-      <span class="diag" data-testid="diagnostics-id">{lastDiagnosticsId}</span>
-    {/if}
+    <span class="muted">Drag to capture · Esc to cancel</span>
+    <button
+      type="button"
+      aria-pressed={editBeforeSharing}
+      onclick={() => (editBeforeSharing = !editBeforeSharing)}
+    >
+      {editBeforeSharing ? "Edit before sharing: on" : "Edit before sharing"}
+    </button>
+    <span class="muted">or hold Ctrl as you release</span>
   </header>
   {#if capture}
     <div class="stage-wrap">
-      <KonvaStage
-        assetUrl={capture.assetUrl}
-        bounds={capture.bounds}
-        {stageWidth}
-        {stageHeight}
-        {onSelectionChange}
-        {onCommit}
-        {onCancel}
-        {onSaveAs}
-      />
+      {#key capture.captureId}
+        <KonvaStage
+          assetUrl={capture.assetUrl}
+          bounds={capture.bounds}
+          {stageWidth}
+          {stageHeight}
+          {onSelectionChange}
+          {onSelectionComplete}
+          {onCommit}
+          {onCancel}
+          {onSaveAs}
+        />
+      {/key}
       <div class="toolbar-slot" data-testid="toolbar-slot">
         <AnnotationToolbar visible={selection !== null} />
       </div>
@@ -269,22 +283,25 @@
     border-radius: 999px;
     background: rgba(20, 20, 28, 0.78);
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-    pointer-events: none;
+    pointer-events: auto;
   }
-  .pill {
+  .header button {
+    color: white;
+    background: #34364a;
+    border: 1px solid #8b90a7;
+    border-radius: 5px;
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+  }
+  .header button[aria-pressed="true"] {
     background: #4f46e5;
-    padding: 0.1rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
+  }
+  .header button:focus-visible {
+    outline: 3px solid #8fc5ff;
   }
   .muted {
     opacity: 0.7;
     font-size: 0.85rem;
-  }
-  .diag {
-    font-family: monospace;
-    opacity: 0.7;
-    font-size: 0.75rem;
   }
   .stage-wrap {
     position: relative;

@@ -36,10 +36,10 @@ PixelGrab's architecture is built around five goals:
                        capture)             second primary)
 ```
 
-A secondary launch is caught by `tauri-plugin-single-instance` and emits an
-intent to the running primary via the existing event bus. The primary then
-brings the overlay to the foreground (or shows the main window for the
-configuration links).
+A secondary launch is caught by `tauri-plugin-single-instance`. Tray, hotkey,
+and secondary-launch capture intents share the native dispatcher in
+`singleton::forward_to_existing_instance`; capture never depends on a hidden
+WebView relaying an event. Settings presentation still uses the UI event bus.
 
 ## Modules
 
@@ -59,37 +59,47 @@ configuration links).
 
 ### TypeScript
 
-| Module                              | Purpose                               |
-| ----------------------------------- | ------------------------------------- |
-| `src/App.svelte`                    | The main window (tray companion).     |
-| `src/lib/overlay/OverlayApp.svelte` | The overlay window.                   |
-| `src/lib/overlay/KonvaStage.svelte` | The frozen-frame Konva stage.         |
-| `src/lib/stores/session.svelte.ts`  | The session state rune store.         |
-| `src/lib/ipc/commands.ts`           | Tauri command wrappers.               |
-| `src/lib/ipc/shell.svelte.ts`       | A Tauri-free mock used by tests.      |
-| `src/lib/ipc/types.ts`              | The IPC payload types (mirrors Rust). |
+| Module                                   | Purpose                                          |
+| ---------------------------------------- | ------------------------------------------------ |
+| `src/App.svelte`                         | Recent screenshots, editor, and settings.        |
+| `src/lib/shelf/controller.svelte.ts`     | Shared recent-capture subscriptions and actions. |
+| `src/lib/revision/RevisionEditor.svelte` | Immutable-source visual revision editor.         |
+| `src/lib/overlay/OverlayApp.svelte`      | The overlay window.                              |
+| `src/lib/overlay/KonvaStage.svelte`      | The frozen-frame Konva stage.                    |
+| `src/lib/stores/session.svelte.ts`       | The session state rune store.                    |
+| `src/lib/ipc/commands.ts`                | Tauri command wrappers.                          |
+| `src/lib/ipc/shell.svelte.ts`            | A Tauri-free mock used by tests.                 |
+| `src/lib/ipc/types.ts`                   | The IPC payload types (mirrors Rust).            |
 
-## Data flow — synthetic capture
+## Capture, sharing, and revision flow
 
-The synthetic end-to-end flow exercised by tracer-01:
-
-1. The user clicks **Capture Region** in the tray.
-2. The tray emits `pixelgrab://request-capture` to the main window.
-3. The frontend calls `requestCapture` (Tauri IPC).
-4. The Rust `request_capture` handler invokes
-   `SessionOrchestrator::run_capture`.
-5. The orchestrator transitions to `Capturing`, calls the platform
-   contract, and writes the resolution to internal state.
-6. The frontend receives the `CaptureResolution` (which includes a
-   `data:` URL for the synthetic PNG).
-7. The frontend forwards the URL to the overlay window.
-8. The overlay renders the freeze frame with Konva.
-9. The user drags a region. The overlay emits a `RequestOverlayIntent`
-   with the physical bounds.
-10. The user presses Enter. The frontend calls `requestCommit`.
-11. The Rust `request_commit` handler writes the flattened PNG to disk
-    and returns a `CommitOutcome`.
-12. The frontend updates the session state to `idle`.
+1. Tray/hotkeys/secondary launch dispatch capture natively. Main-window buttons
+   reach the same owner through IPC.
+2. `capture_native` hides PixelGrab's companion and shelf, freezes pixels, and
+   records the capture. Region capture reveals the preallocated overlay and
+   pushes `capture-ready`; full-screen capture commits the cursor's monitor
+   immediately without opening the overlay.
+3. Konva maps region gestures from WebView coordinates to physical desktop
+   bounds. Release commits by default. Ctrl/Meta or Edit before sharing keeps
+   the crop open for annotation, where Enter/Copy/Done commit explicitly.
+4. The shared flatten pipeline produces the export and clipboard bitmap.
+   `commit_editable` publishes immutable `source.png`, flattened `capture.png`,
+   scene, and metadata before the manifest, then registers the shelf entry.
+5. Native shelf and main gallery subscribe before fetching their startup
+   snapshot. Both show recent images and preserve newer events over delayed
+   startup reads. Placement scales logical card sizes into physical bounds and
+   moves excess visible cards into overflow.
+6. Drag holds a cache guard before reading the exported PNG, pauses the queue
+   timer, and offers file/bitmap formats through the platform. Success retains
+   the Shelf guard so targets can read later and the screenshot can be reused.
+7. Revision open acquires the Editor guard and owns native reveal/event delivery.
+   The visual editor restores crop-local vectors over the immutable source.
+   A revision commit publishes a new entry without changing the original;
+   failure restores a retryable editor session. Missing/unsupported scene or
+   source falls back to the flattened image and an empty vector scene.
+8. Capture terminal paths release the session and hide the overlay. Native
+   companion windows survive close requests; closing an editor cancels its
+   session. See [ADR-0012](adr/0012-quick-capture-and-editable-sources.md).
 
 ## Security
 
@@ -101,14 +111,13 @@ The synthetic end-to-end flow exercised by tracer-01:
 
 ## Testing
 
-| Layer                   | Tool                                    |
-| ----------------------- | --------------------------------------- |
-| Rust unit               | `cargo test`                            |
-| Rust integration        | `cargo test --workspace`                |
-| Frontend unit           | `vitest`                                |
-| Frontend component      | `@testing-library/svelte`               |
-| Golden image            | `cargo test` (with `png` decoder)       |
-| Packaged-app acceptance | `webdriverio` (introduced in tracer-14) |
+| Layer                   | Tool                                          |
+| ----------------------- | --------------------------------------------- |
+| Rust unit/integration   | `cargo test --workspace --features synthetic` |
+| Frontend unit           | `vitest`                                      |
+| Frontend component      | `@testing-library/svelte`                     |
+| Golden image            | `cargo test` (with `png` decoder)             |
+| Packaged-app acceptance | `webdriverio` (introduced in tracer-14)       |
 
 ## Future extensions
 
