@@ -74,7 +74,10 @@ const CF_UNICODETEXT: u16 = 13;
 /// TYMED bits.
 const TYMED_HGLOBAL: u32 = 0x01;
 /// GMEM flags.
-const GMEM_MOVEABLE: UINT = 0x0040;
+/// `GMEM_MOVEABLE` is `0x0002`. `0x0040` is `GMEM_ZEROINIT`, which allocates
+/// fixed memory. This module allocates moveable blocks for its `TYMED_HGLOBAL`
+/// payloads.
+const GMEM_MOVEABLE: UINT = 0x0002;
 
 /// HRESULT sentinels. The hex values above `0x7FFFFFFF` are interpreted
 /// as negative `i32` values when the platform returns them.
@@ -203,11 +206,25 @@ extern "system" {
     fn GlobalLock(h: HGLOBAL) -> *mut c_void;
     fn GlobalUnlock(h: HGLOBAL) -> BOOL;
     fn GlobalFree(h: HGLOBAL) -> HGLOBAL;
+    /// Reports the block flags in the high byte and the lock count in the
+    /// low byte. Used by the drag transport test to prove the payload is
+    /// handed over unlocked.
+    #[cfg(test)]
+    fn GlobalFlags(hmem: HGLOBAL) -> UINT;
 }
 
 #[link(name = "user32")]
 extern "system" {
     fn RegisterClipboardFormatW(lpszformat: LPCWSTR) -> UINT;
+}
+
+#[cfg(test)]
+#[link(name = "shell32")]
+extern "system" {
+    /// Reads a path out of a `DROPFILES` block. `hdrop` is the `HGLOBAL`
+    /// handle itself; `ifile` is either a zero-based index or `0xFFFFFFFF`
+    /// to ask for the number of files.
+    fn DragQueryFileW(hdrop: HGLOBAL, ifile: UINT, lpszfile: *mut u16, cch: UINT) -> UINT;
 }
 
 #[link(name = "ole32")]
@@ -341,8 +358,14 @@ fn encode_hdrop(path: &PathBuf) -> Vec<u8> {
     let mut header = [0u8; 20];
     // DROPFILES.pFiles = 20 (right after the header).
     header[0..4].copy_from_slice(&20u32.to_le_bytes());
-    // DROPFILES.fWide = 1 to signal wide characters.
-    header[12..16].copy_from_slice(&1u32.to_le_bytes());
+    // DROPFILES layout: pFiles (0..4), pt (4..12), fNC (12..16),
+    // fWide (16..20). `pt` is left at (0,0) in client-area coordinates, so
+    // `fNC` (which selects screen-space non-client coordinates when set)
+    // stays zero. `fWide` signals that the list below is UTF-16LE; writing
+    // it at offset 12 set `fNC` instead and left the list advertised as
+    // ANSI, so targets decoded the UTF-16 bytes as single-byte text and saw
+    // a NUL between every path character.
+    header[16..20].copy_from_slice(&1u32.to_le_bytes());
     let mut out = Vec::with_capacity(header.len() + path_bytes.len() + 2);
     out.extend_from_slice(&header);
     out.extend_from_slice(&path_bytes);
@@ -1075,6 +1098,18 @@ pub fn start_drag(request: &DragRequest) -> PlatformResult<DragResult> {
 mod tests {
     use super::*;
 
+    /// Owns a `GlobalAlloc` block so a failed assertion still frees it.
+    struct GlobalBlock(HGLOBAL);
+
+    impl Drop for GlobalBlock {
+        fn drop(&mut self) {
+            // SAFETY: the guard owns the only reference to this allocation.
+            unsafe {
+                let _ = GlobalFree(self.0);
+            }
+        }
+    }
+
     fn sample_request() -> DragRequest {
         DragRequest {
             capture_id: "capture-1".into(),
@@ -1124,9 +1159,75 @@ mod tests {
         // + trailing double-null (2).
         let expected_path_bytes = (path.to_string_lossy().len() + 1) * 2;
         assert_eq!(bytes.len(), 20 + expected_path_bytes + 2);
-        // pFiles = 20, fWide = 1.
+        // pFiles = 20; fNC = 0 because pt is client-space (0,0); fWide = 1.
         assert_eq!(&bytes[0..4], &20u32.to_le_bytes());
-        assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
+        assert_eq!(&bytes[12..16], &0u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
+    }
+
+    /// Encode the payload, hand it to the production `medium_with_hglobal`
+    /// transport, and ask the real `DragQueryFileW` what it sees. This
+    /// exercises the same allocation, copy, unlock, and `STGMEDIUM` tagging
+    /// that every drag uses, plus the Win32 decoder, rather than reproducing
+    /// any of them in the test.
+    #[test]
+    fn drag_query_file_w_reads_the_encoded_path() {
+        let path = PathBuf::from(
+            "C:\\Users\\example\\AppData\\Local\\com.pixelgrab.app\\cache\\capture-café.png",
+        );
+        let bytes = encode_hdrop(&path);
+        // A wide list ends with the path's NUL plus the list terminator.
+        assert!(
+            bytes.ends_with(&[0, 0, 0, 0]),
+            "CF_HDROP must end with a wide double NUL"
+        );
+        let mut medium = STGMEDIUM {
+            tymed: 0,
+            u: STGMEDIUMUnion {
+                hGlobal: std::ptr::null_mut(),
+            },
+            pUnkForRelease: std::ptr::null_mut(),
+        };
+        let hr = medium_with_hglobal(&mut medium, &bytes);
+        assert_eq!(hr, S_OK, "medium_with_hglobal must succeed");
+        assert_eq!(medium.tymed, TYMED_HGLOBAL);
+        assert!(medium.pUnkForRelease.is_null());
+        // SAFETY: `medium_with_hglobal` set `u.hGlobal` on success; a valid
+        // block reports its lock count in the low byte of `GlobalFlags`.
+        assert_eq!(
+            unsafe { GlobalFlags(medium.u.hGlobal) } & 0xFF,
+            0,
+            "medium_with_hglobal must return an unlocked block"
+        );
+        // SAFETY: `medium_with_hglobal` set `u.hGlobal` on success, and the
+        // guard becomes the sole owner so assertion failures still free it.
+        let block = GlobalBlock(unsafe { medium.u.hGlobal });
+        assert!(!block.0.is_null(), "medium_with_hglobal set no handle");
+        // SAFETY: `block.0` is a live global block owned by the guard.
+        let ptr = unsafe { GlobalLock(block.0) };
+        assert!(!ptr.is_null(), "GlobalLock failed");
+        // A moveable block returns a data pointer distinct from its handle;
+        // fixed memory returns the handle itself. This guards the GMEM flag
+        // used by the production allocation path.
+        assert_ne!(
+            ptr, block.0,
+            "medium_with_hglobal must allocate a moveable block"
+        );
+        // SAFETY: the lock above was acquired for this handle.
+        unsafe {
+            let _ = GlobalUnlock(block.0);
+        }
+        // SAFETY: `block.0` is a valid DROPFILES block; a null buffer with
+        // `cch` 0 asks `DragQueryFileW` for the file count.
+        let count = unsafe { DragQueryFileW(block.0, 0xFFFF_FFFF, std::ptr::null_mut(), 0) };
+        assert_eq!(count, 1, "CF_HDROP must list exactly one file");
+        let expected: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+        let mut buffer = vec![0u16; expected.len() + 1];
+        // SAFETY: `buffer` is writable for `buffer.len()` UTF-16 units.
+        let written =
+            unsafe { DragQueryFileW(block.0, 0, buffer.as_mut_ptr(), buffer.len() as UINT) };
+        assert_eq!(written as usize, expected.len());
+        assert_eq!(&buffer[..written as usize], expected.as_slice());
     }
 
     #[test]
