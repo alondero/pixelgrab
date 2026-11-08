@@ -75,8 +75,8 @@ const CF_UNICODETEXT: u16 = 13;
 const TYMED_HGLOBAL: u32 = 0x01;
 /// GMEM flags.
 /// `GMEM_MOVEABLE` is `0x0002`. `0x0040` is `GMEM_ZEROINIT`, which allocates
-/// fixed memory; the drag pipeline needs a movable block so the STGMEDIUM
-/// handle semantics match what OLE consumers expect.
+/// fixed memory. This module allocates moveable blocks for its `TYMED_HGLOBAL`
+/// payloads.
 const GMEM_MOVEABLE: UINT = 0x0002;
 
 /// HRESULT sentinels. The hex values above `0x7FFFFFFF` are interpreted
@@ -1160,9 +1160,11 @@ mod tests {
         assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
     }
 
-    /// Copy the encoded payload into a moveable global block and ask the real
-    /// `DragQueryFileW` what it sees. This exercises the Win32 decoder instead
-    /// of re-implementing the `DROPFILES` header in the test.
+    /// Encode the payload, hand it to the production `medium_with_hglobal`
+    /// transport, and ask the real `DragQueryFileW` what it sees. This
+    /// exercises the same allocation, copy, unlock, and `STGMEDIUM` tagging
+    /// that every drag uses, plus the Win32 decoder, rather than reproducing
+    /// any of them in the test.
     #[test]
     fn drag_query_file_w_reads_the_encoded_path() {
         let path = PathBuf::from(
@@ -1174,25 +1176,33 @@ mod tests {
             bytes.ends_with(&[0, 0, 0, 0]),
             "CF_HDROP must end with a wide double NUL"
         );
-        // SAFETY: `GlobalAlloc` is Win32 FFI; the byte count matches the
-        // source slice and the returned handle is owned by `GlobalBlock`,
-        // which frees it on every path including assertion failures.
-        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
-        assert!(!handle.is_null(), "GlobalAlloc failed");
-        let block = GlobalBlock(handle);
-        // SAFETY: `block.0` was just allocated above and is not null.
+        let mut medium = STGMEDIUM {
+            tymed: 0,
+            u: STGMEDIUMUnion {
+                hGlobal: std::ptr::null_mut(),
+            },
+            pUnkForRelease: std::ptr::null_mut(),
+        };
+        let hr = medium_with_hglobal(&mut medium, &bytes);
+        assert_eq!(hr, S_OK, "medium_with_hglobal must succeed");
+        assert_eq!(medium.tymed, TYMED_HGLOBAL);
+        assert!(medium.pUnkForRelease.is_null());
+        // SAFETY: `medium_with_hglobal` set `u.hGlobal` on success, and the
+        // guard becomes the sole owner so assertion failures still free it.
+        let block = GlobalBlock(unsafe { medium.u.hGlobal });
+        assert!(!block.0.is_null(), "medium_with_hglobal set no handle");
+        // SAFETY: `block.0` is a live global block owned by the guard.
         let ptr = unsafe { GlobalLock(block.0) };
         assert!(!ptr.is_null(), "GlobalLock failed");
         // A moveable block returns a data pointer distinct from its handle;
-        // fixed memory returns the handle itself. This guards the GMEM flag.
+        // fixed memory returns the handle itself. This guards the GMEM flag
+        // used by the production allocation path.
         assert_ne!(
             ptr, block.0,
-            "GlobalAlloc(GMEM_MOVEABLE) must return a moveable block"
+            "medium_with_hglobal must allocate a moveable block"
         );
-        // SAFETY: the locked region is `bytes.len()` bytes and the source
-        // and destination do not overlap.
+        // SAFETY: the lock above was acquired for this handle.
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len());
             let _ = GlobalUnlock(block.0);
         }
         // SAFETY: `block.0` is a valid DROPFILES block; a null buffer with
