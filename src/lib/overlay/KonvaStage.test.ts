@@ -116,7 +116,7 @@ vi.mock("konva", () => {
   };
 });
 
-import { render } from "@testing-library/svelte";
+import { render, screen, fireEvent } from "@testing-library/svelte";
 import KonvaStage from "./KonvaStage.svelte";
 import { annotationStore } from "$lib/annotation/store.svelte";
 
@@ -124,6 +124,31 @@ describe("KonvaStage", () => {
   beforeEach(() => {
     stageEvents.clear();
     annotationStore.reset();
+  });
+  it("offers a way out when the frozen image cannot load", async () => {
+    const images: { onload?: () => void; onerror?: () => void; src?: string }[] = [];
+    vi.stubGlobal(
+      "Image",
+      class {
+        constructor() {
+          images.push(this);
+        }
+      },
+    );
+    const onCancel = vi.fn();
+    render(KonvaStage, {
+      assetUrl: "data:image/png;base64,broken",
+      bounds: { origin: { x: 0, y: 0 }, size: { width: 100, height: 100 } },
+      stageWidth: 100,
+      stageHeight: 100,
+      onSelectionChange: vi.fn(),
+      onCancel,
+    });
+    images[0].onerror?.();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the screenshot");
+    await fireEvent.click(screen.getByRole("button", { name: "Close screenshot" }));
+    expect(onCancel).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
   });
   it("renders the stage container", () => {
     const { container } = render(KonvaStage, {

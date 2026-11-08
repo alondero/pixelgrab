@@ -169,12 +169,9 @@ impl CaptureEngine {
     pub fn invalidate_layout(&self) {
         let mut state = self.inner.lock();
         state.topology_dirty = true;
-        // The frozen frame was captured against the previous topology; it
-        // is no longer trustworthy. The session must observe this on
-        // commit (the `flatten_crop` path rejects the stale id) so we
-        // also drop the cached frame. The orchestrator will be notified
-        // through the next `monitor_layout()` call instead.
-        state.frozen = None;
+        // Frozen pixels own their original bounds. A layout poll (even a
+        // real display change) cannot invalidate those immutable pixels.
+        // Only session completion/cancellation releases the capture.
     }
 
     /// Returns `true` when the cached layout has been invalidated since
@@ -862,6 +859,36 @@ mod tests {
         let engine = CaptureEngine::new();
         assert!(engine.frozen().is_none());
         assert!(engine.take_frozen().is_err());
+    }
+
+    #[test]
+    fn display_poll_and_repeated_exports_preserve_frozen_pixels() {
+        use crate::platform::{windows::WindowsPlatform, PixelGrabPlatform};
+        let platform = WindowsPlatform::new();
+        let engine = platform.engine();
+        let bounds = PhysicalBounds::from_xywh(-8, 0, 8, 8);
+        let rgba = filled_frame(8, 8);
+        engine.inner.lock().frozen = Some(FrozenFrame {
+            capture_id: "fixture".into(),
+            bounds,
+            rgba: Arc::new(rgba.clone()),
+            captured_at_ms: 0,
+        });
+        // The display watcher invalidates on every poll, including unchanged layouts.
+        platform.invalidate_layout();
+        for _ in 0..3 {
+            let (pixels, size) = platform
+                .flatten_crop("fixture", bounds)
+                .expect("frame survives poll and Save As");
+            assert_eq!(pixels, rgba);
+            assert_eq!(size, bounds.size);
+        }
+        let session = crate::SessionOrchestrator::new(Arc::new(platform));
+        session.reset();
+        assert!(
+            engine.frozen().is_none(),
+            "terminal cleanup releases pixels"
+        );
     }
 
     #[test]

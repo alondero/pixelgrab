@@ -60,6 +60,7 @@
   }: Props = $props();
 
   let container: HTMLDivElement;
+  let imageState = $state<"loading" | "ready" | "error">("loading");
   let stage: Konva.Stage | null = null;
   let imageNode: Konva.Image | null = null;
   // Crop selection (tracer-02).
@@ -1178,6 +1179,7 @@
 
     const img = new Image();
     img.onload = () => {
+      imageState = "ready";
       imageNode = new Konva.Image({
         image: img,
         x: 0,
@@ -1188,7 +1190,14 @@
       imageLayer.add(imageNode);
       imageLayer.draw();
     };
-    img.src = resolveAssetUrl(assetUrl);
+    img.onerror = () => {
+      imageState = "error";
+    };
+    try {
+      img.src = resolveAssetUrl(assetUrl);
+    } catch {
+      imageState = "error";
+    }
 
     const dimAttrs = {
       fill: "rgba(0, 0, 0, 0.55)",
@@ -1477,6 +1486,8 @@
 
     window.addEventListener("keydown", handleKeyDown);
     return () => {
+      img.onload = null;
+      img.onerror = null;
       window.removeEventListener("keydown", handleKeyDown);
       stage?.destroy();
     };
@@ -1516,6 +1527,7 @@
   class="stage-container"
   bind:this={container}
   data-testid="konva-stage"
+  data-image-state={imageState}
   data-has-selection={lastSelection ? "true" : "false"}
   data-active-tool={annotationStore.tool}
   data-draft={annotationStore.draft ? "true" : "false"}
@@ -1523,6 +1535,17 @@
   style:width="{stageWidth}px"
   style:height="{stageHeight}px"
 ></div>
+
+{#if imageState !== "ready"}
+  <div class="image-status">
+    {#if imageState === "error"}
+      <p role="alert">Could not load the screenshot. Close it and try capturing again.</p>
+      <button type="button" onclick={() => onCancel?.()}>Close screenshot</button>
+    {:else}
+      <p role="status">Loading screenshot…</p>
+    {/if}
+  </div>
+{/if}
 
 {#if textEditing && annotationStore.draft && annotationStore.draft.geometry.kind === "text" && cropCssRect()}
   {@const crop = cropCssRect()!}
@@ -1565,6 +1588,30 @@
 {/if}
 
 <style>
+  .image-status {
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #202431;
+    color: white;
+    padding: 24px;
+    text-align: center;
+  }
+  .image-status button {
+    font: inherit;
+    padding: 10px 16px;
+    border-radius: 6px;
+    border: 1px solid #8fc5ff;
+    cursor: pointer;
+  }
+  .image-status button:focus-visible {
+    outline: 3px solid #8fc5ff;
+    outline-offset: 3px;
+  }
   .stage-container {
     position: relative;
     width: 100%;

@@ -56,6 +56,19 @@ false` and never deletes a capture after a successful drop. The Shelf guard
 
 ## Consequences
 
+The capture session owns the frozen source until it returns to Idle or resets.
+Display-layout refresh only invalidates monitor metadata; it must not release
+pixels. The frozen frame retains its own physical bounds even if the desktop
+layout changes. `flatten_crop` is a repeatable read, including when Save As is
+cancelled. `PixelGrabPlatform::release_capture` releases the source on terminal
+session paths. Native acceptance in November 2026 found that the previous
+implementation cleared the frame on every three-second display poll and every
+Save As, causing delayed selection/annotation to fail on commit.
+
+Revision Save As reads the same immutable source as revision commit. It neither
+publishes a new shelf entry nor closes the editor. Save dialogs belong to their
+calling native window so the always-on-top overlay cannot cover them.
+
 - A simple capture reaches sharing without a second confirmation. Editing is
   available before or after delivery.
 - Shared screenshots remain available for reuse. Retained cards hold Shelf

@@ -234,6 +234,7 @@ fn text_and_blur_annotations_round_trip_via_json() {
 fn save_capture_as_request_round_trips() {
     use pixelgrab_contracts::ipc::SaveCaptureAsRequest;
     let req = SaveCaptureAsRequest {
+        source_shelf_id: Some("editor-source".into()),
         crop: PhysicalBounds::from_xywh(0, 0, 200, 100),
         annotations: vec![],
         suggested_filename: "capture.png".to_string(),
@@ -243,6 +244,7 @@ fn save_capture_as_request_round_trips() {
     assert!(json.contains("\"suggestedFilename\":\"capture.png\""));
     let parsed: SaveCaptureAsRequest = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(parsed.suggested_filename, "capture.png");
+    assert_eq!(parsed.source_shelf_id.as_deref(), Some("editor-source"));
     assert_eq!(parsed.crop.size, PhysicalSize::new(200, 100));
 }
 

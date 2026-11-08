@@ -119,6 +119,7 @@
   <div class="queue" data-testid="shelf-queue">
     {#each snapshot.cards as card (card.shelfId)}
       <ShelfCard
+        compact
         {card}
         nowMs={clock.nowMs}
         {showCountdown}
@@ -152,6 +153,7 @@
           >
             {#each snapshot.overflow as card (card.shelfId)}
               <ShelfCard
+                compact
                 {card}
                 nowMs={clock.nowMs}
                 {showCountdown}

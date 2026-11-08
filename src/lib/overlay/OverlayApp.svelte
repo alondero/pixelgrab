@@ -98,7 +98,7 @@
   }
 
   async function onCommit(target: CommitTarget = "shelf") {
-    if (!selection || committing) return;
+    if (!selection || committing || annotationStore.draft) return;
     committing = true;
     commitError = null;
     // Tracer 04: ship the editor's annotations alongside the crop so
@@ -132,12 +132,15 @@
       // starts with no annotations, no badge counter, and no history.
       selection = null;
       annotationStore.reset();
+    } catch {
+      commitError = "Could not finish the screenshot. Try again or press Esc to close.";
     } finally {
       committing = false;
     }
   }
 
   async function onCancel() {
+    if (committing) return;
     const result = await requestCancel();
     if (result.status === "ok") {
       if (result.data.action === "selection_cleared") {
@@ -156,7 +159,8 @@
   /// PNG. Cancel returns Ok(None); a write failure is surfaced as a
   /// categorical kind string.
   async function onSaveAs() {
-    if (!selection) return;
+    if (!selection || committing || annotationStore.draft) return;
+    committing = true;
     saveAsError = null;
     const annotations = annotationStore.annotations.map((a) => ({
       id: a.id,
@@ -167,38 +171,55 @@
       ...(a.number !== undefined ? { number: a.number } : {}),
     }));
     const suggested = `pixelgrab-${capture?.captureId?.slice(0, 8) ?? "capture"}.png`;
-    const result = await saveCaptureAs({
-      crop: selection,
-      annotations,
-      suggestedFilename: suggested,
-    });
-    if (result.status === "err") {
-      saveAsError = result.error.message;
-      lastSaveAsPath = null;
-      return;
-    }
-    if (result.data.path) {
-      lastSaveAsPath = result.data.path;
-      saveAsError = null;
-    } else {
-      // User cancelled — session is unchanged.
-      lastSaveAsPath = null;
+    try {
+      const result = await saveCaptureAs({
+        crop: selection,
+        annotations,
+        suggestedFilename: suggested,
+      });
+      if (result.status === "err") {
+        saveAsError = result.error.message;
+        lastSaveAsPath = null;
+        return;
+      }
+      if (result.data.path) {
+        lastSaveAsPath = result.data.path;
+        saveAsError = null;
+      } else {
+        // User cancelled — session is unchanged.
+        lastSaveAsPath = null;
+      }
+    } catch {
+      saveAsError = "Could not save the screenshot. Please try again.";
+    } finally {
+      committing = false;
     }
   }
 </script>
 
-<section class="overlay" data-testid="overlay">
-  <header class="header">
-    <span class="muted">Drag to capture · Esc to cancel</span>
-    <button
-      type="button"
-      aria-pressed={editBeforeSharing}
-      onclick={() => (editBeforeSharing = !editBeforeSharing)}
-    >
-      {editBeforeSharing ? "Edit before sharing: on" : "Edit before sharing"}
-    </button>
-    <span class="muted">or hold Ctrl as you release</span>
-  </header>
+<svelte:window
+  onkeydown={(event) => {
+    if (!capture && event.key === "Escape") {
+      event.preventDefault();
+      void onCancel();
+    }
+  }}
+/>
+
+<section class="overlay" data-testid="overlay" data-capture-id={capture?.captureId}>
+  {#if !selection}
+    <header class="header">
+      <span class="muted">Drag to capture · Esc to cancel</span>
+      <button
+        type="button"
+        aria-pressed={editBeforeSharing}
+        onclick={() => (editBeforeSharing = !editBeforeSharing)}
+      >
+        {editBeforeSharing ? "Edit before sharing: on" : "Edit before sharing"}
+      </button>
+      <span class="muted">or hold Ctrl as you release</span>
+    </header>
+  {/if}
   {#if capture}
     <div class="stage-wrap">
       {#key capture.captureId}
@@ -219,7 +240,7 @@
       </div>
     </div>
   {:else}
-    <div class="placeholder">No capture</div>
+    <div class="placeholder" role="status">Preparing screenshot? Press Esc to cancel.</div>
   {/if}
   {#if selection}
     <footer class="footer" data-testid="selection">
@@ -304,7 +325,6 @@
     font-size: 0.85rem;
   }
   .stage-wrap {
-    position: relative;
     position: absolute;
     inset: 0;
     overflow: hidden;
@@ -312,6 +332,8 @@
   .toolbar-slot {
     position: absolute;
     bottom: 1rem;
+    max-width: calc(100vw - 2rem);
+    width: max-content;
     left: 50%;
     transform: translateX(-50%);
     pointer-events: auto;
@@ -328,6 +350,8 @@
     z-index: 20;
     right: 0.75rem;
     top: 0.75rem;
+    max-width: calc(100vw - 3.5rem);
+    flex-wrap: wrap;
     padding: 0.5rem 1rem;
     border-radius: 6px;
     background: rgba(20, 20, 28, 0.78);

@@ -112,6 +112,10 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
     /// Run a capture pipeline and return a `CaptureResolution`.
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution>;
 
+    /// Release immutable source pixels at the end of a capture session.
+    /// Layout refresh and non-terminal exports must preserve them.
+    fn release_capture(&self) {}
+
     /// Write the flattened PNG bytes for the given selection. Returns the
     /// absolute path the PNG was written to.
     fn write_png(

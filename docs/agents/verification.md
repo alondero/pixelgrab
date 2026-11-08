@@ -37,6 +37,24 @@ ESLint. If a required tool or environment is unavailable, report that limitation
 
 ## Native acceptance is a separate claim
 
+The opt-in production Windows harness is now available as:
+
+```powershell
+pnpm test:native <absolute-path-to-pixelgrab.exe> --real-desktop
+```
+
+Exit the resident app first. This command uses the real Windows backend, an
+isolated profile under `fixtures/local`, a temporary desktop color fixture,
+native Save As dialogs, the Windows clipboard, and a separate OLE drop receiver.
+It briefly covers the desktop during capture and moves the pointer for drag.
+Do not run it in CI or while someone is using the desktop. Fixture windows have
+an automatic timeout and owned processes are closed on test failure. Pixel
+artifacts stay local. Playwright connects to WebView2's local debugging port;
+no browser download, mocked IPC, or synthetic production adapter is involved.
+
+This harness complements synthetic CI; it does not establish compatibility
+with every agent app, multi-monitor layout, or screen reader.
+
 At this audit, `tests/e2e/` is scaffolding: WebDriver dependencies and a runnable
 package command are absent, CI does not execute those specs, and the full-desktop
 cases contain placeholder assertions. Setting `PIXELGRAB_E2E_FULL=1` does not

@@ -111,7 +111,15 @@ impl SessionOrchestrator {
             to: SessionState::Capturing,
             reason: SessionTransitionReason::CaptureRequested,
         })?;
-        let capture = self.platform.capture(request)?;
+        let capture = match self.platform.capture(request) {
+            Ok(capture) => capture,
+            Err(error) => {
+                // A platform failure must not strand all future hotkeys in
+                // Capturing. Discard the failed attempt before returning it.
+                self.reset();
+                return Err(error);
+            }
+        };
         {
             let mut inner = self.inner.lock();
             inner.last_capture = Some(capture.clone());
@@ -201,6 +209,7 @@ impl SessionOrchestrator {
     /// available to the commit pipeline.
     pub fn reset(&self) {
         let mut inner = self.inner.lock();
+        self.platform.release_capture();
         inner.state = SessionState::Idle;
         inner.selection = None;
         inner.last_capture = None;
@@ -394,6 +403,9 @@ impl SessionOrchestrator {
             transition.to,
             transition.reason
         );
+        if transition.to == SessionState::Idle {
+            self.platform.release_capture();
+        }
         inner.state = transition.to;
         Ok(())
     }

@@ -16,6 +16,7 @@
     card,
     nowMs,
     showCountdown = true,
+    compact = false,
     onCopy = () => {},
     onSaveAs = () => {},
     onDismiss = () => {},
@@ -28,6 +29,7 @@
     card: ShelfQueueCard;
     nowMs: number;
     showCountdown?: boolean;
+    compact?: boolean;
     onCopy?: (shelfId: string) => void;
     onSaveAs?: (shelfId: string) => void;
     onDismiss?: (shelfId: string) => void;
@@ -154,6 +156,7 @@
   class:paused
   class:expired
   data-testid="shelf-card"
+  class:compact
   data-shelf-id={card.shelfId}
   aria-label="Shelf card: {titleText}"
   role="region"
@@ -291,6 +294,30 @@
   }
   .drag-surface:active {
     cursor: grabbing;
+  }
+  .compact .drag-surface {
+    position: relative;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "thumbnail";
+  }
+  .compact .meta {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 6px 8px;
+    border-radius: 0 0 4px 4px;
+    background: rgba(15, 18, 25, 0.88);
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .compact:hover .meta,
+  .compact:focus-within .meta {
+    opacity: 1;
+  }
+  .compact .title,
+  .compact .size {
+    display: none;
   }
   .card.paused {
     border-color: rgba(78, 161, 255, 0.6);

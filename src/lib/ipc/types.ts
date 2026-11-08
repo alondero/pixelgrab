@@ -365,6 +365,7 @@ export interface Annotation {
 export type AnnotationTool = "select" | "arrow" | "rectangle" | "numbered_badge" | "text" | "blur";
 
 export interface SaveCaptureAsRequest {
+  sourceShelfId?: string;
   crop: PhysicalBounds;
   annotations: Annotation[];
   suggestedFilename: string;

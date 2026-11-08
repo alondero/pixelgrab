@@ -656,6 +656,9 @@ pub struct ClearCacheResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveCaptureAsRequest {
+    /// Active revision source, when saving from the screenshot editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_shelf_id: Option<String>,
     /// Final physical crop.
     pub crop: PhysicalBounds,
     /// Annotations to flatten onto the frozen crop before encoding.

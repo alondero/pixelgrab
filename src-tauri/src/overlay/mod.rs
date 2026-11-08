@@ -130,6 +130,7 @@ fn show_positioned<R: Runtime>(
         )
     })?;
     window.show().map_err(overlay_err)?;
+    window.set_focus().map_err(overlay_err)?;
     // The overlay window is already on screen — a state-machine
     // rejection here would mean an in-flight cancel raced the
     // transition, which is observable in logs but not fatal. The

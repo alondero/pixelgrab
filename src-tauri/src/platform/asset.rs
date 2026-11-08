@@ -96,6 +96,7 @@ fn base64_encode(input: &[u8]) -> String {
         2 => {
             let b = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
             out.push(ALPHABET[((b >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHABET[((b >> 12) & 0x3F) as usize] as char);
             out.push(ALPHABET[((b >> 6) & 0x3F) as usize] as char);
             out.push('=');
         }
@@ -128,6 +129,46 @@ mod tests {
     fn without_cache_root_falls_back_to_data_url() {
         let url = write_capture_asset(None, "cap-2", &tiny_png()).expect("write");
         assert!(url.starts_with("data:image/png;base64,"));
+    }
+
+    /// Production Windows currently reaches the data-URL fallback for every
+    /// capture, so a malformed encoding surfaces as `ERR_INVALID_URL` and the
+    /// overlay's "Could not load the screenshot". Pin the RFC 4648 reference
+    /// vectors, which cover every remainder case (0, 1 and 2 leftover bytes).
+    #[test]
+    fn data_url_fallback_matches_rfc4648_vectors() {
+        let cases: [(&[u8], &str); 7] = [
+            (b"", ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ];
+        for (input, expected) in cases {
+            let url = write_capture_asset(None, "cap-b64", input).expect("write");
+            assert_eq!(
+                url,
+                format!("data:image/png;base64,{expected}"),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_url_fallback_is_always_well_formed_base64() {
+        for len in 0..=40usize {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            let url = write_capture_asset(None, "cap-len", &bytes).expect("write");
+            let body = url.strip_prefix("data:image/png;base64,").expect("prefix");
+            assert_eq!(
+                body.len() % 4,
+                0,
+                "length {len} must pad to a multiple of 4"
+            );
+            assert_eq!(body.len(), len.div_ceil(3) * 4, "length {len}");
+        }
     }
 
     #[test]

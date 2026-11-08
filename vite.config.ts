@@ -48,6 +48,9 @@ export default defineConfig(async () => ({
     conditions: ["browser"],
   },
   test: {
+    // Each Svelte/jsdom worker is substantial. Bound concurrency so cold
+    // entrypoint imports do not time out while native builds are running.
+    maxWorkers: 2,
     environment: "jsdom",
     globals: true,
     include: ["src/**/*.{test,spec}.ts", "src/**/*.{test,spec}.svelte"],
