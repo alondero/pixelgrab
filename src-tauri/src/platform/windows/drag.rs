@@ -341,8 +341,13 @@ fn encode_hdrop(path: &PathBuf) -> Vec<u8> {
     let mut header = [0u8; 20];
     // DROPFILES.pFiles = 20 (right after the header).
     header[0..4].copy_from_slice(&20u32.to_le_bytes());
-    // DROPFILES.fWide = 1 to signal wide characters.
-    header[12..16].copy_from_slice(&1u32.to_le_bytes());
+    // DROPFILES layout: pFiles (0..4), pt (4..12), fNC (12..16),
+    // fWide (16..20). `fNC` stays zero because this is a real file drop,
+    // not an Explorer cut/copy of 8.3 names. `fWide` signals that the list
+    // below is UTF-16LE; writing it at offset 12 set `fNC` instead and left
+    // the list advertised as ANSI, so targets decoded the UTF-16 bytes as
+    // single-byte text and saw a NUL between every path character.
+    header[16..20].copy_from_slice(&1u32.to_le_bytes());
     let mut out = Vec::with_capacity(header.len() + path_bytes.len() + 2);
     out.extend_from_slice(&header);
     out.extend_from_slice(&path_bytes);
@@ -1116,6 +1121,31 @@ mod tests {
         );
     }
 
+    /// Mirror `DragQueryFileW`: read the `DROPFILES` header and decode the
+    /// list at `pFiles` according to the `fWide` flag. A target sees a single
+    /// string for the first (only) file.
+    fn decode_hdrop_first_path(bytes: &[u8]) -> String {
+        assert!(bytes.len() >= 20, "DROPFILES header is truncated");
+        let p_files = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let f_wide = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) != 0;
+        let list = &bytes[p_files..];
+        if f_wide {
+            let units: Vec<u16> = list
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .take_while(|unit| *unit != 0)
+                .collect();
+            String::from_utf16(&units).expect("wide file list is valid UTF-16")
+        } else {
+            // ANSI list: single-byte characters up to the first null.
+            let end = list
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(list.len());
+            list[..end].iter().map(|byte| *byte as char).collect()
+        }
+    }
+
     #[test]
     fn encode_hdrop_writes_pfiles_offset() {
         let path = PathBuf::from("C:\\cache\\cap.png");
@@ -1124,9 +1154,31 @@ mod tests {
         // + trailing double-null (2).
         let expected_path_bytes = (path.to_string_lossy().len() + 1) * 2;
         assert_eq!(bytes.len(), 20 + expected_path_bytes + 2);
-        // pFiles = 20, fWide = 1.
+        // pFiles = 20, fNC = 0, fWide = 1.
         assert_eq!(&bytes[0..4], &20u32.to_le_bytes());
-        assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
+        assert_eq!(&bytes[12..16], &0u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn hdrop_payload_decodes_to_the_original_wide_path() {
+        let path = PathBuf::from(
+            "C:\\Users\\example\\AppData\\Local\\com.pixelgrab.app\\cache\\capture.png",
+        );
+        let bytes = encode_hdrop(&path);
+        // A target that honors the advertised fWide flag must recover the
+        // exact path. Before the fix fWide sat at offset 12 (which is fNC),
+        // so targets decoded the UTF-16LE bytes as single-byte text and saw
+        // a NUL between every character.
+        assert_eq!(
+            decode_hdrop_first_path(&bytes),
+            path.to_string_lossy(),
+            "CF_HDROP must advertise a wide file list"
+        );
+        assert!(
+            !decode_hdrop_first_path(&bytes).contains('\0'),
+            "decoded path must not interleave NULs"
+        );
     }
 
     #[test]
