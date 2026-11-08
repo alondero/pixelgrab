@@ -90,6 +90,9 @@ describe("RevisionEditor", () => {
         expect.objectContaining({ sourceShelfId: "shelf-1", annotations: [] }),
       ),
     );
+    // Revision saves export the whole source; a crop would be rejected by the backend.
+    const [request] = vi.mocked(saveCaptureAs).mock.calls[0];
+    expect(request).not.toHaveProperty("crop");
     expect(await screen.findByRole("status")).toHaveTextContent("Screenshot saved");
     expect(commitRevision).not.toHaveBeenCalled();
     expect(onClosed).not.toHaveBeenCalled();

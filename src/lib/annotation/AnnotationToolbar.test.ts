@@ -23,6 +23,24 @@ describe("AnnotationToolbar", () => {
     expect(getByTestId("tool-numbered_badge")).toBeInTheDocument();
   });
 
+  it("shows each tool's single-key shortcut on its button", () => {
+    // Review finding: the shortcut hint slot once rendered the tool label
+    // ("Arrow") instead of the key ("A"), hiding the shortcut from users.
+    const { getByTestId } = render(AnnotationToolbar, { visible: true });
+    const expected: Array<[string, string]> = [
+      ["tool-select", "V"],
+      ["tool-arrow", "A"],
+      ["tool-rectangle", "R"],
+      ["tool-numbered_badge", "N"],
+      ["tool-text", "T"],
+      ["tool-blur", "B"],
+    ];
+    for (const [testId, key] of expected) {
+      const hint = getByTestId(testId).querySelector(".kbd");
+      expect(hint?.textContent?.trim(), testId).toBe(key);
+    }
+  });
+
   it("reflects the active tool via aria-pressed", () => {
     annotationStore.setTool("arrow");
     const { getByTestId } = render(AnnotationToolbar, { visible: true });

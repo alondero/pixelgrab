@@ -112,6 +112,14 @@ pub trait PixelGrabPlatform: std::fmt::Debug + Send + Sync + std::any::Any {
     /// Run a capture pipeline and return a `CaptureResolution`.
     fn capture(&self, request: &CaptureRequest) -> PlatformResult<CaptureResolution>;
 
+    /// Tell the platform where the cache lives so each capture's freeze
+    /// frame is written as a local file under `<root>/frames` (issue #63)
+    /// rather than an inline base64 data URL. Called once at startup,
+    /// before the first capture. Required: a platform without a frame
+    /// transport must say so explicitly, so the fallback cannot be reached
+    /// silently.
+    fn set_cache_root(&self, root: std::path::PathBuf);
+
     /// Release immutable source pixels at the end of a capture session.
     /// Layout refresh and non-terminal exports must preserve them.
     fn release_capture(&self) {}

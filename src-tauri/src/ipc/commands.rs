@@ -15,7 +15,7 @@ use pixelgrab_contracts::{
         CommitRevisionIntent, CommitRevisionResult, DismissCacheEntryRequest,
         DismissCacheEntryResponse, HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse,
         OpenRevisionIntent, OpenRevisionResult, RequestCaptureIntent, RequestCommitIntent,
-        SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot,
+        SaveAsSource, SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot,
         StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
         UpdateCachePolicyRequest, UpdateRevisionIntent, UpdateRevisionResult,
         UpdateShelfPreferencesRequest,
@@ -1078,24 +1078,24 @@ pub async fn save_capture_as(
     window: tauri::WebviewWindow,
 ) -> Result<IpcResponse<SaveCaptureAsResponse>, PlatformError> {
     use tauri_plugin_dialog::DialogExt;
-    // 1. Validate crop + look up the active capture.
-    payload.crop.validate().map_err(|_| {
-        PlatformError::new(PlatformErrorKind::InvalidPayload, "empty save-as bounds")
-    })?;
-    let (rgba, size) = if let Some(shelf_id) = &payload.source_shelf_id {
-        revision_source_pixels(&app, shelf_id)?
-    } else {
-        let capture_id = app
-            .session()
-            .last_capture()
-            .map(|c| c.capture_id)
-            .ok_or_else(|| {
-                PlatformError::new(
-                    PlatformErrorKind::InvalidSessionState,
-                    "no active capture to save",
-                )
-            })?;
-        app.platform().flatten_crop(&capture_id, payload.crop)?
+    // 1. Resolve the source. The contract rejects a crop sent with a
+    //    revision (it would be silently ignored) and a session save
+    //    without a usable crop.
+    let (rgba, size) = match payload.source()? {
+        SaveAsSource::Revision { shelf_id } => revision_source_pixels(&app, &shelf_id)?,
+        SaveAsSource::Session { crop } => {
+            let capture_id = app
+                .session()
+                .last_capture()
+                .map(|c| c.capture_id)
+                .ok_or_else(|| {
+                    PlatformError::new(
+                        PlatformErrorKind::InvalidSessionState,
+                        "no active capture to save",
+                    )
+                })?;
+            app.platform().flatten_crop(&capture_id, crop)?
+        }
     };
     let flat = pixelgrab_contracts::flatten_annotations(&rgba, size, &payload.annotations);
     // 3. Encode the flattened RGBA as PNG. The encoder is the same

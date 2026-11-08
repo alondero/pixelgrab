@@ -365,8 +365,10 @@ export interface Annotation {
 export type AnnotationTool = "select" | "arrow" | "rectangle" | "numbered_badge" | "text" | "blur";
 
 export interface SaveCaptureAsRequest {
+  /** Set for a revision save; the backend then exports the whole source and rejects a crop. */
   sourceShelfId?: string;
-  crop: PhysicalBounds;
+  /** Required for a capture-session save; must be omitted for a revision save. */
+  crop?: PhysicalBounds;
   annotations: Annotation[];
   suggestedFilename: string;
 }

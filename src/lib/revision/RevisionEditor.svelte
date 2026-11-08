@@ -121,7 +121,6 @@
     try {
       const result = await saveCaptureAs({
         sourceShelfId: scene.shelfId,
-        crop: bounds,
         annotations: $state.snapshot(annotationStore.annotations),
         suggestedFilename: `pixelgrab-${scene.captureId.slice(0, 8)}.png`,
       });

@@ -233,19 +233,35 @@ fn text_and_blur_annotations_round_trip_via_json() {
 #[test]
 fn save_capture_as_request_round_trips() {
     use pixelgrab_contracts::ipc::SaveCaptureAsRequest;
+    // Revision saves export the whole source, so the wire shape carries no crop.
     let req = SaveCaptureAsRequest {
         source_shelf_id: Some("editor-source".into()),
-        crop: PhysicalBounds::from_xywh(0, 0, 200, 100),
+        crop: None,
         annotations: vec![],
         suggested_filename: "capture.png".to_string(),
     };
     let json = serde_json::to_string(&req).expect("serialize");
-    assert!(json.contains("\"crop\""));
+    assert!(!json.contains("\"crop\""));
     assert!(json.contains("\"suggestedFilename\":\"capture.png\""));
     let parsed: SaveCaptureAsRequest = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(parsed.suggested_filename, "capture.png");
     assert_eq!(parsed.source_shelf_id.as_deref(), Some("editor-source"));
-    assert_eq!(parsed.crop.size, PhysicalSize::new(200, 100));
+    assert!(parsed.crop.is_none());
+
+    // A session save keeps its crop on the wire.
+    let session = SaveCaptureAsRequest {
+        source_shelf_id: None,
+        crop: Some(PhysicalBounds::from_xywh(0, 0, 200, 100)),
+        annotations: vec![],
+        suggested_filename: "capture.png".to_string(),
+    };
+    let parsed: SaveCaptureAsRequest =
+        serde_json::from_str(&serde_json::to_string(&session).expect("serialize"))
+            .expect("deserialize");
+    assert_eq!(
+        parsed.crop.map(|c| c.size),
+        Some(PhysicalSize::new(200, 100))
+    );
 }
 
 #[test]

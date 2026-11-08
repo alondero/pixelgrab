@@ -98,7 +98,7 @@
           onclick={() => selectTool(tool.id)}
         >
           <span class="glyph" aria-hidden="true">{tool.glyph}</span>
-          <span class="kbd" aria-hidden="true">{tool.label}</span>
+          <span class="kbd" aria-hidden="true">{tool.key}</span>
         </button>
       {/each}
     </div>

@@ -240,7 +240,7 @@
       </div>
     </div>
   {:else}
-    <div class="placeholder" role="status">Preparing screenshot? Press Esc to cancel.</div>
+    <div class="placeholder" role="status">Preparing screenshot… Press Esc to cancel.</div>
   {/if}
   {#if selection}
     <footer class="footer" data-testid="selection">

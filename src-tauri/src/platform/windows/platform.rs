@@ -96,6 +96,10 @@ impl PixelGrabPlatform for WindowsPlatform {
         self.inner.engine.invalidate_layout();
     }
 
+    fn set_cache_root(&self, root: std::path::PathBuf) {
+        WindowsPlatform::set_cache_root(self, root);
+    }
+
     fn release_capture(&self) {
         self.inner.engine.clear();
     }

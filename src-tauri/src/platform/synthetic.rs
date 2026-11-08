@@ -156,6 +156,10 @@ impl Default for SyntheticPlatform {
 }
 
 impl PixelGrabPlatform for SyntheticPlatform {
+    fn set_cache_root(&self, root: PathBuf) {
+        SyntheticPlatform::set_cache_root(self, root);
+    }
+
     fn monitor_layout(&self) -> PlatformResult<MonitorLayout> {
         // The synthetic adapter keeps the layout in-memory; the topology
         // flag is purely a contract signal. Drain it on read so the next

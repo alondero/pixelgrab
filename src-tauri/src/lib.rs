@@ -359,7 +359,11 @@ pub fn run() {
             // a failed recovery is logged but does not abort startup
             // so the user can still open a capture.
             let cache_root = default_cache_root();
-            if let Err(err) = app_state.cache().set_cache_root(Some(cache_root.clone())) {
+            if let Err(err) = attach_cache_root(
+                app_state.platform().as_ref(),
+                &app_state.cache(),
+                cache_root.clone(),
+            ) {
                 // `CacheError::BadRoot` already carries the cache root
                 // path in its `Display` payload, so appending the path
                 // a second time here would log it twice. The cache root
@@ -664,6 +668,21 @@ fn handle_run_event(app: &AppHandle<tauri::Wry>, event: RunEvent) {
             }
         }
     }
+}
+
+/// Point the metadata cache and the capture platform at one cache root
+/// during startup (issue #63). The platform only writes freeze frames
+/// under `<root>/frames` once it knows the root, so both must be set
+/// together; setting only the cache left every production capture on
+/// the inline base64 fallback.
+pub fn attach_cache_root(
+    platform: &dyn platform::PixelGrabPlatform,
+    cache: &cache::Cache,
+    root: PathBuf,
+) -> pixelgrab_contracts::PlatformResult<()> {
+    cache.set_cache_root(Some(root.clone()))?;
+    platform.set_cache_root(root);
+    Ok(())
 }
 
 /// Resolve the default on-disk cache root for the current platform.

@@ -30,6 +30,30 @@ fn synthetic_capture_without_root_falls_back_to_data_url() {
 }
 
 #[test]
+fn startup_attach_routes_capture_frames_to_asset_files() {
+    // Regression: production startup set only the metadata cache root, so
+    // the capture platform never wrote frame files and every production
+    // capture shipped a multi-megabyte base64 data URL instead.
+    let fs = IsolatedFilesystem::new("startup-attach").expect("fs");
+    let platform: Arc<dyn PixelGrabPlatform> = Arc::new(SyntheticPlatform::new());
+    let cache = pixelgrab_lib::cache::Cache::new();
+    pixelgrab_lib::attach_cache_root(platform.as_ref(), &cache, fs.root().to_path_buf())
+        .expect("attach");
+
+    let request = pixelgrab_contracts::capture::CaptureRequest {
+        format: pixelgrab_contracts::capture::CaptureFormat::VirtualDesktop,
+        monitor_id: None,
+        region: None,
+    };
+    let resolution = platform.capture(&request).expect("capture");
+    assert!(
+        !resolution.asset_url.starts_with("data:"),
+        "startup must hand the platform the cache root so frames go to files"
+    );
+    assert!(PathBuf::from(&resolution.asset_url).starts_with(fs.root()));
+}
+
+#[test]
 fn synthetic_capture_with_root_returns_local_asset_path() {
     // Issue #63: with a configured cache root the freeze frame is
     // persisted once and the resolution carries its file path — the
