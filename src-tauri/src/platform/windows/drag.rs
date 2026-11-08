@@ -210,6 +210,15 @@ extern "system" {
     fn RegisterClipboardFormatW(lpszformat: LPCWSTR) -> UINT;
 }
 
+#[cfg(test)]
+#[link(name = "shell32")]
+extern "system" {
+    /// Reads a path out of a `DROPFILES` block. `hdrop` is the `HGLOBAL`
+    /// handle itself; `ifile` is either a zero-based index or `0xFFFFFFFF`
+    /// to ask for the number of files.
+    fn DragQueryFileW(hdrop: HGLOBAL, ifile: UINT, lpszfile: *mut u16, cch: UINT) -> UINT;
+}
+
 #[link(name = "ole32")]
 extern "system" {
     fn OleInitialize(pvreserved: *mut c_void) -> HRESULT;
@@ -342,11 +351,12 @@ fn encode_hdrop(path: &PathBuf) -> Vec<u8> {
     // DROPFILES.pFiles = 20 (right after the header).
     header[0..4].copy_from_slice(&20u32.to_le_bytes());
     // DROPFILES layout: pFiles (0..4), pt (4..12), fNC (12..16),
-    // fWide (16..20). `fNC` stays zero because this is a real file drop,
-    // not an Explorer cut/copy of 8.3 names. `fWide` signals that the list
-    // below is UTF-16LE; writing it at offset 12 set `fNC` instead and left
-    // the list advertised as ANSI, so targets decoded the UTF-16 bytes as
-    // single-byte text and saw a NUL between every path character.
+    // fWide (16..20). `pt` is left at (0,0) in client-area coordinates, so
+    // `fNC` (which selects screen-space non-client coordinates when set)
+    // stays zero. `fWide` signals that the list below is UTF-16LE; writing
+    // it at offset 12 set `fNC` instead and left the list advertised as
+    // ANSI, so targets decoded the UTF-16 bytes as single-byte text and saw
+    // a NUL between every path character.
     header[16..20].copy_from_slice(&1u32.to_le_bytes());
     let mut out = Vec::with_capacity(header.len() + path_bytes.len() + 2);
     out.extend_from_slice(&header);
@@ -1121,31 +1131,6 @@ mod tests {
         );
     }
 
-    /// Mirror `DragQueryFileW`: read the `DROPFILES` header and decode the
-    /// list at `pFiles` according to the `fWide` flag. A target sees a single
-    /// string for the first (only) file.
-    fn decode_hdrop_first_path(bytes: &[u8]) -> String {
-        assert!(bytes.len() >= 20, "DROPFILES header is truncated");
-        let p_files = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-        let f_wide = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) != 0;
-        let list = &bytes[p_files..];
-        if f_wide {
-            let units: Vec<u16> = list
-                .chunks_exact(2)
-                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                .take_while(|unit| *unit != 0)
-                .collect();
-            String::from_utf16(&units).expect("wide file list is valid UTF-16")
-        } else {
-            // ANSI list: single-byte characters up to the first null.
-            let end = list
-                .iter()
-                .position(|byte| *byte == 0)
-                .unwrap_or(list.len());
-            list[..end].iter().map(|byte| *byte as char).collect()
-        }
-    }
-
     #[test]
     fn encode_hdrop_writes_pfiles_offset() {
         let path = PathBuf::from("C:\\cache\\cap.png");
@@ -1154,31 +1139,57 @@ mod tests {
         // + trailing double-null (2).
         let expected_path_bytes = (path.to_string_lossy().len() + 1) * 2;
         assert_eq!(bytes.len(), 20 + expected_path_bytes + 2);
-        // pFiles = 20, fNC = 0, fWide = 1.
+        // pFiles = 20; fNC = 0 because pt is client-space (0,0); fWide = 1.
         assert_eq!(&bytes[0..4], &20u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &0u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
     }
 
+    /// Copy the encoded payload into a moveable global block and ask the real
+    /// `DragQueryFileW` what it sees. This exercises the same decoder that
+    /// Explorer, Chromium, and Electron call rather than re-implementing the
+    /// `DROPFILES` header in the test.
     #[test]
-    fn hdrop_payload_decodes_to_the_original_wide_path() {
+    fn drag_query_file_w_reads_the_encoded_path() {
         let path = PathBuf::from(
-            "C:\\Users\\example\\AppData\\Local\\com.pixelgrab.app\\cache\\capture.png",
+            "C:\\Users\\example\\AppData\\Local\\com.pixelgrab.app\\cache\\capture-café.png",
         );
         let bytes = encode_hdrop(&path);
-        // A target that honors the advertised fWide flag must recover the
-        // exact path. Before the fix fWide sat at offset 12 (which is fNC),
-        // so targets decoded the UTF-16LE bytes as single-byte text and saw
-        // a NUL between every character.
-        assert_eq!(
-            decode_hdrop_first_path(&bytes),
-            path.to_string_lossy(),
-            "CF_HDROP must advertise a wide file list"
-        );
+        // A wide list ends with the path's NUL plus the list terminator.
         assert!(
-            !decode_hdrop_first_path(&bytes).contains('\0'),
-            "decoded path must not interleave NULs"
+            bytes.ends_with(&[0, 0, 0, 0]),
+            "CF_HDROP must end with a wide double NUL"
         );
+        // SAFETY: `GlobalAlloc` is Win32 FFI; the byte count matches the
+        // source slice and the returned handle is freed at the end of the
+        // test.
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
+        assert!(!handle.is_null(), "GlobalAlloc failed");
+        // SAFETY: `handle` was just allocated above and is not null.
+        let ptr = unsafe { GlobalLock(handle) };
+        assert!(!ptr.is_null(), "GlobalLock failed");
+        // SAFETY: the locked region is `bytes.len()` bytes and the source
+        // and destination do not overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len());
+            let _ = GlobalUnlock(handle);
+        }
+        // SAFETY: `handle` is a valid DROPFILES block; a null buffer with
+        // `cch` 0 asks `DragQueryFileW` for the file count.
+        let count = unsafe { DragQueryFileW(handle, 0xFFFF_FFFF, std::ptr::null_mut(), 0) };
+        assert_eq!(count, 1, "CF_HDROP must list exactly one file");
+        let expected: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+        let mut buffer = vec![0u16; expected.len() + 1];
+        // SAFETY: `buffer` is writable for `buffer.len()` UTF-16 units.
+        let written =
+            unsafe { DragQueryFileW(handle, 0, buffer.as_mut_ptr(), buffer.len() as UINT) };
+        // SAFETY: `handle` owns the only allocation created above; the query
+        // is complete and `buffer` holds its own copy.
+        unsafe {
+            let _ = GlobalFree(handle);
+        }
+        assert_eq!(written as usize, expected.len());
+        assert_eq!(&buffer[..written as usize], expected.as_slice());
     }
 
     #[test]
