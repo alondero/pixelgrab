@@ -74,7 +74,10 @@ const CF_UNICODETEXT: u16 = 13;
 /// TYMED bits.
 const TYMED_HGLOBAL: u32 = 0x01;
 /// GMEM flags.
-const GMEM_MOVEABLE: UINT = 0x0040;
+/// `GMEM_MOVEABLE` is `0x0002`. `0x0040` is `GMEM_ZEROINIT`, which allocates
+/// fixed memory; the drag pipeline needs a movable block so the STGMEDIUM
+/// handle semantics match what OLE consumers expect.
+const GMEM_MOVEABLE: UINT = 0x0002;
 
 /// HRESULT sentinels. The hex values above `0x7FFFFFFF` are interpreted
 /// as negative `i32` values when the platform returns them.
@@ -1090,6 +1093,18 @@ pub fn start_drag(request: &DragRequest) -> PlatformResult<DragResult> {
 mod tests {
     use super::*;
 
+    /// Owns a `GlobalAlloc` block so a failed assertion still frees it.
+    struct GlobalBlock(HGLOBAL);
+
+    impl Drop for GlobalBlock {
+        fn drop(&mut self) {
+            // SAFETY: the guard owns the only reference to this allocation.
+            unsafe {
+                let _ = GlobalFree(self.0);
+            }
+        }
+    }
+
     fn sample_request() -> DragRequest {
         DragRequest {
             capture_id: "capture-1".into(),
@@ -1146,9 +1161,8 @@ mod tests {
     }
 
     /// Copy the encoded payload into a moveable global block and ask the real
-    /// `DragQueryFileW` what it sees. This exercises the same decoder that
-    /// Explorer, Chromium, and Electron call rather than re-implementing the
-    /// `DROPFILES` header in the test.
+    /// `DragQueryFileW` what it sees. This exercises the Win32 decoder instead
+    /// of re-implementing the `DROPFILES` header in the test.
     #[test]
     fn drag_query_file_w_reads_the_encoded_path() {
         let path = PathBuf::from(
@@ -1161,33 +1175,35 @@ mod tests {
             "CF_HDROP must end with a wide double NUL"
         );
         // SAFETY: `GlobalAlloc` is Win32 FFI; the byte count matches the
-        // source slice and the returned handle is freed at the end of the
-        // test.
+        // source slice and the returned handle is owned by `GlobalBlock`,
+        // which frees it on every path including assertion failures.
         let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
         assert!(!handle.is_null(), "GlobalAlloc failed");
-        // SAFETY: `handle` was just allocated above and is not null.
-        let ptr = unsafe { GlobalLock(handle) };
+        let block = GlobalBlock(handle);
+        // SAFETY: `block.0` was just allocated above and is not null.
+        let ptr = unsafe { GlobalLock(block.0) };
         assert!(!ptr.is_null(), "GlobalLock failed");
+        // A moveable block returns a data pointer distinct from its handle;
+        // fixed memory returns the handle itself. This guards the GMEM flag.
+        assert_ne!(
+            ptr, block.0,
+            "GlobalAlloc(GMEM_MOVEABLE) must return a moveable block"
+        );
         // SAFETY: the locked region is `bytes.len()` bytes and the source
         // and destination do not overlap.
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len());
-            let _ = GlobalUnlock(handle);
+            let _ = GlobalUnlock(block.0);
         }
-        // SAFETY: `handle` is a valid DROPFILES block; a null buffer with
+        // SAFETY: `block.0` is a valid DROPFILES block; a null buffer with
         // `cch` 0 asks `DragQueryFileW` for the file count.
-        let count = unsafe { DragQueryFileW(handle, 0xFFFF_FFFF, std::ptr::null_mut(), 0) };
+        let count = unsafe { DragQueryFileW(block.0, 0xFFFF_FFFF, std::ptr::null_mut(), 0) };
         assert_eq!(count, 1, "CF_HDROP must list exactly one file");
         let expected: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
         let mut buffer = vec![0u16; expected.len() + 1];
         // SAFETY: `buffer` is writable for `buffer.len()` UTF-16 units.
         let written =
-            unsafe { DragQueryFileW(handle, 0, buffer.as_mut_ptr(), buffer.len() as UINT) };
-        // SAFETY: `handle` owns the only allocation created above; the query
-        // is complete and `buffer` holds its own copy.
-        unsafe {
-            let _ = GlobalFree(handle);
-        }
+            unsafe { DragQueryFileW(block.0, 0, buffer.as_mut_ptr(), buffer.len() as UINT) };
         assert_eq!(written as usize, expected.len());
         assert_eq!(&buffer[..written as usize], expected.as_slice());
     }
