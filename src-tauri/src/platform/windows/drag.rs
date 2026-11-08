@@ -206,6 +206,11 @@ extern "system" {
     fn GlobalLock(h: HGLOBAL) -> *mut c_void;
     fn GlobalUnlock(h: HGLOBAL) -> BOOL;
     fn GlobalFree(h: HGLOBAL) -> HGLOBAL;
+    /// Reports the block flags in the high byte and the lock count in the
+    /// low byte. Used by the drag transport test to prove the payload is
+    /// handed over unlocked.
+    #[cfg(test)]
+    fn GlobalFlags(hmem: HGLOBAL) -> UINT;
 }
 
 #[link(name = "user32")]
@@ -1187,6 +1192,13 @@ mod tests {
         assert_eq!(hr, S_OK, "medium_with_hglobal must succeed");
         assert_eq!(medium.tymed, TYMED_HGLOBAL);
         assert!(medium.pUnkForRelease.is_null());
+        // SAFETY: `medium_with_hglobal` set `u.hGlobal` on success; a valid
+        // block reports its lock count in the low byte of `GlobalFlags`.
+        assert_eq!(
+            unsafe { GlobalFlags(medium.u.hGlobal) } & 0xFF,
+            0,
+            "medium_with_hglobal must return an unlocked block"
+        );
         // SAFETY: `medium_with_hglobal` set `u.hGlobal` on success, and the
         // guard becomes the sole owner so assertion failures still free it.
         let block = GlobalBlock(unsafe { medium.u.hGlobal });
