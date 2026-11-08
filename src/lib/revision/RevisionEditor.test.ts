@@ -1,10 +1,13 @@
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { render, screen, waitFor, fireEvent } from "@testing-library/svelte";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import RevisionEditor from "./RevisionEditor.svelte";
 import type { RevisionContext } from "$lib/ipc/types";
 vi.mock("$lib/overlay/KonvaStage.svelte", () => ({ default: () => {} }));
 
 vi.mock("$lib/ipc/commands", () => ({
+  saveCaptureAs: vi
+    .fn()
+    .mockResolvedValue({ status: "ok", data: { path: "capture.png", pngBytes: 10 } }),
   updateRevision: vi.fn().mockResolvedValue({
     status: "ok",
     data: { revision: {} },
@@ -27,7 +30,7 @@ vi.mock("$lib/ipc/commands", () => ({
   }),
 }));
 
-import { updateRevision, commitRevision, cancelRevision } from "$lib/ipc/commands";
+import { updateRevision, commitRevision, cancelRevision, saveCaptureAs } from "$lib/ipc/commands";
 
 function makeContext(): RevisionContext {
   return {
@@ -78,6 +81,22 @@ beforeEach(() => {
 });
 
 describe("RevisionEditor", () => {
+  it("saves the editable source without committing or closing the editor", async () => {
+    const onClosed = vi.fn();
+    render(RevisionEditor, { scene: makeContext(), onClosed });
+    await fireEvent.click(screen.getByRole("button", { name: /Save as/ }));
+    await waitFor(() =>
+      expect(saveCaptureAs).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceShelfId: "shelf-1", annotations: [] }),
+      ),
+    );
+    // Revision saves export the whole source; a crop would be rejected by the backend.
+    const [request] = vi.mocked(saveCaptureAs).mock.calls[0];
+    expect(request).not.toHaveProperty("crop");
+    expect(await screen.findByRole("status")).toHaveTextContent("Screenshot saved");
+    expect(commitRevision).not.toHaveBeenCalled();
+    expect(onClosed).not.toHaveBeenCalled();
+  });
   it("renders the reopened scene with the restored title and badge count", () => {
     render(RevisionEditor, { scene: makeContext() });
     const title = screen.getByTestId("revision-title") as HTMLInputElement;

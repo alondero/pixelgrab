@@ -30,7 +30,8 @@
     "ci:check": "pnpm agents:check && pnpm format:check && pnpm lint && pnpm check && pnpm test",
     "ci:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --features synthetic -- -D warnings && cargo test --workspace --features synthetic",
     "ci:all": "pnpm ci:rust && pnpm ci:check",
-    "licenses:check": "node scripts/check-licenses.mjs"
+    "licenses:check": "node scripts/check-licenses.mjs",
+    "test:native": "node tests/native/acceptance.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
@@ -55,6 +56,7 @@
     "eslint-plugin-svelte": "2.46.1",
     "globals": "15.14.0",
     "jsdom": "25.0.1",
+    "playwright": "1.65.0",
     "prettier": "3.4.2",
     "prettier-plugin-svelte": "3.3.2",
     "svelte": "5.55.7",

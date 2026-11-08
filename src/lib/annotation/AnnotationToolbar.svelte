@@ -93,6 +93,7 @@
           class:active={annotationStore.tool === tool.id}
           aria-pressed={annotationStore.tool === tool.id}
           aria-label="{tool.label} (shortcut {tool.key})"
+          title="{tool.label} ({tool.key})"
           data-testid="tool-{tool.id}"
           onclick={() => selectTool(tool.id)}
         >
@@ -210,6 +211,8 @@
   }
   .group {
     display: flex;
+    flex-wrap: wrap;
+    max-width: 100%;
     align-items: center;
     gap: 0.25rem;
   }

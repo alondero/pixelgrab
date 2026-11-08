@@ -24,8 +24,6 @@
   // The native window owns placement; this component fills it and
   // applies the registry's zoom-derived size and opacity to its
   // contents.
-  let widthPx = $derived(view.transform.windowSize.width);
-  let heightPx = $derived(view.transform.windowSize.height);
   let opacityPct = $derived(Math.round(view.transform.opacity * 100));
   let assetUrl = $derived(view.source.pngPath ? convertFileSrc(view.source.pngPath) : "");
 
@@ -127,8 +125,6 @@
   bind:this={containerEl}
   class="pin-window"
   style="
-    width: {widthPx}px;
-    height: {heightPx}px;
     opacity: {view.transform.opacity};
   "
   onpointerdown={onPointerDown}
@@ -169,8 +165,8 @@
 <style>
   .pin-window {
     position: absolute;
-    top: 0;
-    left: 0;
+    inset: 0;
+    box-sizing: border-box;
     border: 1px solid rgba(0, 0, 0, 0.4);
     background: rgba(0, 0, 0, 0.02);
     box-shadow: 0 6px 12px rgba(0, 0, 0, 0.25);

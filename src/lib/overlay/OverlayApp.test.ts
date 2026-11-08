@@ -85,6 +85,14 @@ describe("OverlayApp", () => {
     });
   });
 
+  it("shows a readable preparing message before the first capture arrives", async () => {
+    // Review finding: the placeholder once read "Preparing screenshot? …",
+    // which asks the user a question instead of describing the state.
+    render(OverlayApp);
+    const status = await screen.findByRole("status");
+    expect(status.textContent?.trim()).toBe("Preparing screenshot… Press Esc to cancel.");
+  });
+
   it("reads the session snapshot on mount without driving the state machine", async () => {
     render(OverlayApp);
     await waitFor(() => {

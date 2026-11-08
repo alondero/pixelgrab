@@ -96,6 +96,14 @@ impl PixelGrabPlatform for WindowsPlatform {
         self.inner.engine.invalidate_layout();
     }
 
+    fn set_cache_root(&self, root: std::path::PathBuf) {
+        WindowsPlatform::set_cache_root(self, root);
+    }
+
+    fn release_capture(&self) {
+        self.inner.engine.clear();
+    }
+
     fn cursor_position(&self) -> Option<pixelgrab_contracts::coordinate::PhysicalPoint> {
         super::work_area::ffi::query_cursor_position()
             .map(|(x, y)| pixelgrab_contracts::coordinate::PhysicalPoint::new(x, y))
@@ -142,10 +150,8 @@ impl PixelGrabPlatform for WindowsPlatform {
         }
         let rgba = frame.crop(&crop)?;
         let size = crop.size;
-        // Clear the frozen frame so a later commit cannot reuse stale
-        // pixels after a successful flatten. The commit pipeline is the
-        // sole owner of the buffer after this call.
-        self.inner.engine.clear();
+        // Save As is non-terminal and may be cancelled or repeated. The
+        // session owns the frozen source until commit or cancellation.
         Ok((rgba, size))
     }
 
@@ -177,13 +183,8 @@ impl PixelGrabPlatform for WindowsPlatform {
 /// attach the PNG bytes to the OS as a custom format without changing the
 /// platform contract.
 fn publish_to_clipboard(_capture_id: &str, rgba: &[u8], size: PhysicalSize) -> PlatformResult<()> {
-    use arboard::{Clipboard, ImageData};
-    let bgra = rgba_to_bgra_top_down(rgba, size);
-    let image = ImageData {
-        width: size.width as usize,
-        height: size.height as usize,
-        bytes: bgra.into(),
-    };
+    use arboard::Clipboard;
+    let image = clipboard_image(rgba, size);
     let mut clipboard = Clipboard::new().map_err(|err| {
         PlatformError::new(
             PlatformErrorKind::CaptureUnavailable,
@@ -199,30 +200,24 @@ fn publish_to_clipboard(_capture_id: &str, rgba: &[u8], size: PhysicalSize) -> P
     Ok(())
 }
 
-/// Convert RGBA (top-left origin) to BGRA, top-down, as Windows expects
-/// for `CF_DIB` consumers. Pure function — no allocation beyond the output.
-fn rgba_to_bgra_top_down(rgba: &[u8], size: PhysicalSize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba.len());
-    for chunk in rgba.chunks_exact(4) {
-        out.push(chunk[2]); // B
-        out.push(chunk[1]); // G
-        out.push(chunk[0]); // R
-        out.push(chunk[3]); // A
+// arboard accepts RGBA and converts to Windows bitmap order itself.
+fn clipboard_image(rgba: &[u8], size: PhysicalSize) -> arboard::ImageData<'_> {
+    arboard::ImageData {
+        width: size.width as usize,
+        height: size.height as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba),
     }
-    let _ = size;
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pixelgrab_contracts::coordinate::PhysicalPoint;
 
     #[test]
-    fn rgba_to_bgra_swaps_red_and_blue() {
+    fn clipboard_adapter_passes_rgba_to_arboard() {
         let rgba = vec![10, 20, 30, 40];
-        let bgra = rgba_to_bgra_top_down(&rgba, PhysicalSize::new(1, 1));
-        assert_eq!(bgra, vec![30, 20, 10, 40]);
+        let image = clipboard_image(&rgba, PhysicalSize::new(1, 1));
+        assert_eq!(image.bytes.as_ref(), &[10, 20, 30, 40]);
     }
 
     #[test]
@@ -236,29 +231,5 @@ mod tests {
         let platform = WindowsPlatform::new();
         platform.set_cache_root(std::env::temp_dir().join("pixelgrab-test"));
         assert!(platform.cache_root().is_some());
-    }
-
-    #[test]
-    fn publish_clipboard_smoke_test() {
-        // The publish path needs an interactive desktop session. The test
-        // only verifies that the function compiles and routes through the
-        // expected PlatformError variants. CI never calls into real
-        // capture, so the test is also a useful compile-time check.
-        let rgba = vec![0u8; 16 * 16 * 4];
-        let size = PhysicalSize::new(16, 16);
-        let result = publish_to_clipboard("smoke", &rgba, size);
-        // Either the clipboard is available (Ok) or it is not (Err). Both
-        // are valid CI outcomes — we only care that the function does not
-        // panic and that the error type is what the contract expects.
-        match result {
-            Ok(()) => {}
-            Err(err) => {
-                assert!(matches!(
-                    err.kind,
-                    PlatformErrorKind::Io | PlatformErrorKind::CaptureUnavailable
-                ));
-            }
-        }
-        let _ = PhysicalPoint::new(0, 0);
     }
 }

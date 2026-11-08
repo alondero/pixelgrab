@@ -656,14 +656,64 @@ pub struct ClearCacheResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveCaptureAsRequest {
-    /// Final physical crop.
-    pub crop: PhysicalBounds,
+    /// Active revision source, when saving from the screenshot editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_shelf_id: Option<String>,
+    /// Final physical crop. Required for a capture-session save; must be
+    /// absent for a revision save, which always exports the whole source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<PhysicalBounds>,
     /// Annotations to flatten onto the frozen crop before encoding.
     /// Empty list yields the bare framebuffer (no text / blur / arrows).
     #[serde(default)]
     pub annotations: Vec<Annotation>,
     /// Default filename suggested in the dialog (e.g. `capture.png`).
     pub suggested_filename: String,
+}
+
+/// Where a save-as request takes its pixels from. Built by
+/// [`SaveCaptureAsRequest::source`], which is the only place the
+/// shelf-id / crop combination rules live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveAsSource {
+    /// The in-progress capture session, cropped to `crop`.
+    Session {
+        /// Physical crop to export.
+        crop: PhysicalBounds,
+    },
+    /// The full image of a revision open in the editor.
+    Revision {
+        /// Shelf id of the revision; the id is copied from the request.
+        shelf_id: String,
+    },
+}
+
+impl SaveCaptureAsRequest {
+    /// Resolve which pixels this request exports, rejecting combinations
+    /// that would otherwise be silently ignored (a crop sent with a
+    /// revision, or a session save with no usable crop).
+    pub fn source(&self) -> Result<SaveAsSource, PlatformError> {
+        use crate::error::PlatformErrorKind;
+        match (&self.source_shelf_id, self.crop) {
+            (Some(shelf_id), None) => Ok(SaveAsSource::Revision {
+                shelf_id: shelf_id.clone(),
+            }),
+            (Some(_), Some(_)) => Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                "crop is not supported for revision saves",
+            )),
+            (None, Some(crop)) => {
+                crop.validate().map_err(|_| {
+                    PlatformError::new(PlatformErrorKind::InvalidPayload, "empty save-as bounds")
+                })?;
+                Ok(SaveAsSource::Session { crop })
+            }
+            (None, None) => Err(PlatformError::new(
+                PlatformErrorKind::InvalidPayload,
+                "save-as needs a crop when no revision is open",
+            )),
+        }
+    }
 }
 
 /// Wire shape for the `save_capture_as` IPC response. Mirrors the
@@ -809,4 +859,65 @@ pub struct UpdateRevisionResult {
     /// The persisted revision metadata (sanitized so the
     /// schema_version is the current one).
     pub revision: RevisionMetadata,
+}
+
+#[cfg(test)]
+mod save_as_source_tests {
+    use super::*;
+    use crate::error::PlatformErrorKind;
+
+    fn request(shelf: Option<&str>, crop: Option<PhysicalBounds>) -> SaveCaptureAsRequest {
+        SaveCaptureAsRequest {
+            source_shelf_id: shelf.map(str::to_string),
+            crop,
+            annotations: vec![],
+            suggested_filename: "capture.png".to_string(),
+        }
+    }
+
+    #[test]
+    fn revision_save_takes_the_whole_source_and_no_crop() {
+        let source = request(Some("shelf-1"), None)
+            .source()
+            .expect("revision source");
+        assert_eq!(
+            source,
+            SaveAsSource::Revision {
+                shelf_id: "shelf-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn revision_save_rejects_a_crop_it_would_silently_ignore() {
+        let crop = PhysicalBounds::from_xywh(0, 0, 10, 10);
+        let err = request(Some("shelf-1"), Some(crop))
+            .source()
+            .expect_err("crop must not be accepted for revision saves");
+        assert_eq!(err.kind, PlatformErrorKind::InvalidPayload);
+    }
+
+    #[test]
+    fn session_save_uses_its_crop() {
+        let crop = PhysicalBounds::from_xywh(5, 6, 20, 30);
+        let source = request(None, Some(crop)).source().expect("session source");
+        assert_eq!(source, SaveAsSource::Session { crop });
+    }
+
+    #[test]
+    fn session_save_requires_a_crop() {
+        let err = request(None, None)
+            .source()
+            .expect_err("session saves need a crop");
+        assert_eq!(err.kind, PlatformErrorKind::InvalidPayload);
+    }
+
+    #[test]
+    fn session_save_rejects_an_empty_crop() {
+        let crop = PhysicalBounds::from_xywh(0, 0, 0, 10);
+        let err = request(None, Some(crop))
+            .source()
+            .expect_err("empty crop must be rejected");
+        assert_eq!(err.kind, PlatformErrorKind::InvalidPayload);
+    }
 }

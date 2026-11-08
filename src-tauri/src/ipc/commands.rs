@@ -15,7 +15,7 @@ use pixelgrab_contracts::{
         CommitRevisionIntent, CommitRevisionResult, DismissCacheEntryRequest,
         DismissCacheEntryResponse, HotkeyBindingsDto, HotkeyRegistryStatusDto, IpcResponse,
         OpenRevisionIntent, OpenRevisionResult, RequestCaptureIntent, RequestCommitIntent,
-        SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot,
+        SaveAsSource, SaveCaptureAsRequest, SaveCaptureAsResponse, SessionSnapshot, ShelfSnapshot,
         StartShelfDragIntent, StartShelfDragResult, UpdateCacheMetadataRequest,
         UpdateCachePolicyRequest, UpdateRevisionIntent, UpdateRevisionResult,
         UpdateShelfPreferencesRequest,
@@ -173,7 +173,16 @@ pub fn request_capture(
     payload: RequestCaptureIntent,
     handle: AppHandle,
 ) -> IpcResponse<CaptureResponse> {
-    IpcResponse::from_result(capture_native(&app, payload, &handle))
+    let result = capture_native(&app, payload, &handle);
+    if result.is_err() {
+        // This entrypoint is the companion's capture button. Restore it so
+        // its error and retry button do not disappear with the hidden window.
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+    IpcResponse::from_result(result)
 }
 
 /// Own capture, reveal, and immediate full-screen delivery in one native operation.
@@ -305,6 +314,9 @@ pub fn capture_native<R: Runtime>(
         }
     };
     if let Err(err) = reveal {
+        // Showing can succeed before focus/position fails. Always remove
+        // that surface before releasing its pixels and returning to Idle.
+        let _ = crate::overlay::hide(handle);
         let _ = app.session().cancel_session();
         sync_shelf_window(handle, &snapshot_with_position(app));
         if let Some(diag) = app.session().last_diagnostics() {
@@ -570,6 +582,44 @@ pub fn commit_revision(
     )
 }
 
+/// Read the immutable pixels used by both revision commit and Save As.
+fn revision_source_pixels(
+    app: &PixelGrabApp,
+    shelf_id: &str,
+) -> PlatformResult<(Vec<u8>, pixelgrab_contracts::PhysicalSize)> {
+    if !app.cache().has_editor_lock(shelf_id) {
+        return Err(PlatformError::new(
+            PlatformErrorKind::InvalidSessionState,
+            "revision_no_active_session",
+        ));
+    }
+    let source_entry = app.cache().entry(shelf_id).ok_or_else(|| {
+        PlatformError::new(
+            PlatformErrorKind::InvalidPayload,
+            format!("unknown shelf id: {}", shelf_id),
+        )
+    })?;
+    // Decode the source PNG so we can flatten the new annotations
+    // onto the original framebuffer. The flattened output is the
+    // new entry's PNG — the "single source of truth" invariant
+    // from tracer-02 / tracer-04.
+    let source_path = app
+        .cache()
+        .revision_source(shelf_id)
+        .filter(|_| {
+            app.cache()
+                .read_revision(shelf_id)
+                .is_some_and(|scene| scene.schema_version == REVISION_SCHEMA_VERSION)
+        })
+        .unwrap_or_else(|| source_entry.png_path.clone());
+    let png_bytes = std::fs::read(&source_path).map_err(|_err| {
+        // Privacy: categorical kind only.
+        PlatformError::new(PlatformErrorKind::Io, "revision_read_source_png_failed")
+    })?;
+    let (source_rgba, size) = decode_png_to_rgba(&png_bytes, source_entry.size)?;
+    Ok((source_rgba, size))
+}
+
 /// Commit an editor session and restore its retryable state after a failed delivery.
 pub fn commit_revision_native<R: Runtime>(
     app: &PixelGrabApp,
@@ -589,6 +639,9 @@ pub fn commit_revision_native<R: Runtime>(
             return Err(err);
         }
     };
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.hide();
+    }
     Ok(outcome)
 }
 
@@ -613,27 +666,10 @@ fn commit_revision_inner<R: Runtime>(
     let source_entry = app.cache().entry(&payload.shelf_id).ok_or_else(|| {
         PlatformError::new(
             PlatformErrorKind::InvalidPayload,
-            format!("unknown shelf id: {}", payload.shelf_id),
+            "revision_source_unavailable",
         )
     })?;
-    // Decode the source PNG so we can flatten the new annotations
-    // onto the original framebuffer. The flattened output is the
-    // new entry's PNG — the "single source of truth" invariant
-    // from tracer-02 / tracer-04.
-    let source_path = app
-        .cache()
-        .revision_source(&payload.shelf_id)
-        .filter(|_| {
-            app.cache()
-                .read_revision(&payload.shelf_id)
-                .is_some_and(|scene| scene.schema_version == REVISION_SCHEMA_VERSION)
-        })
-        .unwrap_or_else(|| source_entry.png_path.clone());
-    let png_bytes = std::fs::read(&source_path).map_err(|_err| {
-        // Privacy: categorical kind only.
-        PlatformError::new(PlatformErrorKind::Io, "revision_read_source_png_failed")
-    })?;
-    let (source_rgba, size) = decode_png_to_rgba(&png_bytes, source_entry.size)?;
+    let (source_rgba, size) = revision_source_pixels(app, &payload.shelf_id)?;
     let expected_len = (size.width as usize) * (size.height as usize) * 4;
     if source_rgba.len() != expected_len {
         return Err(PlatformError::new(
@@ -775,8 +811,15 @@ fn decode_png_to_rgba(
 pub fn cancel_revision(
     app: AppState<'_>,
     payload: CancelRevisionIntent,
+    handle: AppHandle,
 ) -> IpcResponse<CancelRevisionResult> {
-    IpcResponse::from_result(cancel_revision_native(&app, &payload.shelf_id))
+    let result = cancel_revision_native(&app, &payload.shelf_id);
+    if result.is_ok() {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.hide();
+        }
+    }
+    IpcResponse::from_result(result)
 }
 
 /// Close an editor session without changing any source assets.
@@ -943,6 +986,7 @@ pub async fn save_shelf_card_as(
     app: AppState<'_>,
     payload: SaveShelfCardAsRequest,
     handle: AppHandle,
+    window: tauri::WebviewWindow,
 ) -> Result<IpcResponse<SaveShelfCardAsResponse>, PlatformError> {
     use tauri_plugin_dialog::DialogExt;
     let png_path = match app.shelf_queue().png_path(&payload.shelf_id) {
@@ -977,6 +1021,7 @@ pub async fn save_shelf_card_as(
         handle
             .dialog()
             .file()
+            .set_parent(&window)
             .add_filter("PNG image", &["png"])
             .set_file_name(&suggested)
             .blocking_save_file()
@@ -1030,26 +1075,28 @@ pub async fn save_capture_as(
     app: AppState<'_>,
     payload: SaveCaptureAsRequest,
     handle: AppHandle,
+    window: tauri::WebviewWindow,
 ) -> Result<IpcResponse<SaveCaptureAsResponse>, PlatformError> {
     use tauri_plugin_dialog::DialogExt;
-    // 1. Validate crop + look up the active capture.
-    payload.crop.validate().map_err(|_| {
-        PlatformError::new(PlatformErrorKind::InvalidPayload, "empty save-as bounds")
-    })?;
-    let capture_id = app
-        .session()
-        .last_capture()
-        .map(|c| c.capture_id)
-        .ok_or_else(|| {
-            PlatformError::new(
-                PlatformErrorKind::InvalidSessionState,
-                "no active capture to save",
-            )
-        })?;
-    // 2. Flatten the crop (immutable source) + flatten annotations.
-    //    Blur samples from `src` so the leak guard holds for this
-    //    path as well as the commit path.
-    let (rgba, size) = app.platform().flatten_crop(&capture_id, payload.crop)?;
+    // 1. Resolve the source. The contract rejects a crop sent with a
+    //    revision (it would be silently ignored) and a session save
+    //    without a usable crop.
+    let (rgba, size) = match payload.source()? {
+        SaveAsSource::Revision { shelf_id } => revision_source_pixels(&app, &shelf_id)?,
+        SaveAsSource::Session { crop } => {
+            let capture_id = app
+                .session()
+                .last_capture()
+                .map(|c| c.capture_id)
+                .ok_or_else(|| {
+                    PlatformError::new(
+                        PlatformErrorKind::InvalidSessionState,
+                        "no active capture to save",
+                    )
+                })?;
+            app.platform().flatten_crop(&capture_id, crop)?
+        }
+    };
     let flat = pixelgrab_contracts::flatten_annotations(&rgba, size, &payload.annotations);
     // 3. Encode the flattened RGBA as PNG. The encoder is the same
     //    `png` crate the synthetic platform uses for `write_png`.
@@ -1103,6 +1150,7 @@ pub async fn save_capture_as(
         handle
             .dialog()
             .file()
+            .set_parent(&window)
             .add_filter("PNG image", &["png"])
             .set_file_name(&suggested)
             .blocking_save_file()

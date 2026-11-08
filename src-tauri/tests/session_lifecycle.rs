@@ -11,6 +11,25 @@ use pixelgrab_lib::platform::PixelGrabPlatform;
 use pixelgrab_lib::SessionOrchestrator;
 
 #[test]
+fn failed_capture_returns_to_idle_and_can_retry() {
+    let platform = Arc::new(SyntheticPlatform::new());
+    let monitor = platform.monitor_layout().unwrap().monitors[0].id.clone();
+    platform.set_failing_monitors(&[&monitor]);
+    let session = SessionOrchestrator::new(platform.clone());
+    let request = CaptureRequest {
+        format: CaptureFormat::VirtualDesktop,
+        monitor_id: None,
+        region: None,
+    };
+    assert!(session.request_capture(&request).is_err());
+    assert_eq!(session.current_state(), SessionState::Idle);
+    assert!(session.last_capture().is_none());
+    platform.set_failing_monitors(&[]);
+    session.request_capture(&request).expect("retry succeeds");
+    assert_eq!(session.current_state(), SessionState::Ready);
+}
+
+#[test]
 fn capture_session_walks_full_lifecycle() {
     let platform: Arc<dyn PixelGrabPlatform> = Arc::new(SyntheticPlatform::new());
     let session = SessionOrchestrator::new(platform);

@@ -350,12 +350,14 @@ describe("IPC type contract", () => {
 
   it("SaveCaptureAsRequest carries crop + annotations + suggested filename", () => {
     const req: import("./types").SaveCaptureAsRequest = {
+      sourceShelfId: "editor-source",
       crop: { origin: { x: 0, y: 0 }, size: { width: 200, height: 100 } },
       annotations: [],
       suggestedFilename: "capture.png",
     };
     const json = JSON.parse(JSON.stringify(req));
     expect(json.suggestedFilename).toBe("capture.png");
+    expect(json.sourceShelfId).toBe("editor-source");
     expect(json.crop.size.width).toBe(200);
     expect(json.annotations).toEqual([]);
   });
